@@ -1,0 +1,23 @@
+[package]
+name = "sitzfleisch-x"
+version = "0.9.1"
+description = "Sitzfleisch cross-platform (macOS + Windows)"
+authors = ["snooze26h"]
+edition = "2021"
+
+[lib]
+name = "sitzfleisch_x_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+sitzfleisch-core = { path = "../core" }
+tauri = { version = "2", features = ["tray-icon"] }
+tauri-plugin-notification = "2"
+tauri-plugin-single-instance = "2"
+tauri-plugin-autostart = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tauri-plugin-window-state = "2"
