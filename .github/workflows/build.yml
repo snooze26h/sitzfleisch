@@ -1,0 +1,110 @@
+name: build
+
+on:
+  workflow_dispatch:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-latest
+            target: universal-apple-darwin
+          - os: windows-latest
+            target: ""
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      # macOS 出通用二进制，Intel 和 Apple 芯片各一半，装哪台都能跑。
+      - name: Add Intel target
+        if: runner.os == 'macOS'
+        run: rustup target add x86_64-apple-darwin aarch64-apple-darwin
+
+      - uses: swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            src-tauri
+            core
+
+      - name: Install frontend dependencies
+        run: npm ci
+
+      - name: Rules engine tests
+        run: cargo test
+        working-directory: core
+
+      - name: Build app
+        run: npm run tauri build ${{ matrix.target && format('-- --target {0}', matrix.target) || '' }}
+        shell: bash
+
+      # 不能叫 dist/：那是 Vite 前端的输出目录，会把 index.html 一起当成发行物传上去。
+      - name: Collect artifacts
+        shell: bash
+        run: |
+          mkdir -p release-artifacts
+          find src-tauri/target -type f \( -name "*.dmg" -o -name "*-setup.exe" \) -exec cp {} release-artifacts/ \;
+          ls -lh release-artifacts
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: sitzfleisch-${{ runner.os }}
+          path: release-artifacts/*
+          if-no-files-found: error
+
+  release:
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: release-artifacts
+          merge-multiple: true
+
+      - run: ls -lh release-artifacts
+
+      - name: Publish release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: release-artifacts/*
+          draft: false
+          generate_release_notes: false
+          body: |
+            ## 装法
+
+            **macOS**：下载 `.dmg`，拖进「应用程序」。通用二进制，Intel 和 Apple 芯片都能跑。
+
+            > 这个 app **没有 Apple 开发者签名和公证**（那要每年 99 美元的开发者账号）。
+            > 首次打开 macOS 会拦，说「已损坏」或「无法验证开发者」。这不是真的损坏，
+            > 在「应用程序」里**右键点图标 → 打开 → 再点一次「打开」**就行；
+            > 或者在终端里跑一句：
+            >
+            > ```
+            > xattr -dr com.apple.quarantine /Applications/Sitzfleisch.app
+            > ```
+
+            **Windows**：下载 `-setup.exe` 运行。SmartScreen 可能拦一下，点「更多信息 → 仍要运行」。
+            **Windows 端从未在真机上验收过**，遇到问题请开 issue。
+
+            ## 数据在哪
+
+            只存在你自己电脑上，不联网、不上传。
+            macOS `~/Library/Application Support/com.snooze26h.sitzfleisch.x/state.json`，
+            Windows `%APPDATA%\com.snooze26h.sitzfleisch.x\state.json`。
+
+            ## 网站屏蔽需要管理员密码
+
+            学习日开始时把域名写进系统 hosts、收工时清掉，各要一次授权。不用这个功能就不会弹。

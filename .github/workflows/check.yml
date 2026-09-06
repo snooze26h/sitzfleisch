@@ -1,0 +1,60 @@
+name: check
+
+# 平时的 push 也要有检查：打包那个 workflow 只在 tag 和手动触发时跑，
+# 等到发版才发现 tsc 挂了就太晚了。
+on:
+  push:
+  pull_request:
+
+jobs:
+  check:
+    # 跑在 macOS 上：src-tauri 的测试要编译 tauri 本体，
+    # 在 Linux 上得先装一串 GTK/webkit 系统包，不值当。
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - uses: swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            core
+            src-tauri
+
+      - run: npm ci
+
+      - name: TypeScript
+        run: npx tsc --noEmit
+
+      - name: 死代码扫描
+        run: node scripts/check-dead-exports.mjs
+
+
+      - name: 快照乱序回归
+        run: node scripts/check-snapshot-order.mjs
+
+      - name: 短名规则与 Rust 对齐
+        run: node scripts/check-short-name.mjs
+
+      - name: 规则引擎测试
+        run: cargo test
+        working-directory: core
+
+      - name: 规则引擎 clippy
+        run: cargo clippy --all-targets -- -D warnings
+        working-directory: core
+
+      - name: 外壳测试
+        run: cargo test
+        working-directory: src-tauri
+
+      - name: 外壳 clippy
+        run: cargo clippy --all-targets -- -D warnings
+        working-directory: src-tauri
