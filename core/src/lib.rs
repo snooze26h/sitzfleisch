@@ -1291,7 +1291,26 @@ pub fn from_json(raw: &str) -> Result<State, String> {
     if schema < u64::from(SCHEMA_VERSION) {
         value["schema"] = serde_json::json!(SCHEMA_VERSION);
     }
-    serde_json::from_value(value).map_err(|e| format!("unreadable: {e}"))
+    let mut state: State = serde_json::from_value(value).map_err(|e| format!("unreadable: {e}"))?;
+    collapse_profiles(&mut state.preferences);
+    Ok(state)
+}
+
+/// 三档取消之后，老存档里还留着两三份计划，而界面只认第一份——那多半不是用户
+/// 真正在用的那一份。把默认档留下来当唯一的计划，其余丢掉：功能已经没了，
+/// 留着只会让界面显示一份用户没在用的数字。
+fn collapse_profiles(prefs: &mut Preferences) {
+    if prefs.profiles.len() <= 1 {
+        return;
+    }
+    let keep = prefs
+        .profiles
+        .iter()
+        .position(|p| p.id == prefs.default_profile_id)
+        .unwrap_or(0);
+    let plan = prefs.profiles.remove(keep);
+    prefs.default_profile_id = plan.id.clone();
+    prefs.profiles = vec![plan];
 }
 
 #[cfg(test)]
@@ -1889,6 +1908,38 @@ mod tests {
              # local comment\r\n::1 example.com\r\n127.0.0.1   example.com\r\n{HOSTS_END}\r\n"
         );
         assert!(hosts_rules_match(&reordered, &hosts, true));
+    }
+
+    /// 老存档里的多份档位要收成一份，而且必须是用户自己设的那份默认档——
+    /// 直接取第一份会把界面切到他根本没在用的数字上。
+    #[test]
+    fn legacy_profiles_collapse_to_the_default_one() {
+        let mut state = State::new(1_000);
+        state.preferences.profiles[0].quotas = vec![quota("main", 660)];
+        state.preferences.profiles.insert(0, ProfileDef {
+            id: "minimum".into(), name: "保底".into(), subtitle: String::new(),
+            quotas: vec![quota("main", 480)],
+        });
+        state.preferences.profiles.push(ProfileDef {
+            id: "sprint".into(), name: "冲刺".into(), subtitle: String::new(),
+            quotas: vec![quota("main", 840)],
+        });
+        state.preferences.default_profile_id = "standard".into();
+        let back = from_json(&to_json(&state)).unwrap();
+        assert_eq!(back.preferences.profiles.len(), 1, "只留一份");
+        assert_eq!(back.preferences.profiles[0].id, "standard", "留的是默认那份，不是第一份");
+        assert_eq!(back.preferences.profiles[0].quotas[0].minutes, 660);
+        assert_eq!(back.preferences.default_profile_id, "standard");
+
+        // 默认档指向一个不存在的 id 时退回第一份，不能整个清空。
+        let mut orphan = State::new(1_000);
+        orphan.preferences.profiles.push(ProfileDef {
+            id: "extra".into(), name: "多的".into(), subtitle: String::new(), quotas: vec![],
+        });
+        orphan.preferences.default_profile_id = "nope".into();
+        let back = from_json(&to_json(&orphan)).unwrap();
+        assert_eq!(back.preferences.profiles.len(), 1);
+        assert_eq!(back.preferences.profiles[0].id, "standard");
     }
 
     #[test]
