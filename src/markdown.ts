@@ -11,7 +11,7 @@ export function markdownForDay(day: Day, endedAt: number | null, now: number): s
   const net = netSeconds(day);
   const end = endedAt ?? now;
   const lines: string[] = [];
-  lines.push(`# ${dayLabel(day.started_at)} · ${day.profile_name}档`);
+  lines.push(`# ${dayLabel(day.started_at)}`);
   lines.push("");
   lines.push(`- ${wallClock(day.started_at)} 坐下，${endedAt ? "收工于" : "截至"} ${wallClock(end)}`);
   lines.push(`- 已学 ${meter(net)} / 目标 ${meter(quotaSeconds(day))} · 暂停 ${meter(day.paused_seconds)} · 水 ${day.cups} 杯`);

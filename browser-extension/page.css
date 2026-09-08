@@ -1,0 +1,44 @@
+:root {
+  color-scheme: dark;
+  font: 14px/1.6 -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+  color: #cbc7be;
+  background: #0e0e10;
+  --high: #edeae3;
+  --muted: #a5a098;
+  --line: rgba(255, 255, 255, 0.17);
+}
+* { box-sizing: border-box; }
+body { margin: 0; }
+main { width: min(100%, 660px); margin: 0 auto; padding: 32px; }
+/* 工具栏弹窗由 Chrome 按内容自动定尺寸；依赖 vw 会让尺寸与滚动条互相影响。
+   固定外框、只在内部滚动，避免同步状态换行时窗口反复伸缩。 */
+html.popup-root { width: 360px; height: 480px; overflow: hidden; }
+body.popup { width: 100%; height: 100%; overflow-x: hidden; overflow-y: auto; }
+.popup main { padding: 24px; }
+body.blocked main { padding-top: clamp(48px, 15vh, 160px); }
+h1, h2, p { margin: 0; }
+h1 { color: var(--high); font-size: 24px; line-height: 1.3; font-weight: 600; }
+.popup h1 { font-size: 20px; }
+h2 { color: var(--high); font-size: 15px; font-weight: 600; margin: 24px 0 8px; }
+p + p { margin-top: 12px; }
+.brand { color: var(--muted); margin-bottom: 20px; }
+.intro { margin-top: 16px; }
+.state { padding: 20px 0; margin: 20px 0; border-top: 1px solid var(--line); border-bottom: 1px solid var(--line); }
+.state-title { color: var(--high); font-size: 16px; font-weight: 600; }
+.muted, .detail { color: var(--muted); }
+.detail { margin-top: 8px; }
+.url { overflow-wrap: anywhere; white-space: pre-wrap; font: 14px/1.7 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; color: var(--high); }
+button, .button-link { min-height: 44px; padding: 8px 16px; border: 1px solid var(--line); border-radius: 5px; color: var(--high); background: #1b1b1e; font: inherit; cursor: pointer; }
+button:hover, .button-link:hover { background: #232327; }
+.button-link { display: inline-flex; align-items: center; text-decoration: none; }
+button:disabled { color: var(--muted); cursor: default; }
+button:focus-visible, a:focus-visible { outline: 2px solid #dad5ca; outline-offset: 3px; }
+.actions { display: flex; flex-wrap: wrap; gap: 12px; margin-top: 24px; }
+.primary { background: #dad5ca; color: #0e0e10; border-color: #dad5ca; }
+.primary:hover { background: #edeae3; }
+.small { font-size: 14px; }
+ol { padding-left: 22px; margin: 8px 0; }
+li + li { margin-top: 8px; }
+code { font-size: 13px; overflow-wrap: anywhere; }
+[hidden] { display: none !important; }
+@media (max-width: 420px) { .blocked main { padding-left: 24px; padding-right: 24px; } }

@@ -1,0 +1,28 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>此页面已屏蔽 · 坐功</title>
+  <link rel="stylesheet" href="page.css">
+</head>
+<body class="blocked">
+  <main>
+    <p class="brand">Sitzfleisch · 坐功</p>
+    <h1>这个页面，留到收工后。</h1>
+    <p id="scope" class="intro">当前学习日中，这个网址已被屏蔽。</p>
+    <section class="state">
+      <p id="original" class="url"></p>
+      <p id="detail" class="detail" role="status">正在检查学习日状态…</p>
+    </section>
+    <div class="actions">
+      <button id="back" type="button" class="primary">返回上一页</button>
+      <button id="sync" type="button">检查收工状态</button>
+      <a class="button-link" href="about:blank">打开空白页</a>
+    </div>
+    <p id="back-hint" class="detail">返回不可用时，可打开空白页离开。</p>
+    <p class="detail">收工同步后会自动回到原网址。主程序退出时继续使用上次规则。</p>
+  </main>
+  <script type="module" src="blocked.js"></script>
+</body>
+</html>

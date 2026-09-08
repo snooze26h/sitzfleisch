@@ -13,6 +13,7 @@ import type {
   TaskItem,
 } from "../types";
 import { MAX_BLOCK_MINUTES, MIN_BLOCK_MINUTES, SUSPEND_GAP_SECONDS } from "../types";
+import { MAX_BLOCK_RULES, normalizeHost, normalizeUrl } from "../blocking";
 
 const HISTORY_LIMIT = 60;
 
@@ -32,9 +33,7 @@ function prefsFixture(): Preferences {
       { id: "move", name: "运动", short_name: "运动", default_block_minutes: 45, icon: "dumbbell", role: "movement", block_rationale: "含热身和拉伸，够一次完整训练。" },
     ],
     profiles: [
-      { id: "minimum", name: "保底", subtitle: "有突发事情的日子，也守得住的下限", quotas: [q("deep", 120), q("browse", 0), q("reading", 240), q("practice", 60), q("move", 60)] },
-      { id: "standard", name: "标准", subtitle: "大部分日子的默认目标，留得住余量", quotas: [q("deep", 240), q("browse", 30), q("reading", 180), q("practice", 0), q("move", 60)] },
-      { id: "sprint", name: "冲刺", subtitle: "状态好时的满配", quotas: [q("deep", 300), q("browse", 30), q("reading", 240), q("practice", 120), q("move", 60)] },
+      { id: "standard", name: "今天", subtitle: "", quotas: [q("deep", 240), q("browse", 30), q("reading", 180), q("practice", 0), q("move", 60)] },
     ],
     break_minutes: 10,
     hydration_goal_cups: 8,
@@ -45,6 +44,7 @@ function prefsFixture(): Preferences {
     idle_reminder_enabled: true,
     idle_reminder_minutes: 15,
     blocked_hosts: ["weibo.com", "bilibili.com"],
+    blocked_urls: [],
     uniform_block_minutes: 0,
     default_profile_id: "standard",
     sound_enabled: true,
@@ -75,7 +75,10 @@ let state: MockState;
 let snapshotRevision = 0;
 let writeProtected: string | null = null;
 let saveError: string | null = null;
-const blocking = { active: false, busy: false, error: null as string | null };
+const blocking = {
+  active: false, busy: false, error: null as string | null,
+  browser: { available: false, connected: false, synced: false, supports_hosts: false, error: null as string | null },
+};
 let autostart = false;
 const listeners: ((snapshot: Snapshot) => void)[] = [];
 
@@ -327,6 +330,11 @@ const ops = {
     day.cups -= 1;
   },
   update_preferences(prefs: Preferences) {
+    // 旧开发场景没有精确网址字段，按空列表接入，保留原来的整站规则。
+    prefs.blocked_urls ??= [];
+    if (prefs.blocked_hosts.length + prefs.blocked_urls.length > MAX_BLOCK_RULES) throw `最多添加 ${MAX_BLOCK_RULES} 条网站屏蔽规则`;
+    prefs.blocked_hosts = [...new Set(prefs.blocked_hosts.map(validateHost))];
+    prefs.blocked_urls = [...new Set(prefs.blocked_urls.map(validateUrl))];
     if (!prefs.categories.length) throw "至少要有一个项目";
     if (!prefs.profiles.length) throw "至少要有一个档位";
     if (prefs.break_minutes < 0 || prefs.break_minutes > 120) throw "休息时长要在 0–120 分钟之间";
@@ -351,13 +359,15 @@ const ops = {
 };
 
 export function validateHost(raw: string): string {
-  let host = raw.trim().toLowerCase();
-  host = host.replace(/^https?:\/\//, "").replace(/\/+$/, "");
-  if (!host) throw "域名不能为空";
-  if (/[/ :]/.test(host)) throw "只要域名本身，不要带路径或端口";
-  if (!host.includes(".") || host.startsWith(".") || host.endsWith(".")) throw "这不像一个域名";
-  if (!/^[a-z0-9.-]+$/.test(host)) throw "域名只能包含字母、数字、点和连字符";
-  return host;
+  const result = normalizeHost(raw);
+  if ("error" in result) throw result.error;
+  return result.host;
+}
+
+function validateUrl(raw: string): string {
+  const result = normalizeUrl(raw);
+  if ("error" in result) throw result.error;
+  return result.url;
 }
 
 // ---------- 场景 ----------
@@ -413,14 +423,13 @@ function focusTimer(now: number): NonNullable<Day["timer"]> {
 function historyFixture(now: number, prefs: Preferences): ArchivedDay[] {
   const days: ArchivedDay[] = [];
   const ratios = [0.92, 0.78, 1.0, 0.85, 0.64, 0.95, 0.71, 0.83, 1.02, 0.6, 0.88, 0.97, 0.75, 0.9];
-  const profileIds = ["standard", "sprint", "standard", "minimum", "standard", "sprint", "standard"];
   for (let i = 14; i >= 1; i--) {
     const start = new Date(now * 1000);
     start.setDate(start.getDate() - i);
     start.setHours(9, 5, 0, 0);
     const startedAt = Math.floor(start.getTime() / 1000);
     const endedAt = startedAt + (13 * 60 + 25) * 60;
-    const profile = prefs.profiles.find((p) => p.id === profileIds[i % profileIds.length])!;
+    const profile = prefs.profiles[0];
     const day = dayFromProfile(prefs, profile, startedAt);
     const ratio = ratios[i - 1];
     let cursor = startedAt;
@@ -530,7 +539,7 @@ function snapshot(withHistory = true): Snapshot {
     state: live,
     history: withHistory ? history : null,
     write_protected: writeProtected,
-    blocking: { ...blocking },
+    blocking: structuredClone(blocking),
     save_error: saveError,
     state_path: "/Users/you/Library/Application Support/com.snooze26h.sitzfleisch.x/state.json",
     initial_view: null,
@@ -591,6 +600,8 @@ export async function mockInvoke<T>(command: string, args: Record<string, unknow
       return mutate(() => ops.delete_history_day(a.startedAt)) as T;
     case "normalize_host":
       return validateHost(a.host) as T;
+    case "normalize_url":
+      return validateUrl(a.url) as T;
     case "retry_save":
       saveError = null;
       broadcast();
@@ -625,6 +636,8 @@ export async function mockInvoke<T>(command: string, args: Record<string, unknow
       return undefined as T;
     case "reveal_state_file":
       return undefined as T;
+    case "reveal_browser_extension":
+      throw "浏览器预览无法打开扩展目录，请在坐功桌面应用中使用这个按钮。";
     case "app_version":
       return "0.8.1-mock" as unknown as T;
     case "autostart_status":

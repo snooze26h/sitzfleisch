@@ -1,6 +1,6 @@
 // 「今天」：没开始时是开始页（三档、两条规矩、上一天），开始后是运行台。
 
-import type { BlockTimer, Day, ProfileDef } from "../types";
+import type { BlockTimer, Day } from "../types";
 import { clock, duration, esc, meter, wallClock } from "../format";
 import { icon } from "../icons";
 import {
@@ -18,12 +18,10 @@ import {
   select,
   sessionRow,
 } from "../components";
-import { blockMinutes, estimatedRemainingWallSeconds, remainingSeconds, sittingStreakSeconds, suggest } from "../scheduler";
-import { DIAGRAM_TOP, LANE_H } from "./diagram";
+import { blockMinutes, estimatedRemainingWallSeconds, remainingSeconds, suggest } from "../scheduler";
 import {
   BLOCK_OPTIONS,
   BREAK_OPTIONS,
-  SITTING_ALARM,
   breakRemaining,
   day,
   history,
@@ -37,7 +35,6 @@ import {
   profileTotalMinutes,
   quotaSeconds,
   resting,
-  shortName,
   ui,
   withValue,
 } from "../state";
@@ -51,41 +48,41 @@ export function todayPage(): string {
 
 function startBoard(): string {
   const p = prefs();
+  const plan = p.profiles[0];
   const days = history();
   const last = days.length ? days[days.length - 1] : null;
-  return `<div class="masthead">
-      <h1 class="t-masthead">一天从你坐下的那一刻算起</h1>
-      <p class="sub">不看几点起床，也不在午夜清零。选一个今天真守得住的档位，然后坐下。</p>
-    </div>
-    <div class="modes">${p.profiles.map(modePlate).join("")}</div>
-    <div class="rules">
-      ${hair()}
-      <div class="rule"><b>按项目配额，不按钟点</b><span>坐下开一格，走完自动记进进度。</span></div>
-      ${hair()}
-      <div class="rule"><b>随时暂停</b><span>暂停的时间不算数，回来接着走。</span></div>
-      ${hair()}
-    </div>
-    ${last ? yesterdayBlock(last.day) : ""}`;
-}
-
-function modePlate(profile: ProfileDef): string {
-  const p = prefs();
-  const active = profile.quotas.filter((q) => q.minutes > 0);
-  const maxTarget = Math.max(1, ...active.map((q) => q.minutes));
-  const ordered = p.categories.filter((c) => active.some((q) => q.category === c.id));
-  const rows = ordered
+  if (!plan) {
+    return `<div class="masthead"><h1 class="t-masthead">一天从你坐下的那一刻算起</h1>
+      <p class="sub">先去「设置 · 项目」建一个项目。</p></div>`;
+  }
+  const rows = p.categories
     .map((c) => {
-      const minutes = active.find((q) => q.category === c.id)!.minutes;
-      return `<div class="row">${icon(c.icon, 12)}<span class="nm" title="${esc(c.name)}">${esc(shortName(c.id, null))}</span><span class="bar"><i style="width:${((minutes / maxTarget) * 100).toFixed(2)}%"></i></span><span class="hrs">${esc(meter(minutes * 60))}</span></div>`;
+      const minutes = plan.quotas.find((q) => q.category === c.id)?.minutes ?? 0;
+      const key = `${encodeURIComponent(plan.id)}:${encodeURIComponent(c.id)}`;
+      const data = `data-profile="${esc(plan.id)}" data-category="${esc(c.id)}"`;
+      const step = (delta: number, glyph: string, verb: string) =>
+        `<button id="plan-${glyph}-${esc(key)}" data-action="step" data-bind="quota" data-delta="${delta}" data-step="15" data-min="0" data-max="1440" ${data} ${delta < 0 ? minutes <= 0 ? "disabled" : "" : minutes >= 1440 ? "disabled" : ""} aria-label="${esc(c.name)}${verb} 15 分钟">${icon(glyph, 12)}</button>`;
+      return `<div class="plan-row${minutes === 0 ? " off" : ""}">
+        <span class="who">${icon(c.icon, 15)}<span class="nm">${esc(c.name)}</span></span>
+        <span class="edit">${step(-1, "minus", "减少")}<input id="plan-field-${esc(key)}" class="field plan-input" type="number" inputmode="numeric" min="0" max="1440" step="1" value="${esc(minutes)}" data-change="quota-minutes" ${data} aria-label="${esc(c.name)}今天的目标分钟数" />${step(1, "plus", "增加")}</span>
+        <span class="hrs">${minutes === 0 ? "不排" : esc(meter(minutes * 60))}</span>
+      </div>`;
     })
     .join("");
-  const subtitle = profile.subtitle.trim() || `${active.length} 个项目，总目标自动相加`;
-  const inner = `<div class="head"><span class="name">${esc(profile.name)}</span><span class="total">${esc(meter(profileTotalMinutes(profile) * 60))}</span><span class="unit">目标</span></div>
-    ${hair()}
-    <p class="sub">${esc(subtitle)}</p>
-    <div class="rows">${rows}</div>
-    <div class="foot">${btn(`开始${profile.name}日`, { kind: "primary", action: "start-day", data: { id: profile.id } })}</div>`;
-  return plate(inner, "mode");
+  const total = profileTotalMinutes(plan);
+  return `<div class="masthead">
+      <h1 class="t-masthead">一天从你坐下的那一刻算起</h1>
+      <p class="sub">不看几点起床，也不在午夜清零。定好今天各项目的时间，然后坐下。</p>
+    </div>
+    <div class="plan">
+      <div class="plan-head"><span class="engraved">今天的安排</span><span class="engraved">分钟</span></div>
+      ${hair()}
+      <div class="plan-rows">${rows}</div>
+      ${hair()}
+      <div class="plan-total"><span class="engraved">总目标</span><span class="mono num">${esc(meter(total * 60))}</span></div>
+      <div class="plan-go">${btn("开始今天", { kind: "primary", cls: "lg", action: "start-day", data: { id: plan.id } })}</div>
+    </div>
+    ${last ? yesterdayBlock(last.day) : ""}`;
 }
 
 function yesterdayBlock(d: Day): string {
@@ -114,7 +111,7 @@ function activeBoard(d: Day): string {
   // 三块都是 .columns 的**直接**子元素——中间再套一层 div 的话，
   // 左板就没法跟右栏在同一行里拉伸到齐平。
   const right = `<div class="rail" id="col-right">${quotaPanel(d, suggestion?.category ?? null)}${bodyPanel(d)}</div>`;
-  const wide = `<div class="wide" id="col-wide">${diagramBlock(d)}</div>`;
+  const wide = `<div class="wide" id="col-wide">${diagramBlock()}</div>`;
   // 有格的时候（在走或被按停）上排两块拉到齐平；「选下一格」这块板内容少，
   // 硬拉就是在它下面挖一个三百来像素的坑，那时按自然高度。
   const taut = d.timer ? " taut" : "";
@@ -132,15 +129,8 @@ function headerBar(d: Day): string {
       <div class="net"><span class="engraved">从 ${esc(wallClock(d.started_at))} 坐下</span><div class="figure"><span class="val">${esc(meter(net))}</span><span class="of">/ ${esc(meter(quotaSeconds(d)))}</span></div></div>
       ${pausedReading}
     </div>`;
-  const profiles = prefs().profiles;
-  const currentId = profiles.some((x) => x.id === d.profile_id) ? d.profile_id : (profiles.find((x) => x.name === d.profile_name)?.id ?? "");
-  const modeItems = profiles
-    .map((x) => menuItem(`${x.name} ${meter(profileTotalMinutes(x) * 60)}`, "switch-profile", { data: { id: x.id }, checked: x.id === currentId }))
-    .join("");
-  const modeLabel = `<span>${esc(d.profile_name)} ${esc(meter(quotaSeconds(d)))}</span>${icon("chevron-down", 11)}`;
   const moreItems = `${menuItem("复制今天的 Markdown 总结", "copy-today-md")}<div class="menu-sep"></div>${menuItem("返回开始页…", "discard-day", { danger: true })}${menuItem("收工归档…", "end-day", { danger: true })}`;
   const controls = `<div class="controls">
-      ${menuButton("mode", ui.menu, modeLabel, modeItems, { ariaLabel: "今日档位" })}
       ${menuButton("more", ui.menu, icon("ellipsis-vertical", 16), moreItems, { iconOnly: true, ariaLabel: "更多操作" })}
     </div>`;
   return `<section class="plate header-bar" id="header-bar">${readings}${controls}</section>`;
@@ -260,22 +250,16 @@ function bodyPanel(d: Day): string {
       <button class="btn-icon" data-action="water" title="记一杯水" aria-label="记一杯水">${icon("plus", 12)}</button>
       ${d.cups > 0 ? `<button class="btn-icon" data-action="water-undo" title="撤销一杯" aria-label="撤销一杯水">${icon("minus", 12)}</button>` : ""}
     </div>`;
-  const sitting = sittingStreakSeconds(d, p, ui.now);
-  const alarming = sitting >= SITTING_ALARM;
-  const sittingRow = `<div class="sitting${alarming ? " alarm" : ""}">${icon(alarming ? "footprints" : "armchair", 14)}<span>${alarming ? `已经连坐 ${esc(duration(sitting))}，该动一动了` : `连续久坐 ${esc(duration(sitting))}`}</span></div>`;
-  return plate(`<div class="body-panel">${sectionLabel("身体")}${hydration}${sittingRow}</div>`);
+  return plate(`<div class="body-panel">${sectionLabel("喝水")}${hydration}</div>`);
 }
 
-function diagramBlock(d: Day): string {
-  const labels = d.categories
-    .map((c) => `<div class="diagram-label" style="height:${LANE_H}px">${icon(iconOf(c.id), 12)}<span>${esc(shortName(c.id, d))}</span></div>`)
-    .join("");
-  const legend = `<span class="legend"><span><i></i>计入</span><span><i class="hollow"></i>未计入</span><span><i class="hatch"></i>暂停</span><span><i class="dots"></i>休息</span></span>`;
+function diagramBlock(): string {
+  // 名字写在块上了，所以不再有行标列；图例也只剩三样，暂停就是空隙不用图例。
+  const legend = `<span class="legend"><span><i></i>计入</span><span><i class="hollow"></i>未计入</span><span><i class="rest"></i>休息</span></span>`;
   const inner = `<div class="diagram-block">
     ${sectionLabel("今天的走向", { trailing: legend })}
     <div class="diagram">
-      <div class="diagram-labels" style="padding-top:${DIAGRAM_TOP}px">${labels}<div class="diagram-label dim" style="height:${LANE_H}px">${icon("pause", 12)}<span>暂停</span></div></div>
-      <canvas class="diagram-canvas" data-diagram="today" aria-label="今天的运行图"></canvas>
+      <canvas class="diagram-canvas" data-diagram="today" aria-label="今天的时间轴"></canvas>
     </div>
   </div>`;
   return plate(inner);

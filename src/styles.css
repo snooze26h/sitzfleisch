@@ -9,10 +9,10 @@
   --plate: #1b1b1e;
   --plate-lift: #232327;
   --groove: #0a0a0c;
-  --ink-high: #edeae3;
-  --ink-body: #cbc7be;
-  --ink-muted: #a5a098;
-  --ink-faint: #89847b;
+  --ink-high: #f4f2ee;
+  --ink-body: #ded9d0;
+  --ink-muted: #bab5ab;
+  --ink-faint: #9d978d;
   --stroke: #dad5ca;
   --signal: #c7452f;
   --signal-line: #d9634c;
@@ -46,7 +46,7 @@ body {
   background: var(--bed);
   color: var(--ink-body);
   font-family: var(--font-ui);
-  font-size: 14px;
+  font-size: 15px;
   line-height: 1.5;
   font-synthesis: none;
   -webkit-font-smoothing: antialiased;
@@ -132,9 +132,9 @@ textarea {
 /* ---------- 字级 ---------- */
 
 .t-masthead { font-size: 30px; font-weight: 600; color: var(--ink-high); line-height: 1.2; }
-.t-caption { font-size: 13px; color: var(--ink-muted); }
-.t-note { font-size: 12.5px; color: var(--ink-muted); }
-.engraved { font-size: 12px; font-weight: 600; letter-spacing: 0.8px; color: var(--ink-muted); white-space: nowrap; }
+.t-caption { font-size: 14px; color: var(--ink-muted); }
+.t-note { font-size: 13.5px; color: var(--ink-muted); }
+.engraved { font-size: 12.5px; font-weight: 600; letter-spacing: 0.8px; color: var(--ink-muted); white-space: nowrap; }
 .engraved.caution { color: var(--caution); }
 .high { color: var(--ink-high); }
 .muted { color: var(--ink-muted); }
@@ -295,11 +295,6 @@ textarea {
   overflow-y: auto;
   overflow-x: hidden;
   min-height: 0;
-}
-
-.content.disabled > .page {
-  opacity: 0.5;
-  pointer-events: none;
 }
 
 .page {
@@ -967,44 +962,31 @@ textarea.field {
 
 .masthead .sub { font-size: 14px; color: var(--ink-muted); }
 
-.modes {
-  display: flex;
-  gap: 16px;
-  align-items: stretch;
-}
-
-.mode {
-  flex: 1 1 0;
-  min-width: 0;
-  display: flex;
-  flex-direction: column;
-}
-
-.mode .head {
-  display: flex;
-  align-items: baseline;
-  gap: 8px;
-  padding-bottom: 10px;
-}
-
-.mode .name { font-size: 15px; font-weight: 600; letter-spacing: 1.5px; color: var(--ink-high); white-space: nowrap; }
-.mode .total { margin-left: auto; font-family: var(--font-mono); font-size: 30px; font-weight: 300; color: var(--ink-high); line-height: 1; }
-.mode .unit { font-size: 11px; font-weight: 600; letter-spacing: 1px; color: var(--ink-faint); white-space: nowrap; }
-.mode .sub { font-size: 12.5px; color: var(--ink-muted); min-height: 36px; padding-top: 10px; }
-.mode .rows { display: flex; flex-direction: column; gap: 7px; padding: 12px 0; }
-.mode .row { display: flex; align-items: center; gap: 8px; height: 12px; }
-.mode .row .ic { width: 13px; color: var(--ink-faint); }
-.mode .row .nm { width: 58px; flex: none; font-size: 12.5px; color: var(--ink-body); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.mode .row .bar { flex: 1; height: 12px; display: flex; align-items: center; }
-.mode .row .bar i { display: block; height: 5px; border-radius: 1px; background: rgba(218, 213, 202, 0.55); min-width: 3px; }
-.mode .row .hrs { font-family: var(--font-mono); font-size: 12px; font-weight: 500; color: var(--ink-muted); }
-.mode .foot { margin-top: auto; padding-top: 4px; }
-.mode .foot .btn { width: 100%; }
-
-.rules { display: flex; flex-direction: column; }
-.rules .rule { display: flex; align-items: flex-start; gap: 18px; padding: 14px 0; }
-.rules .rule b { width: 210px; flex: none; font-size: 13.5px; font-weight: 600; color: var(--ink-body); }
-.rules .rule span { font-size: 13px; color: var(--ink-muted); }
+/* 开始页：一份计划，当场把今天各项目的分钟数调好再坐下。 */
+.plan { border: 1px solid var(--hair); border-radius: 8px; background: var(--plate); padding: 4px 20px 20px; margin-top: 26px; }
+.plan-head { display: flex; align-items: baseline; justify-content: space-between; padding: 16px 0 12px; }
+.plan-rows { display: flex; flex-direction: column; }
+.plan-row { display: flex; align-items: center; gap: 16px; padding: 11px 0; border-bottom: 1px solid var(--hair); }
+.plan-row:last-child { border-bottom: 0; }
+.plan-row .who { display: flex; align-items: center; gap: 11px; flex: 1; min-width: 0; }
+.plan-row .who .ic { color: var(--ink-muted); flex: none; }
+.plan-row .who .nm { font-size: 15px; color: var(--ink-body); overflow-wrap: anywhere; }
+.plan-row.off .who .nm, .plan-row.off .who .ic { color: var(--ink-faint); }
+.plan-row .edit { display: flex; align-items: center; gap: 4px; flex: none; }
+/* −/+ 是安静的字形，不是按钮盒：一排描边框会把数字盖过去。 */
+.plan-row .edit button { width: 26px; height: 32px; flex: none; display: inline-flex; align-items: center; justify-content: center; border: 0; border-radius: 4px; background: transparent; color: var(--ink-faint); }
+.plan-row .edit button:hover { background: rgba(255, 255, 255, 0.06); color: var(--ink-high); }
+.plan-row .edit button:active { background: var(--groove); }
+.plan-row .edit button:disabled { color: var(--ink-faint); opacity: 0.3; cursor: default; background: transparent; }
+.plan-input.field { width: 72px; flex: none; padding: 6px 3px; font-family: var(--font-mono); font-variant-numeric: tabular-nums; font-size: 15px; text-align: center; box-shadow: none; border: 1px solid var(--hair); border-radius: 4px; appearance: textfield; -moz-appearance: textfield; }
+.plan-input::-webkit-inner-spin-button, .plan-input::-webkit-outer-spin-button { appearance: none; margin: 0; }
+.plan-row.off .plan-input { color: var(--ink-faint); }
+.plan-row .hrs { flex: none; width: 62px; text-align: right; font-family: var(--font-mono); font-variant-numeric: tabular-nums; font-size: 13.5px; color: var(--ink-muted); }
+.plan-row.off .hrs { color: var(--ink-faint); }
+.plan-total { display: flex; align-items: baseline; justify-content: space-between; padding: 16px 0 4px; }
+.plan-total .num { font-family: var(--font-mono); font-variant-numeric: tabular-nums; font-size: 30px; font-weight: 300; color: var(--ink-high); }
+.plan-go { padding-top: 18px; }
+.plan-go .btn { width: 100%; }
 
 .yesterday { display: flex; flex-direction: column; gap: 14px; }
 .yesterday .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: 8px 16px; }
@@ -1117,28 +1099,17 @@ textarea.field {
 .cup { width: 5px; height: 14px; border-radius: 1px; background: var(--groove); box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.1); transition: background 0.2s ease-out; }
 .cup.on { background: var(--stroke); box-shadow: none; }
 .hydration .count { margin-left: auto; font-family: var(--font-mono); font-size: 12.5px; font-weight: 500; color: var(--ink-muted); }
-.sitting { display: flex; align-items: center; gap: 10px; font-size: 12.5px; color: var(--ink-muted); }
-.sitting .ic { width: 14px; color: var(--ink-muted); }
-.sitting.alarm { color: var(--ink-high); }
-/* 久坐提醒是「该动一动」，不是「正在跑」——朱红留给后者。 */
-.sitting.alarm .ic { color: var(--caution); }
 
 .diagram-block { display: flex; flex-direction: column; gap: 14px; }
 .legend { display: flex; align-items: center; gap: 14px; }
 .legend span { display: inline-flex; align-items: center; gap: 5px; font-size: 11px; color: var(--ink-faint); }
 .legend i { display: inline-block; width: 16px; height: 7px; border-radius: 1px; background: var(--stroke); }
 .legend i.hollow { background: transparent; box-shadow: inset 0 0 0 1px var(--ink-faint); }
-.legend i.hatch { background: repeating-linear-gradient(135deg, transparent 0 2px, rgba(137, 132, 123, 0.7) 2px 3px); box-shadow: inset 0 0 0 1px rgba(137, 132, 123, 0.8); }
-.legend i.dots { background: repeating-linear-gradient(to right, rgba(137, 132, 123, 0.85) 0 2px, transparent 2px 5px) 0 1.5px/16px 1px no-repeat, repeating-linear-gradient(to right, rgba(137, 132, 123, 0.85) 0 2px, transparent 2px 5px) 0 4.5px/16px 1px no-repeat, transparent; box-shadow: inset 0 0 0 1px rgba(137, 132, 123, 0.5); }
+.legend i.rest { background: rgba(176, 136, 67, 0.45); }
 .legend i.line { height: 1px; background: var(--caution); }
-.diagram { display: flex; gap: 10px; align-items: flex-start; }
-.diagram-labels { width: 78px; flex: none; display: flex; flex-direction: column; }
-.diagram-labels .top { height: 18px; }
-.diagram-label { display: flex; align-items: center; justify-content: flex-end; gap: 6px; font-size: 12px; font-weight: 500; color: var(--ink-body); white-space: nowrap; }
-.diagram-label .ic { width: 12px; color: var(--ink-muted); }
-.diagram-label.dim { color: var(--ink-faint); }
-.diagram-label.dim .ic { color: var(--ink-faint); }
-.diagram-canvas { flex: 1; min-width: 0; display: block; }
+/* 时间轴只有一条轨，行标列没了——名字直接写在块上。 */
+.diagram { display: block; }
+.diagram-canvas { width: 100%; display: block; }
 
 .log { display: flex; flex-direction: column; gap: 14px; }
 .log .rows { display: flex; flex-direction: column; }
@@ -1156,7 +1127,7 @@ textarea.field {
 .session .meta .badge { font-size: 11px; font-weight: 600; letter-spacing: 0.6px; color: var(--caution); }
 
 .complete-body { display: flex; flex-direction: column; gap: 6px; padding-top: 16px; }
-.complete-body .t-caption { font-size: 13px; }
+.complete-body .t-caption { font-size: 14px; }
 
 /* ---------- 历史 ---------- */
 
@@ -1205,17 +1176,18 @@ textarea.field {
 
 /* ---------- 设置 ---------- */
 
-.settings-nav { position: sticky; top: 0; z-index: 2; display: flex; flex-wrap: wrap; gap: 5px; padding: 12px 0; margin-top: -12px; background: var(--field); border-bottom: 1px solid var(--hair); }
-.settings-nav button { padding: 7px 11px; border-radius: 4px; font-size: 13px; color: var(--ink-muted); }
-.settings-nav button:hover { background: var(--plate-lift); color: var(--ink-high); }
-.settings-nav button:active { background: var(--stroke); color: var(--bed); }
-.settings-section { scroll-margin-top: 80px; }
+/* 设置的分区导航搬进了侧栏，页面里不再有第二排标签。 */
+.nav-item.back { color: var(--ink-muted); gap: 8px; }
+.nav-item.back:hover { color: var(--ink-high); }
+.nav-item.back .ic { margin-left: 2px; }
 /* 关掉对话框时焦点的兜底落点：它只是个接盘的，不该画出焦点环。 */
 .content:focus { outline: none; }
 
 .settings-section:focus { outline: none; }
 .settings-section:focus .section .title { text-decoration: underline; text-underline-offset: 5px; }
 .settings-panel { display: flex; flex-direction: column; }
+/* 分区标题现在由页头承担，板内只留右上角那一点信息。 */
+.panel-meta { display: flex; align-items: center; justify-content: flex-end; min-height: 22px; padding-bottom: 12px; }
 .settings-panel > .section { padding-bottom: 4px; }
 .settings-panel > .section.pb6 { padding-bottom: 6px; }
 .settings-panel > .section.pb12 { padding-bottom: 12px; }
@@ -1270,55 +1242,36 @@ textarea.field {
 
 /* 项目 × 档位：同一行比较配额，输入与总目标始终对齐。 */
 
-.quota-table-wrap { overflow-x: auto; }
-.quota-table { width: 100%; min-width: 620px; border-collapse: collapse; table-layout: fixed; }
-.quota-table th, .quota-table td { padding: 14px 8px; text-align: center; border-bottom: 1px solid var(--hair); }
-.quota-table th:first-child { width: 25%; text-align: left; padding-left: 0; }
-.quota-table thead th { font-size: 13px; font-weight: 600; color: var(--ink-muted); padding-top: 8px; }
-.quota-table tbody th { font-size: 14px; font-weight: 500; color: var(--ink-body); }
-.quota-table tbody tr:hover { background: var(--plate-lift); }
-.quota-project { display: flex; align-items: center; gap: 10px; }
-.quota-project .ic { color: var(--ink-muted); }
-.quota-project span { overflow-wrap: anywhere; }
-.quota-edit { display: flex; align-items: center; justify-content: center; gap: 4px; }
-/* −/+ 是安静的字形，不是按钮盒：一张表里 15 个格，15 个描边框会把数字盖过去。 */
-.quota-edit button { width: 24px; height: 32px; flex: none; display: inline-flex; align-items: center; justify-content: center; border: 0; border-radius: 4px; background: transparent; color: var(--ink-faint); }
-.quota-edit button:hover { background: rgba(255, 255, 255, 0.05); color: var(--ink-high); }
-.quota-edit button:active { background: var(--groove); }
-.quota-edit button:disabled { color: var(--ink-faint); opacity: 0.3; cursor: default; background: transparent; }
-.quota-input.field { width: 66px; flex: 0 1 66px; min-width: 56px; padding: 6px 3px; font-family: var(--font-mono); font-variant-numeric: tabular-nums; font-size: 14px; text-align: center; box-shadow: none; border: 1px solid var(--hair); border-radius: 4px; appearance: textfield; -moz-appearance: textfield; }
-.quota-input::-webkit-inner-spin-button, .quota-input::-webkit-outer-spin-button { appearance: none; margin: 0; }
-.quota-edit.zero .quota-input { color: var(--ink-muted); }
+/* 时间安排沿用开始页那套 .plan-row，不再有第二套表格样式。 */
 
-/* 比较条：整张表同一把尺，一眼看得出哪一格重、哪一档重。
-   笔画走骨白（进度笔画的颜色），槽走凹槽色；4px 高，够看不抢戏。 */
-.quota-scale { display: flex; align-items: center; gap: 8px; padding: 7px 4px 0; }
-.quota-scale .bar { flex: 1; min-width: 0; height: 4px; border-radius: 2px; background: var(--groove); box-shadow: var(--groove-ring); overflow: hidden; }
-.quota-scale .bar i { display: block; height: 100%; border-radius: 2px; background: var(--stroke); }
-.quota-scale .hrs { flex: none; width: 34px; text-align: left; font-size: 11.5px; font-family: var(--font-mono); font-variant-numeric: tabular-nums; color: var(--ink-faint); }
-.quota-table tfoot th, .quota-table tfoot td { padding-top: 18px; padding-bottom: 10px; border-bottom: 0; }
-.quota-table tfoot th { color: var(--ink-muted); font-size: 13px; font-weight: 500; }
-.quota-total { font-family: var(--font-mono); font-variant-numeric: tabular-nums; font-size: 22px; color: var(--ink-high); }
-/* 总目标下面那一行分钟数：把「8h30」翻回 510，省得心算。 */
-.quota-total-minutes { display: block; padding-top: 5px; font-size: 11.5px; font-family: var(--font-mono); font-variant-numeric: tabular-nums; color: var(--ink-faint); }
-.quota-help { font-size: 12.5px; color: var(--ink-muted); padding-top: 10px; }
-.quota-help + .quota-help { padding-top: 4px; }
-
+.website-block .blocking-intro { font-size: 13px; color: var(--ink-body); line-height: 1.6; }
+.website-block .blocking-editor { padding-top: 12px; }
+.website-block .blocking-input-label { display: block; padding-bottom: 7px; font-size: 13px; color: var(--ink-muted); }
 .host-add { display: flex; align-items: center; gap: 9px; }
-.host-list { display: flex; flex-wrap: wrap; gap: 8px; }
+.host-add .field { flex: 1; min-width: 0; }
+.website-block .blocking-note { font-size: 13px; color: var(--ink-muted); line-height: 1.6; padding-top: 8px; overflow-wrap: anywhere; }
+.website-block .blocking-note.caution { color: var(--caution); }
+.website-block .blocking-conflict { margin-top: 12px; padding: 10px 12px; border: 1px solid var(--caution); border-radius: 4px; font-size: 13px; color: var(--caution); line-height: 1.6; overflow-wrap: anywhere; }
+.blocking-group-heading .t-note { margin-right: auto; }
+.blocking-group-heading { display: flex; flex-wrap: wrap; align-items: baseline; justify-content: space-between; gap: 8px 16px; padding-top: 4px; }
+.blocking-group-heading > b { font-size: 13px; font-weight: 600; color: var(--ink-high); }
+.blocking-rule-list { display: flex; flex-direction: column; gap: 8px; padding-top: 12px; }
+.blocking-rule { display: flex; align-items: flex-start; gap: 12px; padding: 10px 12px; border-radius: 4px; background: var(--plate-lift); box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.07); }
+.blocking-rule .rule-content { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 5px; }
+.blocking-rule .rule-kind { font-size: 13px; color: var(--ink-muted); }
+.rule-value { display: block; min-width: 0; overflow-wrap: anywhere; }
+.blocking-rule .rule-value { font-size: 13px; line-height: 1.6; color: var(--ink-high); }
+.blocking-rule .btn { flex: none; }
+.blocking-help { padding-top: 14px; font-size: 13px; color: var(--ink-muted); line-height: 1.6; }
+.blocking-help summary { cursor: pointer; width: fit-content; color: var(--ink-body); }
+.blocking-help summary:hover { color: var(--ink-high); }
+.blocking-help summary:focus-visible { outline: 2px solid var(--stroke); outline-offset: 4px; }
+.blocking-help ol { margin: 12px 0; padding-left: 20px; }
+.blocking-help li + li { padding-top: 7px; }
+.website-block .foot-note { padding-top: 12px; flex-wrap: wrap; }
+.website-block .foot-note p { min-width: 200px; font-size: 13px; color: var(--ink-muted); }
+.website-block .problem-block { padding-top: 12px; flex-wrap: wrap; }
 
-.host-chip {
-  display: inline-flex;
-  align-items: center;
-  gap: 4px;
-  padding: 5px 5px 5px 11px;
-  border-radius: 999px;
-  background: var(--plate-lift);
-  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.07);
-}
-
-.host-chip .mono { font-family: var(--font-mono); font-size: 12.5px; color: var(--ink-high); }
-.host-chip .btn { padding: 3px 7px; font-size: 11.5px; }
 .status-dot { display: inline-flex; align-items: center; gap: 7px; font-size: 12px; font-weight: 500; color: var(--ink-muted); }
 .status-dot i { width: 7px; height: 7px; background: var(--stroke); display: inline-block; }
 .status-dot.problem i { background: var(--caution); }
@@ -1406,7 +1359,9 @@ textarea.field {
 .dialog .btns { display: flex; align-items: center; gap: 10px; margin-top: 4px; }
 .dialog .btns .spacer { flex: 1; }
 .dialog .confirm-field { display: flex; flex-direction: column; gap: 9px; }
-.dialog .confirm-field span { font-size: 13px; color: var(--ink-muted); }
+.dialog .confirm-field label, .dialog .confirm-field span { font-size: 13px; color: var(--ink-muted); line-height: 1.6; }
+.dialog .confirm-field .rule-value { padding-top: 5px; color: var(--ink-high); }
+.dialog .confirm-field .field { min-width: 0; width: 100%; }
 
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { transition: none !important; animation: none !important; }
@@ -1428,9 +1383,7 @@ textarea.field {
      行位置交回 auto，否则 grid-row: 2 会在单列下留一整行空档。 */
   .columns { grid-template-columns: minmax(0, 1fr); }
   .columns > .focus, .columns > .rail, .columns > .wide { grid-column: 1; grid-row: auto; }
-  .modes { flex-direction: column; }
-  .rules .rule { flex-direction: column; gap: 4px; }
-  .rules .rule b { width: auto; }
+
   .archive-row .comp { display: none; }
   .chart .cols { overflow-x: auto; }
   .setting-row { align-items: flex-start; flex-wrap: wrap; }

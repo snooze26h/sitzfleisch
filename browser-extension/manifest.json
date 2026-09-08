@@ -1,0 +1,11 @@
+{
+  "manifest_version": 3,
+  "name": "Sitzfleisch · 坐功网页屏蔽",
+  "description": "跟随坐功学习日，屏蔽整个网站或指定完整网址。",
+  "version": "1.1.0",
+  "minimum_chrome_version": "120",
+  "permissions": ["storage", "alarms", "webNavigation", "tabs"],
+  "host_permissions": ["http://127.0.0.1/*"],
+  "background": { "service_worker": "service-worker.js", "type": "module" },
+  "action": { "default_title": "坐功网页屏蔽", "default_popup": "popup.html" }
+}

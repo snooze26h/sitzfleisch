@@ -2,27 +2,43 @@
 // 每个控件改完立即生效，没有「保存」按钮；文字框在失焦或回车时提交。
 
 import type { CategoryDef, ProfileDef } from "../types";
-import { ICON_NAMED, ROLES, roleLabel } from "../types";
+import { inTauri } from "../api";
+import { conflictingHost, MAX_BLOCK_RULES, normalizeHost, normalizeUrl } from "../blocking";
+import { ICON_NAMED } from "../types";
 import { esc, meter, shortNameFrom } from "../format";
 import { icon } from "../icons";
-import { btn, hair, labelled, plate, sectionLabel, select, stepper, toggle } from "../components";
-import { BLOCK_OPTIONS, BREAK_OPTIONS, IDLE_OPTIONS, day, defaultProfileId, normalizeHost, prefs, profileTotalMinutes, ui, withValue } from "../state";
+import { btn, hair, labelled, plate, select, stepper, toggle } from "../components";
+import { BLOCK_OPTIONS, BREAK_OPTIONS, IDLE_OPTIONS, day, defaultProfileId, prefs, profileTotalMinutes, ui, withValue } from "../state";
+
+/** 设置的分区：id → 标题 + 图标。侧栏在设置页直接列它们，一区一页。 */
+export const SETTINGS_SECTIONS: [string, string, string][] = [
+  ["projects", "项目", "layers"],
+  ["tiers", "时间安排", "sliders-horizontal"],
+  ["rhythm", "节奏", "timer"],
+  ["hosts", "网站屏蔽", "shield"],
+  ["body", "身体", "heart-pulse"],
+  ["notify", "提醒", "bell"],
+  ["about", "关于", "info"],
+];
+
+function sectionBody(id: string): string {
+  switch (id) {
+    case "tiers": return tierPlan();
+    case "rhythm": return rhythm();
+    case "hosts": return websiteBlock();
+    case "body": return bodyPanel();
+    case "notify": return notificationPanel();
+    case "about": return aboutPanel();
+    default: return projectCatalog();
+  }
+}
 
 export function settingsPage(): string {
-  const panels = [
-    ["projects", "项目", projectCatalog()],
-    ["tiers", "三档安排", tierPlan()],
-    ["rhythm", "节奏", rhythm()],
-    ["hosts", "网站屏蔽", websiteBlock()],
-    ["body", "身体", bodyPanel()],
-    ["notify", "提醒", notificationPanel()],
-    ["about", "关于", aboutPanel()],
-  ];
-  const navigation = panels.map(([id, title]) => `<button data-action="jump-settings" data-id="${esc(id)}">${esc(title)}</button>`).join("");
-  return `<header class="page-heading"><h1>设置</h1><p role="status">${ui.pendingPrefs > 0 ? "正在保存…" : "更改自动保存"}</p></header>
-    <nav class="settings-nav" aria-label="设置分区">${navigation}</nav>` + panels
-    .map(([id, title, html]) => html.replace('<section class="plate"', `<section class="plate settings-section" id="panel-${id}" tabindex="-1" aria-label="${esc(title)}"`))
-    .join("");
+  const current = SETTINGS_SECTIONS.find(([id]) => id === ui.settingsSection) ?? SETTINGS_SECTIONS[0];
+  const [id, title] = current;
+  // 一次只画一个分区：整页一根滚动条到底是上一版最难用的地方。
+  return `<header class="page-heading"><h1>${esc(title)}</h1><p role="status">${ui.pendingPrefs > 0 ? "正在保存…" : "更改自动保存"}</p></header>`
+    + sectionBody(id).replace('<section class="plate"', `<section class="plate settings-section" id="panel-${esc(id)}" tabindex="-1" aria-label="${esc(title)}"`);
 }
 
 function settingRow(title: string, detail: string, control: string): string {
@@ -35,7 +51,7 @@ function projectCatalog(): string {
   const p = prefs();
   const rows = p.categories.map(projectRow).join(hair());
   const inner = `<div class="settings-panel">
-    ${sectionLabel("项目", { icon: "layers", trailing: btn("添加项目", { kind: "plate", action: "add-project" }), cls: "pb6" })}
+    <div class="panel-meta">${btn("添加项目", { kind: "plate", action: "add-project" })}</div>
     ${rows}
   </div>`;
   return plate(inner);
@@ -43,13 +59,10 @@ function projectCatalog(): string {
 
 function projectRow(c: CategoryDef): string {
   const open = ui.expandedProject === c.id;
-  const meta = `一格 ${c.default_block_minutes} 分`;
   const header = `<button class="project-row" id="project-${esc(c.id)}" data-action="expand-project" data-id="${esc(c.id)}" aria-expanded="${open}" aria-label="${open ? "收起" : "编辑"}项目 ${esc(c.name)}">
       ${icon(open ? "chevron-down" : "chevron-right", 11, "chev")}
       <span class="glyph-badge">${icon(c.icon, 15)}</span>
       <span class="nm">${esc(c.name)}</span>
-      <span class="role">${esc(roleLabel(c.role))}</span>
-      <span class="hints">${esc(meta)}</span>
     </button>`;
   return open ? header + projectEditor(c) : header;
 }
@@ -62,59 +75,45 @@ function projectEditor(c: CategoryDef): string {
         `<button class="glyph${c.icon === name ? " on" : ""}" data-action="set-icon" data-id="${esc(c.id)}" data-icon="${esc(name)}" title="${esc(label)}" aria-label="${esc(label)}" aria-pressed="${c.icon === name}">${icon(name, 16)}</button>`
     )
     .join("");
+  const uniform = prefs().uniform_block_minutes;
   return `<div class="project-editor" id="editor-${esc(c.id)}">
     <div class="identity">
       ${labelled("名称", `<input class="field sm" style="width:150px" data-change="project-name" data-id="${esc(c.id)}" value="${esc(c.name)}" placeholder="项目名称" aria-label="编辑项目名称 ${esc(c.name)}" />`)}
       ${labelled("短名", `<input class="field sm" style="width:84px" data-change="project-short-name" data-id="${esc(c.id)}" value="${esc(c.short_name)}" placeholder="${esc(shortNameFrom(c.name))}" aria-label="${esc(c.name)}在侧栏与菜单栏上的短名，留空自动" />`)}
-      ${labelled("一格", select({ change: "block-length", data: { id: c.id }, value: c.default_block_minutes, options: withValue(BLOCK_OPTIONS, c.default_block_minutes).map((n) => ({ value: n, label: `${n} 分` })), width: 84, label: `${c.name}默认一格多长`, disabled: prefs().uniform_block_minutes > 0 }))}
-      ${labelled("排序", select({ change: "project-role", data: { id: c.id }, value: c.role, options: ROLES.map(([value, label]) => ({ value, label })), width: 108, label: `${c.name}在下一格建议里的性质` }))}
+      ${labelled("一格", select({ change: "block-length", data: { id: c.id }, value: uniform > 0 ? uniform : c.default_block_minutes, options: withValue(BLOCK_OPTIONS, uniform > 0 ? uniform : c.default_block_minutes).map((n) => ({ value: n, label: `${n} 分` })), width: 84, label: `${c.name}默认一格多长`, disabled: uniform > 0 }))}
+      ${uniform > 0 ? `<span class="t-note">节奏里开着「统一块长」，所有项目都用 ${uniform} 分</span>` : ""}
     </div>
     <div class="s-field"><span class="engraved">图标</span><div class="glyphs">${glyphs}</div></div>
     <div class="foot">${btn("删除项目", { kind: "quiet-danger", action: "del-project", data: { id: c.id } })}</div>
   </div>`;
 }
 
-// ---------- 三档安排 ----------
+// ---------- 时间安排 ----------
 
-function quotaCell(c: CategoryDef, profile: ProfileDef, scaleMinutes: number): string {
+function quotaRow(c: CategoryDef, profile: ProfileDef): string {
   const minutes = profile.quotas.find((q) => q.category === c.id)?.minutes ?? 0;
   const key = `${encodeURIComponent(profile.id)}:${encodeURIComponent(c.id)}`;
-  const label = `${profile.name}档 ${c.name}`;
   const data = `data-profile="${esc(profile.id)}" data-category="${esc(c.id)}"`;
-  const adjust = (delta: number, glyph: string, verb: string) => `<button id="quota-${glyph}-${esc(key)}" data-action="step" data-bind="quota" data-delta="${delta}" data-step="15" data-min="0" data-max="1440" ${data} ${delta < 0 ? minutes <= 0 ? "disabled" : "" : minutes >= 1440 ? "disabled" : ""} aria-label="${esc(label)}${verb} 15 分钟">${icon(glyph, 12)}</button>`;
-  // 表里填的是分钟，脑子里想的是小时；换算放在格子下面，输入本身仍然是分钟。
-  // 短条是**整张表同一把尺**（分母是表里最大的那个数），所以横竖都能直接比长短。
-  const hours = minutes === 0 ? "—" : meter(minutes * 60);
-  const share = scaleMinutes > 0 ? Math.min(100, (minutes / scaleMinutes) * 100) : 0;
-  return `<td><div class="quota-edit${minutes === 0 ? " zero" : ""}">
-    ${adjust(-1, "minus", "减少")}
-    <input id="quota-field-${esc(key)}" class="field quota-input" type="number" inputmode="numeric" min="0" max="1440" step="1" value="${esc(minutes)}" data-change="quota-minutes" ${data} aria-label="${esc(label)}目标分钟数" aria-describedby="quota-help" />
-    ${adjust(1, "plus", "增加")}
-  </div>
-  <div class="quota-scale" aria-hidden="true"><span class="bar"><i style="width:${share.toFixed(2)}%"></i></span><span class="hrs">${esc(hours)}</span></div></td>`;
+  const adjust = (delta: number, glyph: string, verb: string) =>
+    `<button id="quota-${glyph}-${esc(key)}" data-action="step" data-bind="quota" data-delta="${delta}" data-step="15" data-min="0" data-max="1440" ${data} ${delta < 0 ? minutes <= 0 ? "disabled" : "" : minutes >= 1440 ? "disabled" : ""} aria-label="${esc(c.name)}${verb} 15 分钟">${icon(glyph, 12)}</button>`;
+  return `<div class="plan-row${minutes === 0 ? " off" : ""}" id="quota-row-${esc(c.id)}">
+    <span class="who">${icon(c.icon, 15)}<span class="nm">${esc(c.name)}</span></span>
+    <span class="edit">${adjust(-1, "minus", "减少")}<input id="quota-field-${esc(key)}" class="field plan-input" type="number" inputmode="numeric" min="0" max="1440" step="1" value="${esc(minutes)}" data-change="quota-minutes" ${data} aria-label="${esc(c.name)}目标分钟数" />${adjust(1, "plus", "增加")}</span>
+    <span class="hrs">${minutes === 0 ? "不排" : esc(meter(minutes * 60))}</span>
+  </div>`;
 }
 
 function tierPlan(): string {
   const p = prefs();
-  const columns = p.profiles.map((profile) => `<th scope="col">${esc(profile.name)}</th>`).join("");
-  // 一把尺量整张表：分母是所有格里最大的那个，空表兜个 1 免得除零。
-  const scaleMinutes = Math.max(1, ...p.profiles.flatMap((x) => x.quotas.map((q) => q.minutes)));
-  const rows = p.categories.map((c) => `<tr id="quota-row-${esc(c.id)}"><th scope="row"><span class="quota-project">${icon(c.icon, 15)}<span>${esc(c.name)}</span></span></th>${p.profiles.map((profile) => quotaCell(c, profile, scaleMinutes)).join("")}</tr>`).join("");
-  const totals = p.profiles
-    .map((profile) => {
-      const total = profileTotalMinutes(profile);
-      return `<td><span class="quota-total">${esc(meter(total * 60))}</span><span class="quota-total-minutes" aria-hidden="true">${esc(total)} 分</span></td>`;
-    })
-    .join("");
+  const plan = p.profiles[0];
+  if (!plan) return plate(`<div class="settings-panel"><p class="t-note">还没有项目。</p></div>`);
+  const rows = p.categories.map((c) => quotaRow(c, plan)).join("");
+  const total = profileTotalMinutes(plan);
   const inner = `<div class="settings-panel">
-    ${sectionLabel("三档安排", { icon: "sliders-horizontal", trailing: `<span class="t-note">单位：分钟</span>`, cls: "pb12" })}
-    <div class="quota-table-wrap"><table class="quota-table" aria-label="各项目在三档安排中的目标分钟数" aria-describedby="quota-help">
-      <thead><tr><th scope="col">项目</th>${columns}</tr></thead>
-      <tbody>${rows}</tbody>
-      <tfoot><tr><th scope="row">总目标</th>${totals}</tr></tfoot>
-    </table></div>
-    <p class="quota-help" id="quota-help">直接输入分钟数，或每次增减 15 分钟；0 表示不安排。</p>
-    <p class="quota-help">用于未来学习日；今天不会自动改变，主动切换档位时才采用新配额。</p>
+    <div class="panel-meta"><span class="t-note">单位：分钟</span></div>
+    <div class="plan-rows">${rows}</div>
+    ${hair()}
+    <div class="plan-total"><span class="engraved">总目标</span><span class="mono num">${esc(meter(total * 60))}</span></div>
   </div>`;
   return plate(inner);
 }
@@ -127,7 +126,6 @@ function rhythm(): string {
   const idle = p.idle_reminder_enabled ? p.idle_reminder_minutes : 0;
   const uniform = p.uniform_block_minutes;
   const inner = `<div class="settings-panel">
-    ${sectionLabel("节奏", { icon: "timer" })}
     ${settingRow("默认档位", active ? "今天进行中，去今天页切换" : "", select({ change: "default-profile", value: defaultProfileId(), options: p.profiles.map((x) => ({ value: x.id, label: `${x.name} · ${meter(profileTotalMinutes(x) * 60)}` })), width: 134, label: "默认档位", disabled: active }))}
     ${hair()}
     ${settingRow("每格之后休息", "", select({ change: "break-default", value: p.break_minutes, options: withValue(BREAK_OPTIONS, p.break_minutes).map((n) => ({ value: n, label: n === 0 ? "不休息" : `${n} 分` })), width: 104, label: "每格之后休息" }))}
@@ -138,7 +136,7 @@ function rhythm(): string {
       `${uniform > 0 ? select({ change: "uniform-length", value: uniform, options: withValue(BLOCK_OPTIONS, uniform).map((n) => ({ value: n, label: `${n} 分` })), width: 84, label: "统一块长" }) : ""}${toggle({ change: "uniform-toggle", checked: uniform > 0, label: "统一块长" })}`
     )}
     ${hair()}
-    ${settingRow("闲置多久开始催", "", select({ change: "idle", value: idle, options: withValue(IDLE_OPTIONS, idle).map((n) => ({ value: n, label: n === 0 ? "不催" : `${n} 分` })), width: 104, label: "闲置提醒间隔" }))}
+    ${settingRow("暂停提醒", "未开格时按间隔提醒，显示本次暂停总时长", select({ change: "idle", value: idle, options: withValue(IDLE_OPTIONS, idle).map((n) => ({ value: n, label: n === 0 ? "关闭" : `${n} 分` })), width: 104, label: "暂停提醒间隔" }))}
     ${hair()}
     ${settingRow("登录时自动启动", ui.autostart === null ? "正在读取系统设置…" : "", toggle({ change: "autostart", checked: ui.autostart === true, disabled: ui.autostart === null, label: "登录时自动启动" }))}
   </div>`;
@@ -151,51 +149,109 @@ interface BlockState {
   title: string;
   detail?: string;
   problem: boolean;
-  hostLabel: string;
 }
 
 export function blockState(): BlockState {
   const b = ui.snap!.blocking;
   const hosts = prefs().blocked_hosts.length;
-  const active = !!day();
-  if (b.busy) return { title: "正在核对系统规则", problem: false, hostLabel: "正在核对系统规则" };
-  if (b.error) return { title: "需要处理", detail: b.error, problem: true, hostLabel: "当前规则尚未确认" };
-  if (active) {
-    if (hosts === 0) return { title: "学习日进行中 · 未配置", problem: false, hostLabel: "当前学习日正在屏蔽" };
-    if (b.active) return { title: `正在屏蔽 ${hosts} 个`, problem: false, hostLabel: "当前学习日正在屏蔽" };
-    return { title: "系统规则与设置不一致", detail: `应该屏蔽 ${hosts} 个，实际检测到 0 个。`, problem: true, hostLabel: "当前规则尚未确认" };
-  }
-  return { title: hosts === 0 ? "还没有屏蔽网址" : `已配置 ${hosts} 个`, problem: false, hostLabel: "下次学习日生效" };
+  if (!inTauri) return { title: "预览模式 · 不拦截网站", problem: false };
+  if (b.busy) return { title: "正在应用整站规则 · 请完成系统授权", problem: false };
+  if (b.error) return { title: "整站规则需要处理", detail: b.error, problem: true };
+  if (!hosts) return { title: "未配置整站规则", problem: false };
+  if (!day()) return { title: "下次学习日生效", problem: false };
+  if (b.active) return { title: `系统规则已写入 · ${hosts} 个域名`, problem: false };
+  return { title: "系统规则与设置不一致", detail: `应该屏蔽 ${hosts} 个网站，尚未确认生效。`, problem: true };
+}
+
+function browserBlockState(): BlockState {
+  const b = ui.snap!.blocking.browser;
+  if (!inTauri) return { title: "预览模式 · 扩展未连接", detail: "浏览器预览只演示设置，不会拦截网页。请在桌面应用中连接扩展。", problem: false };
+  if (b.error) return { title: "扩展连接需要处理", detail: b.error, problem: true };
+  if (!b.available) return { title: "本地连接服务未启动", detail: "请重启坐功，再检查扩展连接状态。", problem: true };
+  if (!b.connected) return { title: "扩展未连接", detail: "需要在 Chrome 或 Edge 中安装并启用扩展，保持坐功运行。", problem: false };
+  if (!b.synced) return { title: "扩展已连接 · 等待同步", detail: "约每 30 秒尝试同步规则，当前修改尚未确认生效。", problem: false };
+  if (!prefs().blocked_urls.length) return { title: "扩展已连接 · 未配置精确网址", problem: false };
+  return day()
+    ? { title: "扩展已同步 · 精确网址生效中", detail: "仅在已连接的浏览器中拦截。", problem: false }
+    : { title: "扩展已同步 · 下次学习日生效", problem: false };
+}
+
+function wholeSiteBrowserState(): BlockState {
+  const b = ui.snap!.blocking.browser;
+  if (!inTauri) return { title: "浏览器预览不执行整站拦截。", problem: false };
+  if (!b.connected || b.error || !b.available) return { title: "浏览器整站拦截未连接，请安装或启用扩展。仅写入系统规则无法确认浏览器已拦截。", problem: true };
+  if (!b.supports_hosts) return { title: "当前扩展只支持精确网址，请更新并重新加载扩展以启用整站拦截。", problem: true };
+  if (!b.synced) return { title: "浏览器整站规则等待同步，请在扩展中点击「立即同步」。", problem: false };
+  return { title: !prefs().blocked_hosts.length ? "浏览器已连接，添加整站规则后会同步。" : day() ? "浏览器已同步 · 整站拦截生效中" : "浏览器已同步 · 下次学习日生效", problem: false };
+}
+
+function statusLabel(state: BlockState): string {
+  return `<span class="status-dot${state.problem ? " problem" : ""}"><i aria-hidden="true"></i>${esc(state.title)}</span>`;
+}
+
+function ruleRows(kind: "host" | "url", values: string[]): string {
+  if (!values.length) return `<p class="blocking-note">${kind === "url" ? "还没有精确网址规则。" : "还没有整站规则。"}</p>`;
+  return `<div class="blocking-rule-list">${values.map((value) => `<div class="blocking-rule">
+    <span class="rule-content"><span class="rule-kind">${kind === "url" ? "精确网址" : "整个网站"}</span><span class="rule-value mono sel">${esc(value)}</span></span>
+    ${btn("解除", { kind: "quiet-danger", action: "remove-rule", data: { kind, value }, title: `解除${kind === "url" ? "精确网址" : "整站"}规则 ${value}（需要两步确认）` })}
+  </div>`).join("")}</div>`;
+}
+
+function ruleEditor(kind: "host" | "url"): string {
+  const exact = kind === "url";
+  const draft = exact ? ui.urlDraft : ui.hostDraft;
+  const preview = draft.trim() ? (exact ? normalizeUrl(draft) : normalizeHost(draft)) : null;
+  const error = preview && "error" in preview ? preview.error : null;
+  const full = prefs().blocked_hosts.length + prefs().blocked_urls.length >= MAX_BLOCK_RULES;
+  const detail = error ?? (preview && "url" in preview
+    ? `仅屏蔽这个完整网址：${preview.url}`
+    : preview && "host" in preview ? `将屏蔽 ${preview.host} 和 www.${preview.host} 下的所有页面，包括收藏和视频。` : "");
+  return `<div class="blocking-editor">
+    <label class="blocking-input-label" for="blocked-${kind}-input">${exact ? "完整网址" : "网站域名"}</label>
+    <div class="host-add"><input id="blocked-${kind}-input" class="field md" data-input="${kind}" value="${esc(draft)}" aria-describedby="blocking-${kind}-help blocking-${kind}-preview" aria-invalid="${!!error}" placeholder="${exact ? "https://www.douyin.com/?recommend=1" : "douyin.com"}" autocomplete="off" spellcheck="false" />${btn(exact ? "添加精确网址" : "添加整站规则", { kind: "plate", action: `add-${kind}`, disabled: !preview || !!error || full || ui.pendingPrefs > 0 })}</div>
+    <p class="blocking-note" id="blocking-${kind}-help" ${full ? "" : "hidden"}>已达到 ${MAX_BLOCK_RULES} 条上限，请先解除不需要的规则。</p>
+    <p class="blocking-note${error ? " caution" : ""}" id="blocking-${kind}-preview" role="status" ${detail ? "" : "hidden"}>${esc(detail)}</p>
+  </div>`;
 }
 
 function websiteBlock(): string {
   const p = prefs();
-  const state = blockState();
-  const preview = ui.hostDraft.trim() ? normalizeHost(ui.hostDraft) : null;
-  const previewLine = preview
-    ? "host" in preview
-      ? `<p class="t-caption sel" style="font-size:12px;padding-top:8px">将保存为 ${esc(preview.host)}，会挡住 ${esc(preview.host)} 和 www.${esc(preview.host)}。</p>`
-      : `<p class="t-note caution" style="padding-top:8px">${esc(preview.error)}</p>`
+  const hostState = blockState();
+  const wholeSiteState = wholeSiteBrowserState();
+  const browserState = browserBlockState();
+  const preview = ui.urlDraft.trim() ? normalizeUrl(ui.urlDraft) : null;
+  const previewUrl = preview && "url" in preview ? preview.url : undefined;
+  const conflict = previewUrl ? conflictingHost(previewUrl, p.blocked_hosts) : undefined;
+  const existingConflicts = [...new Set(p.blocked_urls.map((url) => conflictingHost(url, p.blocked_hosts)).filter((host): host is string => !!host))];
+  const conflicts = [...new Set([...existingConflicts, ...(conflict ? [conflict] : [])])];
+  const warning = conflicts.length
+    ? `<p class="blocking-conflict" role="status">整站规则 <b>${conflicts.map(esc).join("、")}</b> 仍会屏蔽对应网站的收藏和视频。若只想拦推荐页，请解除下方对应的整站规则。</p>`
     : "";
-  const rows = p.blocked_hosts.length
-    ? `<div class="host-list">${p.blocked_hosts
-        .map(
-          (h) => `<div class="host-chip"><span class="mono">${esc(h)}</span>${btn("解除", { kind: "quiet-danger", action: "remove-host", data: { host: h }, title: `解除对 ${h} 的屏蔽（需要两步确认）` })}</div>`
-        )
-        .join("")}</div>`
-    : `<p class="t-note" style="font-size:12.5px;padding:4px 0">列表是空的。</p>`;
-  const problem = state.problem
-    ? `<div class="problem-block"><span class="titles"><b>${esc(state.title)}</b>${state.detail ? `<span>${esc(state.detail)}</span>` : ""}</span>${btn("重新核对", { kind: "quiet", action: "recheck-blocking" })}${btn("重新应用", { kind: "plate", cls: "caution", action: "reapply-blocking" })}</div>`
+  const problem = hostState.problem
+    ? `<div class="problem-block"><span class="titles"><b>${esc(hostState.title)}</b>${hostState.detail ? `<span>${esc(hostState.detail)}</span>` : ""}</span>${btn("重新应用整站规则", { kind: "plate", cls: "caution", action: "reapply-blocking" })}</div>`
     : "";
-  const statusLabel = `<span class="status-dot${state.problem ? " problem" : ""}"><i></i>${esc(state.title)}</span>`;
-  const inner = `<div class="settings-panel">
-    ${sectionLabel("网站屏蔽", { icon: "shield", trailing: statusLabel, cls: "pb12" })}
-    <div class="host-add"><input class="field md" style="flex:1" data-input="host" value="${esc(ui.hostDraft)}" aria-label="要屏蔽的网址或域名" placeholder="粘贴网址或输入域名" autocomplete="off" spellcheck="false" />${btn("添加", { kind: "plate", action: "add-host", disabled: !(preview && "host" in preview) })}</div>
-    ${previewLine}
+  const inner = `<div class="settings-panel website-block">
+    <div class="panel-meta"><span class="t-note">${p.blocked_hosts.length + p.blocked_urls.length} / ${MAX_BLOCK_RULES} 条</span></div>
+    ${warning}
     ${hair("mt13")}
-    ${rows}
-    ${problem ? hair("mt13") + problem : ""}
-    <div class="foot-note"><p>学习日开始时写入系统 hosts，收工或放弃时解除；写入需要一次管理员授权。</p>${state.problem ? "" : btn("重新核对", { kind: "quiet", action: "recheck-blocking" })}</div>
+    <div class="blocking-group-heading"><b>精确网址</b><span class="t-note">只拦这一个网址</span>${statusLabel(browserState)}</div>
+    ${browserState.detail ? `<p class="blocking-note${browserState.problem ? " caution" : ""}">${esc(browserState.detail)}</p>` : ""}
+    ${ruleEditor("url")}
+    ${ruleRows("url", p.blocked_urls)}
+    <details id="blocking-help" class="blocking-help" data-preserve-open><summary>安装浏览器扩展与填写示例</summary>
+      <ol><li>打开 Chrome 的 <span class="mono sel">chrome://extensions</span> 或 Edge 的 <span class="mono sel">edge://extensions</span>，开启「开发者模式」。</li><li>点击下方按钮找到扩展目录，再在浏览器中选择「加载已解压的扩展程序」，选中该目录。</li><li>保持坐功运行；扩展约每 30 秒尝试同步规则。上方显示「已同步」后，在学习日期间生效。</li></ol>
+      ${btn("打开扩展文件夹", { kind: "plate", action: "reveal-browser-extension" })}
+      <p class="blocking-note">抖音推荐页：<span class="mono sel">https://www.douyin.com/?recommend=1</span>。收藏页路径不同，可以正常打开。</p>
+      <p class="blocking-note">B 站首页：<span class="mono sel">https://www.bilibili.com/</span>。视频页 <span class="mono sel">/video/…</span> 可以正常打开。</p>
+      <p class="blocking-note">精确匹配逐字比较：路径、参数、顺序或 # 后内容不同都会放行。拦截发生在页面导航之后，可能一闪。</p>
+    </details>
+    ${hair("mt13")}
+    <div class="blocking-group-heading"><b>整个网站</b><span class="t-note">这个域名下全都不开</span>${statusLabel(hostState)}</div>
+    <p class="blocking-note${wholeSiteState.problem ? " caution" : ""}" role="status">${esc(wholeSiteState.title)}</p>
+    ${ruleEditor("host")}
+    ${ruleRows("host", p.blocked_hosts)}
+    ${problem}
+    <div class="foot-note"><p>暂停和休息时规则保持生效，收工后解除。写入和解除系统 hosts 各需一次管理员授权。</p>${btn("核对整站规则", { kind: "quiet", action: "recheck-blocking", disabled: ui.snap!.blocking.busy })}</div>
   </div>`;
   return plate(inner);
 }
@@ -207,8 +263,7 @@ function bodyPanel(): string {
   const water = `${p.water_reminder_enabled ? stepper({ bind: "water-min", value: p.water_reminder_minutes, label: `${p.water_reminder_minutes} 分`, min: 10, max: 180, step: 5, ariaLabel: "喝水提醒间隔" }) : ""}${toggle({ change: "water-on", checked: p.water_reminder_enabled, label: "喝水提醒" })}`;
   const stretch = `${p.stretch_reminder_enabled ? stepper({ bind: "stretch-min", value: p.stretch_reminder_minutes, label: `${p.stretch_reminder_minutes} 分`, min: 15, max: 180, step: 5, ariaLabel: "起身提醒间隔" }) : ""}${toggle({ change: "stretch-on", checked: p.stretch_reminder_enabled, label: "起身护眼提醒" })}`;
   const inner = `<div class="settings-panel">
-    ${sectionLabel("身体", { icon: "heart-pulse" })}
-    ${settingRow("喝水提醒", "", water)}
+    ${settingRow("喝水提醒", "只在专注计时中提醒，记一杯水后重新计时", water)}
     ${hair()}
     ${settingRow("每天喝水目标", "", stepper({ bind: "goal", value: p.hydration_goal_cups, label: `${p.hydration_goal_cups} 杯`, min: 1, max: 20, step: 1, ariaLabel: "每天喝水目标" }))}
     ${hair()}
@@ -239,7 +294,6 @@ function notificationPanel(): string {
     ? ""
     : btn("申请权限", { kind: "plate", action: "notif-recheck" });
   const inner = `<div class="settings-panel">
-    ${sectionLabel("提醒", { icon: "bell" })}
     ${settingRow("提示音", "提醒时响一声，窗口关着也听得见", toggle({ change: "sound", checked: p.sound_enabled, label: "提示音" }))}
     ${hair()}
     ${settingRow("系统通知", notificationStatusText(), `${grant}${btn("试一条", { kind: "plate", action: "notif-test" })}${btn("打开系统设置", { kind: "quiet", action: "notif-open" })}`)}
@@ -251,7 +305,6 @@ function notificationPanel(): string {
 
 function aboutPanel(): string {
   const inner = `<div class="settings-panel">
-    ${sectionLabel("关于", { icon: "info" })}
     ${settingRow("版本", "坐功 · Sitzfleisch", `<span class="mono t-note">${esc(ui.appVersion ?? "读取中…")}</span>`)}
     ${hair()}
     ${settingRow("数据只存在本机", ui.snap!.state_path, btn("在 Finder 中显示", { kind: "quiet", action: "reveal-state" }))}

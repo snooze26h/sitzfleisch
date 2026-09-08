@@ -28,7 +28,8 @@ export interface Dialog {
 export const QUIT_DIALOG_ID = "quit-blocked";
 
 export interface Removal {
-  host: string;
+  kind: "host" | "url";
+  value: string;
   step: 1 | 2;
   typed: string;
 }
@@ -51,9 +52,12 @@ export const ui = {
   expandedDays: new Set<number>(),
   selectedHistoryDay: null as number | null,
   // 设置
+  /** 设置里当前打开的分区；侧栏在设置页会整个换成分区列表。 */
+  settingsSection: "projects",
   pendingPrefs: 0,
   expandedProject: null as string | null,
   hostDraft: "",
+  urlDraft: "",
   notificationStatus: "checking",
   autostart: null as boolean | null,
   appVersion: null as string | null,
@@ -173,34 +177,6 @@ export function defaultProfileId(): string {
   return p.profiles.some((x) => x.id === p.default_profile_id) ? p.default_profile_id : (p.profiles[0]?.id ?? "");
 }
 
-/**
- * 精确域名的即时预览。规则与 `core::validate_host` 逐条对齐，但**它才是权威**：
- * 这里只负责在用户还在输入时先说一声，真正入库前一律回问 core。
- */
-export function normalizeHost(raw: string): { host: string } | { error: string } {
-  let host = raw.trim().toLowerCase();
-  if (!host) return { error: "网址不能为空。" };
-  if (host.includes("@")) return { error: "网址不能包含用户名或密码。" };
-  const scheme = host.match(/^([a-z][a-z0-9+.-]*):\/\//);
-  if (scheme && scheme[1] !== "http" && scheme[1] !== "https") return { error: "只支持 http 或 https 网址。" };
-  host = host.replace(/^https?:\/\//, "");
-  host = host.split(/[/?#]/)[0];
-  host = host.replace(/:\d+$/, "");
-  // 存储形态一律不带 www：写 hosts 时 core 会自己补上 www 那一份。
-  host = host.replace(/^www\./, "");
-  if (!host) return { error: "没有识别出安全、完整的域名。" };
-  if (host === "localhost" || host.includes(":")) return { error: "不能添加 localhost 或 IP 地址。" };
-  if (/[^\x00-\x7f]/.test(host)) return { error: "当前版本只接受英文域名；中文域名请先转换成 punycode。" };
-  if (!host.includes(".") || host.startsWith(".") || host.endsWith(".") || !/^[a-z0-9.-]+$/.test(host)) {
-    return { error: "没有识别出安全、完整的域名。" };
-  }
-  // 每一段都是纯数字就是 IP，与 core 同一条判据。
-  if (host.split(".").every((label) => label.length > 0 && /^\d+$/.test(label))) {
-    return { error: "不能添加 localhost 或 IP 地址。" };
-  }
-  return { host };
-}
-
 /** 一行一条，把输入框里的文字变成任务清单。 */
 export function parseTasks(text: string): TaskItem[] {
   return text
@@ -214,8 +190,6 @@ export const BLOCK_OPTIONS = [25, 30, 45, 60, 75, 90, 120];
 export const BREAK_OPTIONS = [0, 5, 10, 15, 20];
 export const IDLE_OPTIONS = [0, 10, 15, 30, 60];
 export const MAX_PROJECTS = 12;
-export const MAX_HOSTS = 64;
-export const SITTING_ALARM = 3 * 3600;
 export const HISTORY_LIMIT = 60;
 
 export function withValue(options: number[], current: number): number[] {

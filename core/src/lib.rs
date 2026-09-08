@@ -6,11 +6,13 @@
 
 use serde::{Deserialize, Serialize};
 
-pub const SCHEMA_VERSION: u32 = 3;
+pub const SCHEMA_VERSION: u32 = 4;
 pub const SUSPEND_GAP_SECONDS: i64 = 120;
 pub const MIN_BLOCK_MINUTES: i64 = 5;
 pub const MAX_BLOCK_MINUTES: i64 = 180;
 pub const HISTORY_LIMIT: usize = 60;
+pub const MAX_BLOCK_RULES: usize = 64;
+pub const MAX_BLOCK_URL_BYTES: usize = 4096;
 
 // ---------- 计划（用户可编辑） ----------
 
@@ -104,6 +106,9 @@ pub struct Preferences {
     /// 学习日期间按精确域名屏蔽的网站。
     #[serde(default)]
     pub blocked_hosts: Vec<String>,
+    /// 浏览器中按完整网址精确屏蔽的页面；路径、查询参数和片段都参与匹配。
+    #[serde(default)]
+    pub blocked_urls: Vec<String>,
     /// 统一块长（分钟）；0 表示按项目各自的默认块长。
     #[serde(default)]
     pub uniform_block_minutes: i64,
@@ -146,26 +151,13 @@ pub fn builtin_preferences() -> Preferences {
             def("writing", "写作", 50, "pen-line", "general"),
             def("browse", "浏览", 30, "newspaper", "general"),
         ],
-        profiles: vec![
-            ProfileDef {
-                id: "light".into(),
-                name: "轻量".into(),
-                subtitle: "留给状态不好的日子".into(),
-                quotas: vec![quota("main", 120), quota("reading", 60), quota("writing", 60), quota("browse", 0)],
-            },
-            ProfileDef {
-                id: "standard".into(),
-                name: "标准".into(),
-                subtitle: "大部分日子的默认目标".into(),
-                quotas: vec![quota("main", 240), quota("reading", 120), quota("writing", 120), quota("browse", 30)],
-            },
-            ProfileDef {
-                id: "sprint".into(),
-                name: "冲刺".into(),
-                subtitle: "状态好时的满配".into(),
-                quotas: vec![quota("main", 360), quota("reading", 240), quota("writing", 240), quota("browse", 30)],
-            },
-        ],
+        // 只有一份计划：每天开始前当场把分钟数调成今天想要的样子，不再分档。
+        profiles: vec![ProfileDef {
+            id: "standard".into(),
+            name: "今天".into(),
+            subtitle: String::new(),
+            quotas: vec![quota("main", 240), quota("reading", 120), quota("writing", 120), quota("browse", 30)],
+        }],
         break_minutes: 10,
         hydration_goal_cups: 8,
         water_reminder_enabled: false,
@@ -175,42 +167,34 @@ pub fn builtin_preferences() -> Preferences {
         idle_reminder_enabled: false,
         idle_reminder_minutes: 15,
         blocked_hosts: Vec::new(),
+        blocked_urls: Vec::new(),
         uniform_block_minutes: 0,
         default_profile_id: String::new(),
         sound_enabled: true,
     }
 }
 
-/// 精确域名的唯一权威归一：小写、剥协议 / 路径 / 查询串 / 端口 / `www.`，至少一个点，不能是 IP。
+/// 整站规则只接收裸域名：小写并去掉 `www.`，不会把完整网址悄悄扩大为整站。
 /// 界面里的 `normalizeHost` 只是同一套规则的即时预览，任何东西入库前都要过这里。
 pub fn validate_host(raw: &str) -> Result<String, &'static str> {
     let mut host = raw.trim().to_lowercase();
-    if host.contains('@') {
-        return Err("网址不能包含用户名或密码");
-    }
-    if let Some(rest) = host.strip_prefix("https://") {
-        host = rest.to_string();
-    } else if let Some(rest) = host.strip_prefix("http://") {
-        host = rest.to_string();
-    } else if host.contains("://") {
-        return Err("只支持 http 或 https 网址");
-    }
-    // 只留主机名。
-    host = host.split(['/', '?', '#']).next().unwrap_or("").to_string();
-    if let Some((name, port)) = host.rsplit_once(':') {
-        if !port.is_empty() && port.chars().all(|c| c.is_ascii_digit()) {
-            host = name.to_string();
-        }
+    if host.contains(['/', '?', '#', ':', '\\', '@']) {
+        return Err("整站屏蔽只接受裸域名；完整网址请添加为精确页面");
     }
     // 存储形态一律不带 www：写 hosts 时会自己补上 www 那一份。
     if let Some(rest) = host.strip_prefix("www.") {
         host = rest.to_string();
     }
+    validate_domain(&host)?;
+    Ok(host)
+}
+
+fn validate_domain(host: &str) -> Result<(), &'static str> {
     if host.is_empty() {
         return Err("域名不能为空");
     }
-    if host.contains(' ') || host.contains(':') {
-        return Err("只要域名本身，不要带路径或端口");
+    if host.len() > 253 {
+        return Err("域名不能超过 253 字节");
     }
     if !host.contains('.') || host.starts_with('.') || host.ends_with('.') {
         return Err("这不像一个域名");
@@ -218,10 +202,47 @@ pub fn validate_host(raw: &str) -> Result<String, &'static str> {
     if !host.chars().all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '-') {
         return Err("域名只能包含字母、数字、点和连字符");
     }
-    if host.split('.').all(|label| !label.is_empty() && label.chars().all(|c| c.is_ascii_digit())) {
+    if host.split('.').any(|label| {
+        label.is_empty() || label.len() > 63 || label.starts_with('-') || label.ends_with('-')
+    }) {
+        return Err("域名各段要有 1–63 个字符，且不能以连字符开头或结尾");
+    }
+    if !matches!(url::Host::parse(host), Ok(url::Host::Domain(_))) {
         return Err("不能添加 IP 地址");
     }
-    Ok(host)
+    Ok(())
+}
+
+/// 使用浏览器的 URL 序列化规范，不折叠路径大小写、不排序或忽略查询参数与片段。
+/// 只对返回的完整字符串做相等比较，禁止再提取域名进行页面规则匹配。
+pub fn validate_url(raw: &str) -> Result<String, &'static str> {
+    if raw.is_empty() || raw.len() > MAX_BLOCK_URL_BYTES {
+        return Err("完整网址要有 1–4096 字节");
+    }
+    if raw.chars().any(|c| c.is_control() || c.is_whitespace()) || raw.contains('\\') {
+        return Err("网址不能包含空白、控制字符或反斜杠");
+    }
+    let (scheme, remainder) = raw.split_once("://").ok_or("请填写以 http:// 或 https:// 开头的完整网址")?;
+    if !scheme.eq_ignore_ascii_case("http") && !scheme.eq_ignore_ascii_case("https") {
+        return Err("只支持 http 或 https 网址");
+    }
+    let authority = remainder.split(['/', '?', '#']).next().unwrap_or("");
+    if authority.contains('@') {
+        return Err("网址不能包含用户名或密码");
+    }
+    if authority.is_empty() || !authority.is_ascii() {
+        return Err("请填写有效的英文域名网址");
+    }
+    let parsed = url::Url::parse(raw).map_err(|_| "网址格式不正确")?;
+    let Some(url::Host::Domain(host)) = parsed.host() else {
+        return Err("网址必须使用域名，不能使用 IP 地址");
+    };
+    validate_domain(host)?;
+    let normalized = parsed.to_string();
+    if normalized.len() > MAX_BLOCK_URL_BYTES {
+        return Err("规范化后的网址不能超过 4096 字节");
+    }
+    Ok(normalized)
 }
 
 /// 计划编辑的准入检查：空名、空档位、幽灵引用、离谱数值一律拒绝。
@@ -254,9 +275,17 @@ pub fn validate_preferences(prefs: &Preferences) -> RuleResult {
     {
         return Err("提醒间隔要在 5–240 分钟之间");
     }
+    if prefs.blocked_hosts.len().saturating_add(prefs.blocked_urls.len()) > MAX_BLOCK_RULES {
+        return Err("网站屏蔽规则合计不能超过 64 条");
+    }
     for host in &prefs.blocked_hosts {
         if validate_host(host).as_deref() != Ok(host.as_str()) {
             return Err("屏蔽列表里有不合法的域名");
+        }
+    }
+    for url in &prefs.blocked_urls {
+        if validate_url(url).as_deref() != Ok(url.as_str()) {
+            return Err("屏蔽列表里有不合法或未规范化的完整网址");
         }
     }
     let mut ids = Vec::new();
@@ -911,7 +940,6 @@ impl State {
 
 // ---------- 「下一格」建议（与界面里的 TS 版同一套规则，菜单栏用） ----------
 
-const SITTING_ALARM: i64 = 3 * 3600;
 const FRESH_WINDOW: i64 = 3 * 3600;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -964,29 +992,11 @@ pub fn block_minutes(c: &CategoryState, prefs: &Preferences) -> i64 {
     preferred.min(remaining_minutes).max(MIN_BLOCK_MINUTES)
 }
 
-/// 距离上一次验收通过的锻炼（或今天开始）以来的连续久坐时间，离开的时段扣掉。
-pub fn sitting_streak_seconds(day: &Day, prefs: &Preferences, now: i64) -> i64 {
-    let mut since = day.started_at;
-    for entry in &day.ledger {
-        if entry.accepted && role_of(prefs, &entry.category) == "movement" && entry.ended_at > since {
-            since = entry.ended_at;
-        }
-    }
-    let elapsed = (now - since).max(0);
-    let paused_after: i64 = day
-        .pauses
-        .iter()
-        .filter(|p| p.started_at >= since)
-        .map(|p| p.seconds(now))
-        .sum();
-    (elapsed - paused_after).max(0)
-}
-
 fn last_category(day: &Day) -> Option<&str> {
     day.ledger.last().map(|l| l.category.as_str())
 }
 
-fn score(c: &CategoryState, day: &Day, prefs: &Preferences, now: i64, candidate_count: usize) -> f64 {
+fn score(c: &CategoryState, day: &Day, prefs: &Preferences, candidate_count: usize) -> f64 {
     let target = (c.quota_minutes * 60) as f64;
     if target <= 0.0 {
         return 0.0;
@@ -1011,17 +1021,13 @@ fn score(c: &CategoryState, day: &Day, prefs: &Preferences, now: i64, candidate_
                 value *= 0.5;
             }
         }
-        "movement" => {
-            let sitting = sitting_streak_seconds(day, prefs, now) as f64;
-            value *= 0.5 + (sitting / SITTING_ALARM as f64).min(1.5);
-        }
         _ => {}
     }
     value
 }
 
 /// 每条建议都带着产生它的那一句理由。
-pub fn suggest(day: &Day, prefs: &Preferences, now: i64) -> Option<Suggestion> {
+pub fn suggest(day: &Day, prefs: &Preferences, _now: i64) -> Option<Suggestion> {
     let candidates: Vec<&CategoryState> = day.categories.iter().filter(|c| remaining_seconds(c) > 0).collect();
     let first = *candidates.first()?;
     let make = |c: &CategoryState, reason: String, pressing: bool| Suggestion {
@@ -1030,13 +1036,6 @@ pub fn suggest(day: &Day, prefs: &Preferences, now: i64) -> Option<Suggestion> {
         reason,
         pressing,
     };
-
-    let sitting = sitting_streak_seconds(day, prefs, now);
-    if sitting >= SITTING_ALARM {
-        if let Some(movement) = candidates.iter().find(|c| role_of(prefs, &c.id) == "movement") {
-            return Some(make(movement, format!("连坐 {}，该动一动。", duration_text(sitting)), true));
-        }
-    }
 
     let total_remaining: i64 = candidates.iter().map(|c| remaining_seconds(c)).sum();
     let last = last_category(day);
@@ -1055,9 +1054,9 @@ pub fn suggest(day: &Day, prefs: &Preferences, now: i64) -> Option<Suggestion> {
     }
 
     let mut best = first;
-    let mut best_score = score(first, day, prefs, now, candidates.len());
+    let mut best_score = score(first, day, prefs, candidates.len());
     for c in candidates.iter().skip(1) {
-        let s = score(c, day, prefs, now, candidates.len());
+        let s = score(c, day, prefs, candidates.len());
         let better = if s != best_score { s > best_score } else { remaining_seconds(c) > remaining_seconds(best) };
         if better {
             best = c;
@@ -1100,6 +1099,10 @@ fn strip_managed(current: &str) -> Vec<String> {
 /// 生成新的 hosts 内容：enable 且列表非空时在文件尾部维护一段托管区，
 /// 否则确保托管区不存在。除托管区外一个字节都不动。幂等。
 pub fn render_hosts(current: &str, hosts: &[String], enable: bool) -> String {
+    // 落到系统文件前再守一道边界：即使调用方绕过设置校验，也不接收 URL 或注入行。
+    let hosts: Vec<&String> = hosts.iter().filter(|host| {
+        validate_host(host).as_deref() == Ok(host.as_str())
+    }).collect();
     let mut lines = strip_managed(current);
     while lines.last().map(|l| l.trim().is_empty()).unwrap_or(false) {
         lines.pop();
@@ -1127,6 +1130,46 @@ pub fn render_hosts(current: &str, hosts: &[String], enable: bool) -> String {
 /// 只读校验：托管段是否在场。
 pub fn hosts_section_present(current: &str) -> bool {
     current.lines().any(|l| l.trim() == HOSTS_BEGIN)
+}
+
+/// 只核对托管区与当前设置；标记存在不代表每条规则完整，也不代表旧规则已解除。
+pub fn hosts_rules_match(current: &str, hosts: &[String], enable: bool) -> bool {
+    fn managed_lines(content: &str) -> Option<Vec<String>> {
+        let mut records = Vec::new();
+        let mut inside = false;
+        let mut seen = false;
+        for line in content.lines().map(str::trim) {
+            if line == HOSTS_BEGIN {
+                if inside || seen {
+                    return None;
+                }
+                inside = true;
+                seen = true;
+                records.push(line.to_string());
+            } else if line == HOSTS_END {
+                if !inside {
+                    return None;
+                }
+                inside = false;
+                records.push(line.to_string());
+            } else if inside {
+                // 注释、空白和记录顺序不影响 hosts 解析，不因此误报规则失效。
+                let record = line.split('#').next().unwrap_or("").split_whitespace().collect::<Vec<_>>().join(" ");
+                if !record.is_empty() {
+                    records.push(record);
+                }
+            }
+        }
+        if inside {
+            return None;
+        }
+        records.sort();
+        records.dedup();
+        Some(records)
+    }
+
+    let Some(actual) = managed_lines(current) else { return false };
+    managed_lines(&render_hosts("", hosts, enable)).is_some_and(|expected| actual == expected)
 }
 
 // ---------- 序列化 ----------
@@ -1230,19 +1273,23 @@ fn migrate_v2(value: &mut serde_json::Value) {
             }
         }
     }
-    value["schema"] = serde_json::json!(SCHEMA_VERSION);
+    value["schema"] = serde_json::json!(3);
 }
 
 /// 读档。损坏或更高版本一律拒绝解析——调用方必须保留原文件，绝不覆盖。
 pub fn from_json(raw: &str) -> Result<State, String> {
     let mut value: serde_json::Value =
         serde_json::from_str(raw).map_err(|e| format!("unreadable: {e}"))?;
-    let schema = value.get("schema").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
-    if schema > SCHEMA_VERSION {
+    let schema = value.get("schema").and_then(|v| v.as_u64()).unwrap_or(0);
+    if schema > u64::from(SCHEMA_VERSION) {
         return Err(format!("newer schema {schema} > {SCHEMA_VERSION}"));
     }
-    if schema < SCHEMA_VERSION {
+    if schema < 3 {
         migrate_v2(&mut value);
+    }
+    // v3 → v4 只新增默认空的精确网址规则；不能重复迁移 pauses，否则会清空已有暂停记录。
+    if schema < u64::from(SCHEMA_VERSION) {
+        value["schema"] = serde_json::json!(SCHEMA_VERSION);
     }
     serde_json::from_value(value).map_err(|e| format!("unreadable: {e}"))
 }
@@ -1534,7 +1581,7 @@ mod tests {
         assert_eq!(archived.ledger[0].seconds, 60);
         assert!(archived.pauses.iter().all(|p| p.ended_at.is_some()), "收工要把暂停收口");
 
-        state.start_day("light", 6_000).unwrap();
+        state.start_day("standard", 6_000).unwrap();
         state.abandon_day().unwrap();
         assert_eq!(state.history.len(), 1);
     }
@@ -1543,7 +1590,7 @@ mod tests {
     fn delete_history_targets_one_day() {
         let mut state = started();
         state.end_day(2_000).unwrap();
-        state.start_day("light", 3_000).unwrap();
+        state.start_day("standard", 3_000).unwrap();
         state.end_day(4_000).unwrap();
         assert_eq!(state.history.len(), 2);
         state.delete_history_day(3_000).unwrap();
@@ -1554,7 +1601,14 @@ mod tests {
     #[test]
     fn switch_profile_keeps_progress_and_parks_missing_categories() {
         let mut state = State::new(1_000);
-        state.preferences.profiles[0].quotas = vec![quota("main", 120), quota("reading", 60)];
+        // 出厂只给一份计划，但 switch_profile 仍是 core 的能力：自己造第二份来验。
+        state.preferences.profiles[0].quotas = vec![quota("main", 240), quota("reading", 120), quota("writing", 120)];
+        state.preferences.profiles.push(ProfileDef {
+            id: "light".into(),
+            name: "轻量".into(),
+            subtitle: String::new(),
+            quotas: vec![quota("main", 120), quota("reading", 60)],
+        });
         state.start_day("standard", 1_000).unwrap();
         state.start_block("writing", 25, vec![]).unwrap();
         walk_to(&mut state, 1_500);
@@ -1573,7 +1627,7 @@ mod tests {
     #[test]
     fn preferences_validation_and_zero_quota_skipped() {
         let mut state = State::new(0);
-        state.preferences.profiles[1].quotas = vec![quota("main", 240), quota("reading", 0)];
+        state.preferences.profiles[0].quotas = vec![quota("main", 240), quota("reading", 0)];
         state.start_day("standard", 0).unwrap();
         assert_eq!(state.day.as_ref().unwrap().categories.len(), 1);
 
@@ -1629,7 +1683,7 @@ mod tests {
     fn suggestion_explains_itself() {
         let mut state = State::new(1_000);
         state.preferences.categories.push(def("gym", "锻炼", 45, "dumbbell", "movement"));
-        state.preferences.profiles[1].quotas.push(quota("gym", 60));
+        state.preferences.profiles[0].quotas.push(quota("gym", 60));
         state.start_day("standard", 1_000).unwrap();
         let s = suggest(state.day.as_ref().unwrap(), &state.preferences, 1_000).unwrap();
         assert_eq!(s.category, "main");
@@ -1640,18 +1694,24 @@ mod tests {
     }
 
     #[test]
-    fn sitting_streak_ignores_paused_time() {
-        let mut state = started();
-        state.start_block("main", 90, vec![]).unwrap();
-        walk_to(&mut state, 1_000 + 600);
-        let paused_at = state.last_tick;
-        state.toggle_pause(paused_at).unwrap();
-        walk_to(&mut state, paused_at + 1_200);
-        let resumed_at = state.last_tick;
-        state.toggle_pause(resumed_at).unwrap();
-        let now = state.last_tick;
-        let day = state.day.as_ref().unwrap();
-        assert_eq!(sitting_streak_seconds(day, &state.preferences, now), 600, "暂停的 20 分钟不算连坐");
+    fn sitting_duration_does_not_override_quota_suggestions() {
+        let mut state = State::new(1_000);
+        state.preferences.categories.push(def("gym", "锻炼", 45, "dumbbell", "movement"));
+        state.preferences.profiles[0].quotas = vec![quota("writing", 120), quota("gym", 60)];
+        state.start_day("standard", 1_000).unwrap();
+        let day = state.day.as_mut().unwrap();
+        day.pauses.clear();
+        for seconds in [0, 3 * 3600, 3 * 3600 + 30 * 60, 8 * 3600] {
+            let suggestion = suggest(day, &state.preferences, 1_000 + seconds).unwrap();
+            assert_eq!(suggestion.category, "writing", "运动按普通配额排序，不随连坐时长加权或插队");
+            assert!(!suggestion.pressing);
+            assert_eq!(suggestion.reason, "落后最多，还差 2 小时。");
+        }
+        day.categories.retain(|category| category.id == "gym");
+        let suggestion = suggest(day, &state.preferences, 1_000 + 8 * 3600).unwrap();
+        assert_eq!(suggestion.category, "gym", "运动项目仍可按剩余配额正常推荐");
+        assert!(!suggestion.pressing);
+        assert_eq!(suggestion.reason, "落后最多，还差 1 小时。");
     }
 
     #[test]
@@ -1671,17 +1731,120 @@ mod tests {
 
     #[test]
     fn host_validation_normalizes_and_rejects() {
-        assert_eq!(validate_host(" HTTPS://Weibo.com/ ").unwrap(), "weibo.com");
-        assert_eq!(validate_host("weibo.com/hot?tab=1#top").unwrap(), "weibo.com", "路径与查询串剥掉");
+        assert_eq!(validate_host(" Weibo.com ").unwrap(), "weibo.com");
         assert_eq!(validate_host("www.zhihu.com").unwrap(), "zhihu.com", "存储形态统一去掉 www");
-        assert_eq!(validate_host("http://example.com:8080/x").unwrap(), "example.com", "端口剥掉");
-        assert!(validate_host("localhost").is_err());
-        assert!(validate_host("127.0.0.1").is_err(), "IP 不能写进屏蔽列表");
-        assert!(validate_host("192.168.1.1").is_err());
-        assert!(validate_host("ftp://example.com").is_err(), "只支持 http/https");
-        assert!(validate_host("user@example.com").is_err());
-        assert!(validate_host("中文.com").is_err());
-        assert!(validate_host("").is_err());
+        for raw in [
+            "https://weibo.com/", "weibo.com/hot?tab=1#top", "example.com:8080",
+            "example.com?tab=1", "example.com#top", "localhost", "127.0.0.1",
+            "192.168.1.1", "0x7f.1", "ftp://example.com", "user@example.com",
+            "中文.com", "", "example..com", "-example.com", "example-.com",
+            "example.com\n127.0.0.1 localhost", "example\\.com",
+        ] {
+            assert!(validate_host(raw).is_err(), "不可作为整站规则：{raw:?}");
+        }
+        assert!(validate_host(&format!("{}.com", "x".repeat(64))).is_err());
+        assert!(validate_host(&format!("{}.{}.{}.{}.com", "x".repeat(63), "x".repeat(63), "x".repeat(63), "x".repeat(63))).is_err());
+    }
+
+    #[test]
+    fn exact_urls_distinguish_recommendations_from_learning_pages() {
+        let recommendation = "https://www.douyin.com/?recommend=1";
+        let favorites = "https://www.douyin.com/user/self?from_tab_name=main&showSubTab=video&showTab=favorite_collection";
+        let home = "https://www.bilibili.com/";
+        let video = "https://www.bilibili.com/video/BV1StudyExample/";
+        for raw in [recommendation, favorites, home, video] {
+            assert_eq!(validate_url(raw).unwrap(), raw, "完整网址不能降级成域名");
+        }
+        assert_ne!(validate_url(recommendation), validate_url(favorites));
+        assert_ne!(validate_url(home), validate_url(video));
+        assert_ne!(validate_url(recommendation), validate_url("https://www.douyin.com/"));
+    }
+
+    #[test]
+    fn exact_urls_preserve_path_query_fragment_and_www() {
+        let canonical = "https://www.example.com/Video/BV1?Mode=Study&Page=1#PartA";
+        assert_eq!(
+            validate_url("HTTPS://WWW.Example.COM:443/Video/BV1?Mode=Study&Page=1#PartA").unwrap(),
+            canonical,
+        );
+        assert_eq!(validate_url("https://example.com").unwrap(), "https://example.com/");
+        assert_eq!(validate_url("http://EXAMPLE.com:80").unwrap(), "http://example.com/");
+        for other in [
+            "https://example.com/Video/BV1?Mode=Study&Page=1#PartA",
+            "http://www.example.com/Video/BV1?Mode=Study&Page=1#PartA",
+            "https://www.example.com:8443/Video/BV1?Mode=Study&Page=1#PartA",
+            "https://www.example.com/video/BV1?Mode=Study&Page=1#PartA",
+            "https://www.example.com/Video/BV1?mode=Study&Page=1#PartA",
+            "https://www.example.com/Video/BV1?Mode=study&Page=1#PartA",
+            "https://www.example.com/Video/BV1?Page=1&Mode=Study#PartA",
+            "https://www.example.com/Video/BV1?Mode=Study&Page=1&extra=1#PartA",
+            "https://www.example.com/Video/BV1?Mode=Study&Page=1#partA",
+            "https://www.example.com/Video/BV1?Mode=Study&Page=1",
+        ] {
+            assert_ne!(validate_url(other).unwrap(), canonical, "不可扩大匹配：{other}");
+        }
+        assert_ne!(validate_url("https://example.com/?"), validate_url("https://example.com/"));
+        assert_ne!(validate_url("https://example.com/#"), validate_url("https://example.com/"));
+        assert_eq!(validate_url("https://example.com/path@name?q=user@example.com").unwrap(), "https://example.com/path@name?q=user@example.com");
+    }
+
+    #[test]
+    fn exact_urls_reject_unsafe_and_malformed_input() {
+        for raw in [
+            "", "example.com", "//example.com/path", "https:example.com",
+            "ftp://example.com/", "javascript://example.com/", "file:///etc/hosts",
+            "https:///example.com", "https://", "https://localhost/", "https://中文.com/",
+            "https://127.0.0.1/", "https://[::1]/", "https://0x7f.1/", "https://2130706433/",
+            "https://user:password@example.com/", "https://@example.com/", "https://user@example.com/",
+            "https://example..com/", "https://-example.com/", "https://example-.com/",
+            "https://example.com:65536/", "https://example.com:abc/",
+            " https://example.com/", "https://example.com/ ", "https://example.com/has space",
+            "https://example.com/\nhttps://other.com/", "https://example.com/\t", "https://example.com/\0",
+            "https://example.com/\u{2003}", "https://example.com\\path", "https://example.com\\@other.com/",
+        ] {
+            assert!(validate_url(raw).is_err(), "应拒绝不安全网址：{raw:?}");
+        }
+        let prefix = "https://example.com/";
+        let longest = format!("{prefix}{}", "x".repeat(MAX_BLOCK_URL_BYTES - prefix.len()));
+        assert_eq!(validate_url(&longest).unwrap(), longest);
+        assert!(validate_url(&format!("{longest}x")).is_err());
+        let encoded_too_long = format!("{prefix}{}", "学".repeat(500));
+        assert!(encoded_too_long.len() < MAX_BLOCK_URL_BYTES);
+        assert!(validate_url(&encoded_too_long).is_err(), "浏览器百分号编码后仍须遵守长度上限");
+    }
+
+    #[test]
+    fn preferences_limit_combined_rules_and_require_normalized_urls() {
+        let mut prefs = builtin_preferences();
+        prefs.blocked_hosts = vec!["example.com".into(); 32];
+        prefs.blocked_urls = vec!["https://www.douyin.com/?recommend=1".into(); 32];
+        assert!(validate_preferences(&prefs).is_ok());
+        prefs.blocked_urls.push("https://www.bilibili.com/".into());
+        assert!(validate_preferences(&prefs).is_err());
+        prefs.blocked_urls = vec!["HTTPS://Example.com:443".into()];
+        assert!(validate_preferences(&prefs).is_err());
+        prefs.blocked_urls = vec!["https://example.com/".into()];
+        assert!(validate_preferences(&prefs).is_ok());
+        prefs.blocked_hosts = vec!["https://example.com/".into()];
+        assert!(validate_preferences(&prefs).is_err(), "页面不能误存为整站规则");
+    }
+
+    #[test]
+    fn hosts_output_never_contains_urls_or_injected_records() {
+        let unsafe_hosts = vec![
+            "https://www.douyin.com/?recommend=1".into(),
+            "example.com/path".into(),
+            "example.com\n127.0.0.1 localhost".into(),
+        ];
+        let original = "127.0.0.1 localhost\n";
+        assert_eq!(render_hosts(original, &unsafe_hosts, true), original);
+        let mut mixed_hosts = unsafe_hosts;
+        mixed_hosts.push("bilibili.com".into());
+        let output = render_hosts(original, &mixed_hosts, true);
+        assert!(output.contains("127.0.0.1 bilibili.com"));
+        assert!(!output.contains("douyin.com"));
+        assert!(!output.contains("example.com"));
+        assert_eq!(output.matches("127.0.0.1 localhost").count(), 1);
     }
 
     #[test]
@@ -1691,6 +1854,41 @@ mod tests {
         let lines: Vec<&str> = out.lines().filter(|l| l.contains("zhihu.com")).collect();
         assert_eq!(lines.len(), 4, "每个域名四行：两个协议族 × 裸域与 www");
         assert_eq!(render_hosts(&out, &hosts, true), out, "幂等");
+    }
+
+    #[test]
+    fn hosts_check_detects_missing_old_and_residual_rules() {
+        let hosts = vec!["example.com".to_string()];
+        let current = render_hosts("127.0.0.1 localhost\n", &hosts, true);
+        assert!(hosts_rules_match(&current, &hosts, true));
+        assert!(!hosts_rules_match("127.0.0.1 localhost\n", &hosts, true));
+        assert!(!hosts_rules_match(&current.replace("::1 www.example.com\n", ""), &hosts, true));
+        assert!(!hosts_rules_match(&current, &["new.example".into()], true));
+        assert!(!hosts_rules_match(&current, &[], true), "删除最后一条设置后仍须发现系统残留");
+        assert!(!hosts_rules_match(&current, &hosts, false), "收工后仍须发现系统残留");
+        assert!(hosts_rules_match("127.0.0.1 localhost\n", &hosts, false));
+        assert!(hosts_rules_match("127.0.0.1 localhost\n", &[], true));
+    }
+
+    #[test]
+    fn hosts_check_requires_complete_unique_markers_and_ignores_formatting() {
+        let hosts = vec!["example.com".to_string()];
+        let current = render_hosts("", &hosts, true);
+        for broken in [
+            current.replace(HOSTS_END, ""),
+            current.replace(HOSTS_BEGIN, ""),
+            format!("{current}{current}"),
+            format!("{HOSTS_BEGIN}\n{HOSTS_END}\n"),
+        ] {
+            assert!(!hosts_rules_match(&broken, &hosts, true));
+            assert!(!hosts_rules_match(&broken, &[], false));
+        }
+        let reordered = format!(
+            "# Other settings\r\n192.0.2.1 unrelated.example\r\n{HOSTS_BEGIN}\r\n\
+             ::1\twww.example.com # keep blocked\r\n127.0.0.1 www.example.com\r\n\
+             # local comment\r\n::1 example.com\r\n127.0.0.1   example.com\r\n{HOSTS_END}\r\n"
+        );
+        assert!(hosts_rules_match(&reordered, &hosts, true));
     }
 
     #[test]
@@ -1713,7 +1911,48 @@ mod tests {
     }
 
     #[test]
-    fn v2_state_migrates_to_v3() {
+    fn v3_migration_preserves_current_day_history_and_domain_rules() {
+        let mut state = started();
+        state.preferences.blocked_hosts = vec!["douyin.com".into(), "bilibili.com".into()];
+        state.start_block("main", 25, vec![task("保留任务")]).unwrap();
+        walk_to(&mut state, 1_300);
+        state.toggle_pause(1_300).unwrap();
+        walk_to(&mut state, 1_420);
+        state.end_day(1_420).unwrap();
+        state.start_day("standard", 1_500).unwrap();
+        state.start_block("reading", 25, vec![task("保留当前任务")]).unwrap();
+        state.toggle_pause(1_500).unwrap();
+
+        let mut old = serde_json::to_value(&state).unwrap();
+        old["schema"] = serde_json::json!(3);
+        old["preferences"].as_object_mut().unwrap().remove("blocked_urls");
+        let migrated = from_json(&old.to_string()).unwrap();
+        let after = serde_json::to_value(&migrated).unwrap();
+        assert_eq!(migrated.schema, 4);
+        assert!(migrated.preferences.blocked_urls.is_empty(), "不能猜测旧域名原本是哪一页");
+        assert_eq!(after["day"], old["day"], "当前暂停、任务与累计时间保持原样");
+        assert_eq!(after["history"], old["history"], "历史暂停、台账与累计时间保持原样");
+        assert_eq!(after["preferences"]["blocked_hosts"], old["preferences"]["blocked_hosts"]);
+        assert!(!after["day"]["pauses"].as_array().unwrap().is_empty());
+        assert!(!after["history"][0]["day"]["pauses"].as_array().unwrap().is_empty());
+        let mut expected = old;
+        expected["schema"] = serde_json::json!(4);
+        expected["preferences"]["blocked_urls"] = serde_json::json!([]);
+        assert_eq!(after, expected, "v3 迁移只改版本并增加空页面列表");
+    }
+
+    #[test]
+    fn v4_roundtrip_keeps_exact_urls_and_rejects_overflowing_future_schema() {
+        let mut state = State::new(1_000);
+        state.preferences.blocked_urls = vec!["https://www.douyin.com/?recommend=1".into()];
+        assert_eq!(from_json(&to_json(&state)).unwrap().preferences.blocked_urls, state.preferences.blocked_urls);
+        let mut future = serde_json::to_value(&state).unwrap();
+        future["schema"] = serde_json::json!(u64::from(u32::MAX) + 4);
+        assert!(from_json(&future.to_string()).unwrap_err().starts_with("newer schema"));
+    }
+
+    #[test]
+    fn v2_state_migrates_to_current_schema() {
         let raw = r#"{
           "schema": 2,
           "last_tick": 5000,
@@ -1752,6 +1991,7 @@ mod tests {
         }"#;
         let state = from_json(raw).unwrap();
         assert_eq!(state.schema, SCHEMA_VERSION);
+        assert!(state.preferences.blocked_urls.is_empty());
         assert_eq!(state.preferences.categories[0].name, "深度工作", "迁移不改名字，只改结构");
         let day = state.day.as_ref().unwrap();
         assert_eq!(day.paused_seconds, 400);

@@ -43,6 +43,11 @@ jobs:
       - name: 短名规则与 Rust 对齐
         run: node scripts/check-short-name.mjs
 
+      - name: 精确网址输入与扩展回归
+        run: |
+          node scripts/check-blocking-rules.mjs
+          node --test browser-extension/*.test.mjs
+
       - name: 规则引擎测试
         run: cargo test
         working-directory: core

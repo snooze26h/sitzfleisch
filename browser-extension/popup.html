@@ -1,0 +1,33 @@
+<!doctype html>
+<html lang="zh-CN" class="popup-root">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>坐功网页屏蔽</title>
+  <link rel="stylesheet" href="page.css">
+</head>
+<body class="popup">
+  <main>
+    <h1>网页屏蔽</h1>
+    <p class="intro">跟随坐功的学习日，按完整网址生效。</p>
+    <section class="state" aria-live="polite" aria-atomic="true">
+      <p id="connection" class="state-title">正在连接坐功…</p>
+      <p id="detail" class="detail">首次使用需要启动本机的坐功主程序。</p>
+      <p id="last-sync" class="detail" hidden></p>
+    </section>
+    <button id="sync" type="button">立即同步</button>
+    <h2>添加要屏蔽的页面</h2>
+    <ol>
+      <li>打开坐功的「设置 → 网站屏蔽」。</li>
+      <li>选择「精确网址」，粘贴地址栏中的网址。</li>
+      <li>开始学习日，扩展会自动获取规则。</li>
+    </ol>
+    <p class="muted">保留收藏页时，请移除该站的整站规则；整站屏蔽会同时挡住收藏和视频。</p>
+    <h2>连接与安装</h2>
+    <p class="muted">每个浏览器需单独安装此扩展。在扩展管理页打开开发者模式，选择「加载已解压的扩展程序」，加载项目中的 <code>browser-extension</code> 文件夹。</p>
+    <p class="muted">浏览器运行时每 30 秒尝试同步，打开页面时也会同步。主程序退出后保留上次规则；收工后需再次连接才能解除。</p>
+    <p class="muted">页面可能短暂显示后才被拦截。扩展不向主程序上传浏览记录。</p>
+  </main>
+  <script type="module" src="popup.js"></script>
+</body>
+</html>

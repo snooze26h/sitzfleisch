@@ -5,6 +5,7 @@ import { icon } from "../icons";
 import { hair, tickedTrack } from "../components";
 import { suggest } from "../scheduler";
 import type { View } from "../types";
+import { SETTINGS_SECTIONS } from "./settings";
 import { breakRemaining, day, iconOf, isPaused, nameOf, netSeconds, pauseNowSeconds, prefs, quotaSeconds, resting, shortName, ui } from "../state";
 
 const NAV: [View, string, string][] = [
@@ -14,15 +15,24 @@ const NAV: [View, string, string][] = [
 ];
 
 export function sidebar(): string {
-  const nav = NAV.map(
-    ([view, ic, label]) =>
-      `<button class="nav-item${ui.view === view ? " on" : ""}" data-action="tab" data-view="${view}" aria-current="${ui.view === view ? "page" : "false"}"><i class="rail"></i>${icon(ic, 14)}<span>${label}</span></button>`
-  ).join("");
+  // 进了设置，侧栏整个换成设置的分区：一区一页，不再一根滚动条到底。
+  const inSettings = ui.view === "settings";
+  const nav = inSettings
+    ? `<button class="nav-item back" data-action="tab" data-view="today" aria-label="离开设置，回到今天">${icon("chevron-left", 14)}<span>返回</span></button>`
+      + hair()
+      + SETTINGS_SECTIONS.map(
+          ([id, label, ic]) =>
+            `<button class="nav-item${ui.settingsSection === id ? " on" : ""}" data-action="jump-settings" data-id="${id}" aria-current="${ui.settingsSection === id ? "page" : "false"}"><i class="rail"></i>${icon(ic, 14)}<span>${label}</span></button>`
+        ).join("")
+    : NAV.map(
+        ([view, ic, label]) =>
+          `<button class="nav-item${ui.view === view ? " on" : ""}" data-action="tab" data-view="${view}" aria-current="${ui.view === view ? "page" : "false"}"><i class="rail"></i>${icon(ic, 14)}<span>${label}</span></button>`
+      ).join("");
   return `<aside class="sidebar" id="sidebar">
     <div class="wordmark"><span class="wordmark-en">SITZFLEISCH</span><span class="wordmark-cn">坐功</span></div>
     ${hair()}
-    <nav class="nav">${nav}</nav>
-    ${nowBlock()}
+    <nav class="nav" aria-label="${inSettings ? "设置分区" : "主导航"}">${nav}</nav>
+    ${inSettings ? "" : nowBlock()}
   </aside>`;
 }
 
@@ -55,12 +65,11 @@ function nowBlock(): string {
     valueTint = " caution";
   } else if (t) {
     ic = iconOf(t.category);
-    // 不上朱红：DESIGN 点名的三处是「面板头部的字形 + 运行图上那一小段块」「久坐提示」
-    // 「当前时刻的旗标」，侧栏这个字形不在名单里。「真的在跑」由倒计时和下面那条轨承担。
+    // 侧栏字形走骨白；正在计时由倒计时和下面那条轨承担。
     tint = "high";
     title = nameOf(t.category, d);
     value = clock(Math.max(0, t.total_seconds - t.elapsed_seconds));
-    // 进度条走骨白：全 App 的朱红只留给「正在跑的那一格」的图标、久坐提醒和运行图上的此刻。
+    // 进度条走骨白，朱红留给当前格的图标和运行图上的此刻。
     track = tickedTrack(t.total_seconds > 0 ? t.elapsed_seconds / t.total_seconds : 0, Math.max(1, Math.round(t.total_seconds / 900)), { mini: true });
   } else {
     const s = suggest(d, prefs(), ui.now);

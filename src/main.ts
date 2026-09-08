@@ -2,10 +2,10 @@
 
 import morphdom from "morphdom";
 import { invoke, onQuitBlocked, onReminder, onSnapshot, setWindowTitle } from "./api";
+import { conflictingHost, MAX_BLOCK_RULES, normalizeHost, normalizeUrl } from "./blocking";
 import type { Preferences, Snapshot, View } from "./types";
 import { SHORT_NAME_WIDTH, dayLabel, displayWidth, duration, esc, nowUnix } from "./format";
 import {
-  MAX_HOSTS,
   MAX_PROJECTS,
   QUIT_DIALOG_ID,
   day,
@@ -13,7 +13,6 @@ import {
   history,
   isPaused,
   nameOf,
-  normalizeHost,
   parseTasks,
   prefs,
   remainingOf,
@@ -29,7 +28,7 @@ import { markdownForDay } from "./markdown";
 import { sidebar } from "./views/shell";
 import { todayPage } from "./views/today";
 import { historyEmpty, historyPage } from "./views/history";
-import { settingsPage } from "./views/settings";
+import { blockState, settingsPage } from "./views/settings";
 import { overlays, toastView } from "./views/overlays";
 import { drawDiagram } from "./views/diagram";
 
@@ -71,7 +70,6 @@ function render() {
   if (!ui.snap) return;
   ui.now = nowUnix();
   reconcileSelection();
-  const busy = ui.snap.blocking.busy;
   // 状态文件损坏或来自更高版本时 App 不落盘：这件事必须在每一页都看得见。
   const protect = ui.snap.write_protected
     ? `<div class="protect-banner" id="protect"><b>状态文件处于保护模式，本次运行不会保存任何改动。</b><span>${esc(ui.snap.write_protected)} 应用不会覆盖原文件：${esc(ui.snap.state_path)}</span></div>`
@@ -80,15 +78,22 @@ function render() {
   const saveFailed = ui.snap.save_error && !ui.snap.write_protected
     ? `<div class="protect-banner save-banner" id="save-banner"><b>上次保存失败：${esc(ui.snap.save_error)}。改动还在内存里，先别退出。</b>${btn("立即重试", { kind: "plate", action: "retry-save" })}</div>`
     : "";
-  const html = `<div id="app"><div class="shell" id="shell">${sidebar()}<main class="content${busy ? " disabled" : ""}" id="content" tabindex="-1" data-scroll>${protect}${saveFailed}${pageHtml()}${toastView()}</main></div>${overlays()}</div>`;
+  const html = `<div id="app"><div class="shell" id="shell">${sidebar()}<main class="content" id="content" tabindex="-1" data-scroll>${protect}${saveFailed}${pageHtml()}${toastView()}</main></div>${overlays()}</div>`;
   morphdom(app, html, {
     onBeforeElUpdated(from, to) {
       // 正在编辑的控件不动，免得打断输入；它的其它属性会在失焦后的下一次渲染补上。
       if (from === document.activeElement && (from instanceof HTMLInputElement || from instanceof HTMLTextAreaElement || from instanceof HTMLSelectElement)) {
+        // 保留光标时仍同步校验状态，让读屏与输入框下方的即时错误一致。
+        if (to.hasAttribute("aria-invalid")) from.setAttribute("aria-invalid", to.getAttribute("aria-invalid")!);
         return false;
       }
       // 用户输入只改 DOM 属性，HTML 仍可能相等；保存被拒时也要恢复权威值。
       if (from instanceof HTMLInputElement && to instanceof HTMLInputElement && (from.value !== to.value || from.checked !== to.checked)) return true;
+      // 说明折叠由浏览器原生交互控制，心跳重绘不能删掉用户刚打开的 open。
+      // 只保留展开属性，内容变化仍交给 morphdom 更新。
+      if (from instanceof HTMLDetailsElement && to instanceof HTMLDetailsElement && from.hasAttribute("data-preserve-open") && to.hasAttribute("data-preserve-open")) {
+        to.open = from.open;
+      }
       if (from.isEqualNode(to) && !from.querySelector("input, textarea, select")) return false;
       return true;
     },
@@ -106,7 +111,7 @@ function drawDiagrams() {
   const d = day();
   if (!d) return;
   for (const canvas of app.querySelectorAll<HTMLCanvasElement>("canvas[data-diagram]")) {
-    drawDiagram(canvas, d, ui.now, null);
+    drawDiagram(canvas, d, ui.now, null, (cid) => nameOf(cid, d));
   }
 }
 
@@ -405,12 +410,6 @@ async function handleAction(action: string, el: HTMLElement) {
       ui.menu = null;
       if (d) toast((await copyText(markdownForDay(d, null, ui.now))) ? "已复制今天的 Markdown 总结。" : "复制失败。");
       break;
-    case "switch-profile": {
-      ui.menu = null;
-      const snap = await act("switch_profile", { profileId: id });
-      if (snap?.state.day) toast(`今天改成${snap.state.day.profile_name}档，已经记下的时间不变。`);
-      break;
-    }
     case "toggle": {
       const wasPaused = d ? isPaused(d) : false;
       const snap = await act("toggle_pause");
@@ -543,10 +542,13 @@ async function handleAction(action: string, el: HTMLElement) {
 
     // ----- 设置：项目 -----
     case "jump-settings": {
-      const panel = document.getElementById(`panel-${id}`);
-      if (ui.view !== "settings" || !panel?.classList.contains("settings-section")) break;
-      panel.focus({ preventScroll: true });
-      panel.scrollIntoView({ block: "start" });
+      // 换分区＝换页：滚动条回顶，焦点落到新分区上，读屏也跟着走。
+      ui.view = "settings";
+      ui.settingsSection = id;
+      ui.expandedProject = null;
+      render();
+      document.getElementById("content")?.scrollTo({ top: 0 });
+      document.getElementById(`panel-${id}`)?.focus({ preventScroll: true });
       break;
     }
     case "add-project": {
@@ -603,10 +605,13 @@ async function handleAction(action: string, el: HTMLElement) {
 
     // ----- 设置：网站屏蔽 -----
     case "add-host":
-      await addHost();
+      await addBlockingRule("host");
       break;
-    case "remove-host":
-      ui.removal = { host: el.dataset.host ?? "", step: 1, typed: "" };
+    case "add-url":
+      await addBlockingRule("url");
+      break;
+    case "remove-rule":
+      ui.removal = { kind: el.dataset.kind === "url" ? "url" : "host", value: el.dataset.value ?? "", step: 1, typed: "" };
       render();
       break;
     case "removal-next":
@@ -627,13 +632,20 @@ async function handleAction(action: string, el: HTMLElement) {
       break;
     case "removal-confirm": {
       const r = ui.removal;
-      if (!r || r.typed.trim() !== r.host) break;
-      ui.removal = null;
-      await savePrefs((x) => { x.blocked_hosts = x.blocked_hosts.filter((h) => h !== r.host); }, `已解除 ${r.host} 的屏蔽。`);
+      if (!r || r.typed.trim() !== r.value || ui.pendingPrefs > 0) break;
+      const ok = await savePrefs((x) => {
+        if (r.kind === "url") x.blocked_urls = x.blocked_urls.filter((url) => url !== r.value);
+        else x.blocked_hosts = x.blocked_hosts.filter((host) => host !== r.value);
+      }, r.kind === "url" ? "已移除精确网址规则，浏览器扩展将在同步后解除。" : "已从设置移除整站规则。系统解除后才会恢复访问，请留意下方整站状态。");
+      if (ok && ui.removal === r) ui.removal = null;
+      render();
       break;
     }
+    case "reveal-browser-extension":
+      await invoke("reveal_browser_extension").catch((error) => toast(String(error)));
+      break;
     case "recheck-blocking":
-      await act("check_blocking");
+      if (await act("check_blocking")) toast(blockState().detail ?? blockState().title);
       break;
     case "reapply-blocking":
       await act("reapply_blocking");
@@ -742,31 +754,49 @@ async function stepValue(el: HTMLElement) {
   }
 }
 
-async function addHost() {
-  const preview = normalizeHost(ui.hostDraft);
+async function addBlockingRule(kind: "url" | "host") {
+  if (ui.pendingPrefs > 0) return;
+  const draftKey = kind === "url" ? "urlDraft" : "hostDraft";
+  const draft = ui[draftKey];
+  const preview = kind === "url" ? normalizeUrl(draft) : normalizeHost(draft);
   if ("error" in preview) {
     toast(preview.error);
     return;
   }
-  let host = preview.host;
+  let value = "url" in preview ? preview.url : preview.host;
   try {
-    host = await invoke<string>("normalize_host", { host });
+    value = kind === "url"
+      ? await invoke<string>("normalize_url", { url: value })
+      : await invoke<string>("normalize_host", { host: value });
   } catch (error) {
     toast(String(error));
     return;
   }
   const p = prefs();
-  if (p.blocked_hosts.includes(host)) {
-    toast(`${host} 已经在屏蔽列表里。`);
+  if ((kind === "url" ? p.blocked_urls : p.blocked_hosts).includes(value)) {
+    toast("这条规则已经在屏蔽列表里。");
     return;
   }
-  if (p.blocked_hosts.length >= MAX_HOSTS) {
-    toast(`最多添加 ${MAX_HOSTS} 个域名。`);
+  if (p.blocked_hosts.length + p.blocked_urls.length >= MAX_BLOCK_RULES) {
+    toast(`整站和精确网址合计最多添加 ${MAX_BLOCK_RULES} 条规则。`);
     return;
   }
-  const active = !!day();
-  if (await savePrefs((x) => { x.blocked_hosts.push(host); }, active ? `已加入并屏蔽 ${host}。` : `已加入 ${host}。下次开始学习日时生效。`)) {
-    ui.hostDraft = "";
+  const conflict = kind === "url" ? conflictingHost(value, p.blocked_hosts) : undefined;
+  const message = kind === "url"
+    ? conflict ? `已保存。但 ${conflict} 的整站规则仍会屏蔽收藏和视频，请解除对应整站规则。` : "已保存精确网址。浏览器扩展同步后，在学习日生效。"
+    : day() ? "已保存整站规则，等待系统应用。请完成管理员授权，并确认下方整站状态。" : "已保存整站规则，下次学习日开始时会申请管理员授权。";
+  if (await savePrefs((x) => {
+    const rules = kind === "url" ? x.blocked_urls : x.blocked_hosts;
+    if (rules.includes(value)) return "这条规则已经在屏蔽列表里。";
+    if (x.blocked_hosts.length + x.blocked_urls.length >= MAX_BLOCK_RULES) return `最多添加 ${MAX_BLOCK_RULES} 条规则。`;
+    rules.push(value);
+  }, message)) {
+    if (ui[draftKey] === draft) {
+      ui[draftKey] = "";
+      // 回车提交时输入框仍有焦点，morphdom 会保留它，需同步清空可见内容。
+      const input = app.querySelector<HTMLInputElement>(`#blocked-${kind}-input`);
+      if (input) input.value = "";
+    }
     render();
   }
 }
@@ -871,9 +901,6 @@ async function handleChange(key: string, el: HTMLInputElement | HTMLSelectElemen
     case "project-icon":
       await savePrefs((x) => { const c = x.categories.find((c) => c.id === id); if (c) c.icon = value; });
       break;
-    case "project-role":
-      await savePrefs((x) => { const c = x.categories.find((c) => c.id === id); if (c) c.role = value; });
-      break;
     default:
       break;
   }
@@ -909,6 +936,10 @@ document.addEventListener("input", (event) => {
       break;
     case "host":
       ui.hostDraft = el.value;
+      render();
+      break;
+    case "url":
+      ui.urlDraft = el.value;
       render();
       break;
     case "removal":
@@ -969,8 +1000,9 @@ document.addEventListener("keydown", (event) => {
         void startBlock();
         return;
       case "host":
+      case "url":
         event.preventDefault();
-        void addHost();
+        void addBlockingRule(target.dataset.input);
         return;
       case "removal":
         event.preventDefault();

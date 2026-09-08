@@ -15,11 +15,14 @@ use tauri_plugin_autostart::ManagerExt;
 use tauri_plugin_notification::NotificationExt;
 use tauri_plugin_window_state::{AppHandleExt, StateFlags};
 
+mod browser_blocking;
+
 #[derive(Clone, Default, Serialize)]
 struct BlockingStatus {
     active: bool,
     busy: bool,
     error: Option<String>,
+    browser: browser_blocking::Status,
 }
 
 struct Shared {
@@ -36,6 +39,7 @@ struct Shared {
     /// 状态文件损坏或来自更高版本时进入保护模式：原文件一个字节都不动，本次运行不落盘。
     write_protected: Mutex<Option<String>>,
     blocking: Mutex<BlockingStatus>,
+    browser_bridge: Mutex<browser_blocking::Bridge>,
     /// 上一次保存失败的系统原因，成功一次即清空。**叶子锁**：持有它时不再取任何锁、
     /// 不调用任何原生 API。
     save_error: Mutex<Option<String>>,
@@ -228,6 +232,9 @@ fn now_unix() -> i64 {
 
 fn snapshot(shared: &Shared, with_history: bool) -> Snapshot {
     let state = shared.state.lock().unwrap();
+    let mut blocking = shared.blocking.lock().unwrap().clone();
+    blocking.browser = shared.browser_bridge.lock().unwrap()
+        .status(&browser_blocking::Rules::from_state(&state));
     Snapshot {
         // 与状态捕获一起排序；同一秒里的命令也有先后，不依赖时间戳。
         revision: shared.snapshot_revision.fetch_add(1, Ordering::Relaxed) + 1,
@@ -239,7 +246,7 @@ fn snapshot(shared: &Shared, with_history: bool) -> Snapshot {
         },
         history: with_history.then(|| state.history.clone()),
         write_protected: shared.write_protected.lock().unwrap().clone(),
-        blocking: shared.blocking.lock().unwrap().clone(),
+        blocking,
         // 取锁顺序：state → write_protected → blocking → save_error，save_error 是最后一把。
         save_error: shared.save_error.lock().unwrap().clone(),
         state_path: shared.path.display().to_string(),
@@ -417,6 +424,28 @@ fn broadcast(app: &AppHandle) {
             }
         }
     });
+}
+
+fn take_due_reminder_notifications(state: &mut core::State) -> Vec<(&'static str, String)> {
+    let (water_due, stretch_due, idle_due) = state.take_due_reminders();
+    let mut notifications = Vec::new();
+    if water_due {
+        notifications.push(("喝点水吧", "忙了一阵，喝几口水再继续。".into()));
+    }
+    if stretch_due {
+        notifications.push((
+            "起来活动一下",
+            format!("已经连续在座 {} 分钟。", state.preferences.stretch_reminder_minutes),
+        ));
+    }
+    if idle_due {
+        // 提醒计数器每次投递后归零，文案仍要从本次暂停的起点累计，包含休息和休眠。
+        let paused_minutes = state.day.as_ref()
+            .map(|day| day.current_pause_seconds(state.last_tick) / 60)
+            .unwrap_or(0);
+        notifications.push(("还没开格", format!("已经暂停 {paused_minutes} 分钟了。")));
+    }
+    notifications
 }
 
 /// 系统横幅显不显示由每个 App 的通知设置说了算，App 自己既读不到也改不了。
@@ -665,6 +694,18 @@ fn blocking_needs_sync(shared: &Shared) -> bool {
     active_or_busy || blocking_wanted(shared)
 }
 
+fn refresh_hosts_status(blocking: &mut BlockingStatus, current: &str, hosts: &[String], enable: bool) {
+    // active 仍记录系统残留；是否与设置一致要逐条核对，不能用一个 BEGIN 标记代替。
+    blocking.active = core::hosts_section_present(current);
+    blocking.error = if core::hosts_rules_match(current, hosts, enable) {
+        None
+    } else if !enable || hosts.is_empty() {
+        Some("系统里仍残留整站屏蔽规则，请到「设置 · 网站屏蔽」点击「重新应用整站规则」解除。".into())
+    } else {
+        Some("系统整站规则与当前设置不一致，可能缺少规则或仍有旧规则。请点击「重新应用整站规则」修复。".into())
+    };
+}
+
 // ---------- 命令 ----------
 
 #[tauri::command]
@@ -787,6 +828,35 @@ fn normalize_host(host: String) -> Result<String, String> {
     core::validate_host(&host).map_err(|e| e.to_string())
 }
 
+#[tauri::command]
+fn normalize_url(url: String) -> Result<String, String> {
+    core::validate_url(&url).map_err(|e| e.to_string())
+}
+
+/// 展示随应用附带的扩展目录，安装动作由用户在浏览器扩展页完成。
+#[tauri::command]
+fn reveal_browser_extension(app: AppHandle) -> Result<(), String> {
+    let path = app.path().resource_dir().map_err(|_| "找不到应用资源目录。")?
+        .join("browser-extension");
+    #[cfg(debug_assertions)]
+    let path = if path.join("manifest.json").is_file() { path } else {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../browser-extension")
+    };
+    if !path.join("manifest.json").is_file() {
+        return Err("此安装包没有浏览器扩展，请更新坐功后重试。".into());
+    }
+    #[cfg(target_os = "macos")]
+    let result = Command::new("open").arg(&path).status();
+    #[cfg(target_os = "windows")]
+    let result = Command::new("explorer").arg(&path).status();
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    let result = Command::new("xdg-open").arg(&path).status();
+    match result {
+        Ok(status) if status.success() => Ok(()),
+        _ => Err("无法打开扩展目录，请从安装目录中打开 browser-extension。".into()),
+    }
+}
+
 /// 立即再存一次。成不成都随快照带出去：成功清空横条，失败换上最新的原因。
 #[tauri::command]
 fn retry_save(app: AppHandle) -> Snapshot {
@@ -796,17 +866,18 @@ fn retry_save(app: AppHandle) -> Snapshot {
     snapshot(&shared, true)
 }
 
-/// 只读核对：重新读系统 hosts，看托管段在不在。不弹授权。
+/// 只读核对：重新读系统 hosts，比对当前学习日应有的完整托管规则。不弹授权。
 #[tauri::command]
 fn check_blocking(app: AppHandle) -> Snapshot {
     {
         let shared = app.state::<Shared>();
+        let (hosts, enable) = {
+            let state = shared.state.lock().unwrap();
+            (state.preferences.blocked_hosts.clone(), state.day.is_some())
+        };
         let mut blocking = shared.blocking.lock().unwrap();
         match fs::read_to_string(hosts_path()) {
-            Ok(current) => {
-                blocking.active = core::hosts_section_present(&current);
-                blocking.error = None;
-            }
+            Ok(current) => refresh_hosts_status(&mut blocking, &current, &hosts, enable),
             Err(e) => blocking.error = Some(format!("读不到系统 hosts：{e}")),
         }
     }
@@ -1142,6 +1213,7 @@ pub fn run() {
         })
         .setup(move |app| {
             // 没被挪走就用系统的应用数据目录；挪走了的那一份在建窗口之前就判过了。
+            let isolated = data_dir_override.is_some();
             let dir = match data_dir_override {
                 Some(dir) => dir,
                 None => {
@@ -1155,12 +1227,9 @@ pub fn run() {
 
             // 启动只做只读体检：残留的屏蔽段提示到设置页，绝不主动弹授权框。
             let mut blocking = BlockingStatus::default();
-            if let Ok(current) = fs::read_to_string(hosts_path()) {
-                blocking.active = core::hosts_section_present(&current);
-                if blocking.active && state.day.is_none() {
-                    blocking.error =
-                        Some("系统里残留着上次的屏蔽规则，到「设置 · 网站屏蔽」点「立即同步」解除。".into());
-                }
+            match fs::read_to_string(hosts_path()) {
+                Ok(current) => refresh_hosts_status(&mut blocking, &current, &state.preferences.blocked_hosts, state.day.is_some()),
+                Err(e) => blocking.error = Some(format!("读不到系统 hosts：{e}")),
             }
 
             let (qa_view, qa_scroll) = qa_launch_args();
@@ -1173,12 +1242,14 @@ pub fn run() {
                 qa_scroll,
                 write_protected: Mutex::new(protection),
                 blocking: Mutex::new(blocking),
+                browser_bridge: browser_blocking::new_bridge(),
                 save_error: Mutex::new(None),
                 declined_final_save: Mutex::new(false),
                 path,
                 data_dir: dir.clone(),
                 tray_shape: Mutex::new(None),
             });
+            browser_blocking::start(app.handle(), isolated);
             #[cfg(target_os = "macos")]
             install_chinese_menu(app)?;
 
@@ -1203,29 +1274,24 @@ pub fn run() {
                 loop {
                     thread::sleep(Duration::from_secs(1));
                     ticks += 1;
-                    let (focus_done, break_done, water_due, stretch_due, idle_due, intervals) = {
+                    let (focus_done, break_done, reminders) = {
                         let shared = handle.state::<Shared>();
                         let mut state = shared.state.lock().unwrap();
                         let had_timer = state.day.as_ref().map(|d| d.timer.is_some()).unwrap_or(false);
                         let ledger_before = state.day.as_ref().map(|d| d.ledger.len()).unwrap_or(0);
                         let now = now_unix();
                         state.tick(now);
-                        let (water_due, stretch_due, idle_due) = state.take_due_reminders();
+                        let reminders = take_due_reminder_notifications(&mut state);
                         let break_done = state.take_due_break(now);
                         let day = state.day.as_ref();
                         // 一格自然走完：台账多了一条，格也不在了。
                         let focus_done = had_timer
                             && day.map(|d| d.ledger.len() > ledger_before && d.timer.is_none()).unwrap_or(false);
-                        let intervals = (
-                            state.preferences.water_reminder_minutes,
-                            state.preferences.stretch_reminder_minutes,
-                            state.preferences.idle_reminder_minutes,
-                        );
                         drop(state);
                         if ticks.is_multiple_of(30) {
                             save(&shared);
                         }
-                        (focus_done, break_done, water_due, stretch_due, idle_due, intervals)
+                        (focus_done, break_done, reminders)
                     };
                     if focus_done {
                         notify(&handle, "这一格走完了", "已经记进今天的进度。");
@@ -1233,14 +1299,8 @@ pub fn run() {
                     if break_done {
                         notify(&handle, "休息结束", "开下一格吧。");
                     }
-                    if water_due {
-                        notify(&handle, "该喝水了", &format!("在座 {} 分钟没记过水了。", intervals.0));
-                    }
-                    if stretch_due {
-                        notify(&handle, "起来活动一下", &format!("已经连续在座 {} 分钟。", intervals.1));
-                    }
-                    if idle_due {
-                        notify(&handle, "还没开格", &format!("已经暂停 {} 分钟了。", intervals.2));
+                    for (title, body) in reminders {
+                        notify(&handle, title, &body);
                     }
                     broadcast(&handle);
                 }
@@ -1304,6 +1364,8 @@ pub fn run() {
             update_preferences,
             delete_history_day,
             normalize_host,
+            normalize_url,
+            reveal_browser_extension,
             retry_save,
             quit_after_save,
             quit_without_saving,
@@ -1363,6 +1425,7 @@ mod tests {
                 qa_scroll: 0,
                 write_protected: Mutex::new(None),
                 blocking: Mutex::new(BlockingStatus::default()),
+                browser_bridge: browser_blocking::new_bridge(),
                 save_error: Mutex::new(None),
                 declined_final_save: Mutex::new(false),
                 path: dir.join("state.json"),
@@ -1382,6 +1445,118 @@ mod tests {
         let mut state = core::State::new(1_000);
         state.start_day("standard", 1_000).unwrap();
         state
+    }
+
+    fn advance_awake_seconds(state: &mut core::State, seconds: i64) {
+        let until = state.last_tick + seconds;
+        // 用正常心跳推进，避免把测试里的大步进误判为休眠。
+        while state.last_tick < until {
+            state.tick((state.last_tick + 60).min(until));
+        }
+    }
+
+    fn state_with_idle_reminder() -> core::State {
+        let mut state = state_with_day();
+        state.preferences.idle_reminder_enabled = true;
+        state.preferences.idle_reminder_minutes = 10;
+        state
+    }
+
+    #[test]
+    fn idle_notifications_report_the_whole_pause_after_each_interval() {
+        let mut state = state_with_idle_reminder();
+        for expected_minutes in [10, 20, 30] {
+            advance_awake_seconds(&mut state, 600);
+            assert_eq!(
+                take_due_reminder_notifications(&mut state),
+                vec![("还没开格", format!("已经暂停 {expected_minutes} 分钟了。"))],
+            );
+            assert_eq!(state.day.as_ref().unwrap().paused_without_block, 0);
+            assert!(take_due_reminder_notifications(&mut state).is_empty(), "同一次到期只消费一次");
+        }
+    }
+
+    #[test]
+    fn idle_notifications_reset_for_a_new_pause_and_include_its_break() {
+        let mut state = state_with_idle_reminder();
+        advance_awake_seconds(&mut state, 1_800);
+        take_due_reminder_notifications(&mut state);
+        state.start_block_with_break("main", 25, vec![], 5).unwrap();
+        advance_awake_seconds(&mut state, 60);
+        state.finish_block(state.last_tick).unwrap();
+
+        advance_awake_seconds(&mut state, 300);
+        assert!(take_due_reminder_notifications(&mut state).is_empty());
+        assert!(state.take_due_break(state.last_tick));
+        advance_awake_seconds(&mut state, 300);
+        assert_eq!(
+            take_due_reminder_notifications(&mut state),
+            vec![("还没开格", "已经暂停 10 分钟了。".into())],
+            "新暂停包含刚结束的 5 分钟休息，不累计上一段暂停",
+        );
+        assert_eq!(state.day.as_ref().unwrap().paused_seconds, 2_400);
+    }
+
+    #[test]
+    fn idle_notifications_include_suspend_and_restart_without_advancing_the_reminder_counter() {
+        let mut state = state_with_idle_reminder();
+        advance_awake_seconds(&mut state, 300);
+        state.tick(state.last_tick + 600);
+        assert!(take_due_reminder_notifications(&mut state).is_empty(), "休眠不改变原有提醒节奏");
+        advance_awake_seconds(&mut state, 300);
+        assert_eq!(
+            take_due_reminder_notifications(&mut state),
+            vec![("还没开格", "已经暂停 20 分钟了。".into())],
+        );
+
+        state = core::from_json(&core::to_json(&state)).unwrap();
+        state.resume_after_restart(state.last_tick + 1_800);
+        assert!(take_due_reminder_notifications(&mut state).is_empty(), "重启不额外触发提醒");
+        advance_awake_seconds(&mut state, 600);
+        assert_eq!(
+            take_due_reminder_notifications(&mut state),
+            vec![("还没开格", "已经暂停 60 分钟了。".into())],
+            "保存重启后仍从这一段暂停的原始起点累计",
+        );
+        assert_eq!(state.day.as_ref().unwrap().suspend_seconds, 2_400);
+    }
+
+    #[test]
+    fn reminder_notifications_keep_existing_manual_pause_and_disabled_gates() {
+        let mut state = state_with_idle_reminder();
+        state.start_block("main", 25, vec![]).unwrap();
+        state.toggle_pause(state.last_tick).unwrap();
+        advance_awake_seconds(&mut state, 1_800);
+        assert!(take_due_reminder_notifications(&mut state).is_empty(), "手动暂停已有格时不新增闲置提醒");
+
+        state.abandon_block(state.last_tick).unwrap();
+        state.preferences.idle_reminder_enabled = false;
+        advance_awake_seconds(&mut state, 600);
+        assert!(take_due_reminder_notifications(&mut state).is_empty(), "关闭提醒后仍不投递");
+    }
+
+    #[test]
+    fn water_notifications_use_the_new_copy_when_the_existing_timer_is_due() {
+        let mut state = state_with_day();
+        state.preferences.water_reminder_enabled = true;
+        state.preferences.water_reminder_minutes = 1;
+        state.preferences.stretch_reminder_enabled = true;
+        state.preferences.stretch_reminder_minutes = 1;
+        advance_awake_seconds(&mut state, 60);
+        assert!(take_due_reminder_notifications(&mut state).is_empty(), "没有格时不催喝水或活动");
+
+        state.start_block("main", 25, vec![]).unwrap();
+        advance_awake_seconds(&mut state, 59);
+        assert!(take_due_reminder_notifications(&mut state).is_empty());
+        advance_awake_seconds(&mut state, 1);
+        assert_eq!(
+            take_due_reminder_notifications(&mut state),
+            vec![
+                ("喝点水吧", "忙了一阵，喝几口水再继续。".into()),
+                ("起来活动一下", "已经连续在座 1 分钟。".into()),
+            ],
+        );
+        assert!(take_due_reminder_notifications(&mut state).is_empty());
     }
 
     #[test]
@@ -1590,6 +1765,39 @@ mod tests {
         apply_latest_blocking(shared, |hosts, enable| {
             assert_eq!(core::render_hosts(&current, hosts, enable), "127.0.0.1 localhost\n");
         });
+    }
+
+    #[test]
+    fn rechecking_cancelled_removal_keeps_residual_rules_visible() {
+        let current = core::render_hosts("127.0.0.1 localhost\n", &["example.com".into()], true);
+        let mut blocking = BlockingStatus {
+            error: Some("授权被取消，屏蔽规则未写入。".into()),
+            ..BlockingStatus::default()
+        };
+        refresh_hosts_status(&mut blocking, &current, &[], true);
+        assert!(blocking.active, "列表已空也必须保留系统残留状态");
+        assert!(blocking.error.as_deref().unwrap().contains("重新应用整站规则"));
+        refresh_hosts_status(&mut blocking, "127.0.0.1 localhost\n", &[], true);
+        assert!(!blocking.active);
+        assert!(blocking.error.is_none(), "系统确认解除后才清空错误");
+    }
+
+    #[test]
+    fn hosts_status_checks_missing_changed_and_finished_day_rules() {
+        let hosts = vec!["example.com".into()];
+        let current = core::render_hosts("", &hosts, true);
+        let mut blocking = BlockingStatus::default();
+        refresh_hosts_status(&mut blocking, "", &hosts, true);
+        assert!(!blocking.active);
+        assert!(blocking.error.is_some());
+        refresh_hosts_status(&mut blocking, &current, &["new.example".into()], true);
+        assert!(blocking.active);
+        assert!(blocking.error.is_some());
+        refresh_hosts_status(&mut blocking, &current, &hosts, false);
+        assert!(blocking.error.is_some());
+        refresh_hosts_status(&mut blocking, &current, &hosts, true);
+        assert!(blocking.active);
+        assert!(blocking.error.is_none());
     }
 
     #[test]

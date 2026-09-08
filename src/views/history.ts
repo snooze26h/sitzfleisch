@@ -69,7 +69,7 @@ function archiveRow(entry: ArchivedDay): string {
   const accepted = d.ledger.filter((l) => l.accepted).length;
   const header = `<button class="archive-row${ui.selectedHistoryDay === d.started_at ? " on" : ""}" id="archive-${d.started_at}" data-action="toggle-day" data-id="${d.started_at}" aria-expanded="${open}" aria-controls="archive-detail-${d.started_at}" aria-label="${open ? "折叠" : "展开"} ${esc(dayLabel(d.started_at))} 的归档详情">
       ${icon(open ? "chevron-down" : "chevron-right", 12)}
-      <span class="titles"><b>${esc(dayLabel(d.started_at))}</b><span>${esc(d.profile_name)}档 · ${esc(wallClock(d.started_at))}–${esc(wallClock(entry.ended_at))} · ${accepted} 格通过</span></span>
+      <span class="titles"><b>${esc(dayLabel(d.started_at))}</b><span>${esc(wallClock(d.started_at))}–${esc(wallClock(entry.ended_at))} · ${accepted} 格通过</span></span>
       ${compositionStrip(d)}
       <span class="nums"><b>${esc(meter(netSeconds(d)))}</b><span>目标 ${esc(meter(quotaSeconds(d)))}</span></span>
     </button>`;

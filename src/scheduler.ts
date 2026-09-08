@@ -11,7 +11,6 @@ export interface Suggestion {
   pressing: boolean;
 }
 
-const SITTING_ALARM = 3 * 3600;
 const FRESH_WINDOW = 3 * 3600;
 
 export function remainingSeconds(c: CategoryState): number {
@@ -25,21 +24,6 @@ export function roleOf(prefs: Preferences, id: string): string {
 /** 上一个做过的项目，用来在建议里换个脑子。 */
 export function lastCategory(day: Day): string | null {
   return day.ledger.length ? day.ledger[day.ledger.length - 1].category : null;
-}
-
-/** 距离上一次锻炼（或今天开始）以来的连续久坐时间，暂停的时段扣掉。 */
-export function sittingStreakSeconds(day: Day, prefs: Preferences, now: number): number {
-  let since = day.started_at;
-  for (const entry of day.ledger) {
-    if (entry.accepted && roleOf(prefs, entry.category) === "movement" && entry.ended_at > since) {
-      since = entry.ended_at;
-    }
-  }
-  const elapsed = Math.max(0, now - since);
-  const pausedAfter = day.pauses
-    .filter((p) => p.started_at >= since)
-    .reduce((sum, p) => sum + Math.max(0, (p.ended_at ?? now) - p.started_at), 0);
-  return Math.max(0, elapsed - pausedAfter);
 }
 
 /** 统一块长开着就用它，否则用项目各自的默认块长。 */
@@ -68,7 +52,7 @@ function preferred(current: Scored, next: Scored): Scored {
   return current;
 }
 
-function score(category: CategoryState, day: Day, prefs: Preferences, now: number, candidateCount: number): number {
+function score(category: CategoryState, day: Day, prefs: Preferences, candidateCount: number): number {
   const target = category.quota_minutes * 60;
   if (target <= 0) return 0;
   let value = remainingSeconds(category) / target;
@@ -82,18 +66,13 @@ function score(category: CategoryState, day: Day, prefs: Preferences, now: numbe
       if (scheduledDeep.length && !scheduledDeep.some((c) => c.accepted_seconds > 0)) value *= 0.5;
       break;
     }
-    case "movement": {
-      const sitting = sittingStreakSeconds(day, prefs, now);
-      value *= 0.5 + Math.min(1.5, sitting / SITTING_ALARM);
-      break;
-    }
     default:
       break;
   }
   return value;
 }
 
-export function suggest(day: Day, prefs: Preferences, now: number): Suggestion | null {
+export function suggest(day: Day, prefs: Preferences, _now: number): Suggestion | null {
   const candidates = day.categories.filter((c) => remainingSeconds(c) > 0);
   if (!candidates.length) return null;
   const make = (c: CategoryState, reason: string, pressing: boolean): Suggestion => ({
@@ -102,12 +81,6 @@ export function suggest(day: Day, prefs: Preferences, now: number): Suggestion |
     reason,
     pressing,
   });
-
-  const sitting = sittingStreakSeconds(day, prefs, now);
-  if (sitting >= SITTING_ALARM) {
-    const movement = candidates.find((c) => roleOf(prefs, c.id) === "movement");
-    if (movement) return make(movement, `连坐 ${duration(sitting)}，该动一动。`, true);
-  }
 
   const totalRemaining = candidates.reduce((sum, c) => sum + remainingSeconds(c), 0);
   const last = lastCategory(day);
@@ -122,7 +95,7 @@ export function suggest(day: Day, prefs: Preferences, now: number): Suggestion |
 
   const scored = candidates.map((c) => ({
     category: c,
-    score: score(c, day, prefs, now, candidates.length),
+    score: score(c, day, prefs, candidates.length),
     remaining: remainingSeconds(c),
   }));
   const best = scored.slice(1).reduce(preferred, scored[0]).category;

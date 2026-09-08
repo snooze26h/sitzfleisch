@@ -33,7 +33,6 @@ backup-apps/
 
 # 开发脚手架与设计文档：本地留着用，不进仓库。
 # 仓库里只放「把这个 app 构建出来所需要的东西」。
-.trellis/
 .impeccable/
 AGENTS.md
 DESIGN.md

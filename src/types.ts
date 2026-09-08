@@ -34,6 +34,7 @@ export interface Preferences {
   idle_reminder_enabled: boolean;
   idle_reminder_minutes: number;
   blocked_hosts: string[];
+  blocked_urls: string[];
   uniform_block_minutes: number;
   default_profile_id: string;
   sound_enabled: boolean;
@@ -104,6 +105,13 @@ export interface BlockingStatus {
   active: boolean;
   busy: boolean;
   error: string | null;
+  browser: {
+    available: boolean;
+    connected: boolean;
+    synced: boolean;
+    supports_hosts: boolean;
+    error: string | null;
+  };
 }
 
 /** 每秒推过来的那部分：偏好 + 今天。历史另走一条路，见 `Snapshot.history`。 */
@@ -135,18 +143,6 @@ export interface Snapshot {
 
 export type View = "today" | "history" | "settings";
 
-/** 调度性质：id → 界面名。顺序即设置页里的展示顺序。 */
-export const ROLES: [string, string, string][] = [
-  ["general", "普通", "按剩余比例参与下一格排序。"],
-  ["deepWork", "深度优先", "一天刚开始时更优先。"],
-  ["exploration", "容易滑走", "块长压得短一些，逼你按时收口。"],
-  ["dailyFloor", "每日底线", "缺口占比过大时优先守住。"],
-  ["movement", "运动提醒", "连续久坐过久时优先提醒。"],
-];
-
-export function roleLabel(role: string): string {
-  return ROLES.find(([id]) => id === role)?.[1] ?? "普通";
-}
 
 /** 设置页图标选择器：Lucide 名 → 中文名。 */
 export const ICON_NAMED: [string, string][] = [
