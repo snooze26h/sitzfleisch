@@ -582,7 +582,7 @@ async function handleAction(action: string, el: HTMLElement) {
       if (!cat) break;
       ask({
         title: `删除“${cat.name || "这个项目"}”？`,
-        message: "它会从未来三档安排中移除；今天和旧历史不会被直接改写。当天若主动切换档位，会采用新的档位配额。至少要保留一个项目。",
+        message: "它会从时间安排里移除；今天和旧历史不会被直接改写。至少要保留一个项目。",
         confirmLabel: "删除项目",
         cancelLabel: "取消",
         destructive: true,
@@ -591,7 +591,7 @@ async function handleAction(action: string, el: HTMLElement) {
             if (x.categories.length <= 1) return "至少要保留一个项目。";
             x.categories = x.categories.filter((c) => c.id !== id);
             for (const profile of x.profiles) profile.quotas = profile.quotas.filter((q) => q.category !== id);
-            if (x.profiles.some((profile) => !profile.quotas.some((q) => q.minutes > 0))) return "删掉它以后有的档位就没有任何配时的项目了，先给其它项目配时。";
+            if (x.profiles.some((profile) => !profile.quotas.some((q) => q.minutes > 0))) return "删掉它以后时间安排里就没有任何配时的项目了，先给其它项目配时。";
           });
           if (ok && ui.expandedProject === id) ui.expandedProject = null;
           render();
@@ -719,7 +719,7 @@ async function finishBlock() {
 
 function updateQuota(p: Preferences, profileId: string, categoryId: string, update: (minutes: number) => number): void | string {
   const profile = p.profiles.find((item) => item.id === profileId);
-  if (!profile || !p.categories.some((c) => c.id === categoryId)) return "项目或档位已改变，请重新编辑。";
+  if (!profile || !p.categories.some((c) => c.id === categoryId)) return "项目已改变，请重新编辑。";
   const quota = profile.quotas.find((q) => q.category === categoryId);
   const minutes = update(quota?.minutes ?? 0);
   if (!Number.isInteger(minutes) || minutes < 0 || minutes > 1440) return "配额请输入 0 到 1440 的整数分钟。";
@@ -833,14 +833,6 @@ async function handleChange(key: string, el: HTMLInputElement | HTMLSelectElemen
       break;
     case "uniform-length":
       await savePrefs((x) => { x.uniform_block_minutes = Number(value); });
-      break;
-    case "default-profile":
-      if (day()) {
-        toast("学习日进行中。请回到「今天」页面切换今天的档位。");
-        render();
-        break;
-      }
-      await savePrefs((x) => { x.default_profile_id = value; });
       break;
     case "break-default":
       await savePrefs((x) => { x.break_minutes = Number(value); });

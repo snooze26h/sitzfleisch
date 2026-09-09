@@ -1,4 +1,4 @@
-// 「今天」：没开始时是开始页（三档、两条规矩、上一天），开始后是运行台。
+// 「今天」：没开始时是开始页（当天的安排 + 上一天），开始后是运行台。
 
 import type { BlockTimer, Day } from "../types";
 import { clock, duration, esc, meter, wallClock } from "../format";
@@ -220,9 +220,9 @@ function nextBlockPanel(d: Day): string {
 }
 
 function completeBlock(d: Day): string {
-  return `<div class="panel-head">${icon("check", 15, "stroke")}<span class="name">${esc(d.profile_name)}档今天的配额，全部满了</span></div>
+  return `<div class="panel-head">${icon("check", 15, "stroke")}<span class="name">今天的安排全部走完了</span></div>
     ${hair()}
-    <div class="complete-body">${bigReading(meter(netSeconds(d)), "已学")}<span class="t-caption">可以收工，也可以换个更高的档继续。</span></div>
+    <div class="complete-body">${bigReading(meter(netSeconds(d)), "已学")}<span class="t-caption">可以收工，也可以接着开格。</span></div>
     <div class="spacer"></div>
     <div class="btn-row">${btn("收工归档…", { kind: "primary", action: "end-day" })}</div>`;
 }

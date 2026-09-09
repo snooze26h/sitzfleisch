@@ -745,7 +745,7 @@ fn add_task(text: String, app: AppHandle) -> Result<Snapshot, String> {
     mutate(&app, |s| s.add_task(&text))
 }
 
-/// 进行中改档：进度与台账保留，只按新档位重铺配额。
+/// 换一份计划：进度与台账保留，只按新计划重铺配额。界面上没有入口，留给数据里存着多份的老档。
 #[tauri::command]
 fn switch_profile(profile_id: String, app: AppHandle) -> Result<Snapshot, String> {
     mutate(&app, |s| s.switch_profile(&profile_id))
@@ -1907,11 +1907,11 @@ mod tests {
         let mut state = core::State::new(1_000);
         let before = tray_shape(&state);
         let id = default_profile(&state).unwrap().id.clone();
-        state.preferences.profiles.iter_mut().find(|p| p.id == id).unwrap().name = "新档位".into();
+        state.preferences.profiles.iter_mut().find(|p| p.id == id).unwrap().name = "新名字".into();
         let after = tray_shape(&state);
-        assert_ne!(before, after, "档位名称变了也必须更新菜单");
+        assert_ne!(before, after, "计划名称变了也必须更新菜单");
         drop(state);
-        assert!(matches!(after, TrayMenuState::Idle { profile: Some((_, name)) } if name == "新档位"));
+        assert!(matches!(after, TrayMenuState::Idle { profile: Some((_, name)) } if name == "新名字"));
     }
 
     #[test]

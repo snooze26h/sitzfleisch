@@ -8,7 +8,7 @@ import { ICON_NAMED } from "../types";
 import { esc, meter, shortNameFrom } from "../format";
 import { icon } from "../icons";
 import { btn, hair, labelled, plate, select, stepper, toggle } from "../components";
-import { BLOCK_OPTIONS, BREAK_OPTIONS, IDLE_OPTIONS, day, defaultProfileId, prefs, profileTotalMinutes, ui, withValue } from "../state";
+import { BLOCK_OPTIONS, BREAK_OPTIONS, IDLE_OPTIONS, day, prefs, profileTotalMinutes, ui, withValue } from "../state";
 
 /** 设置的分区：id → 标题 + 图标。侧栏在设置页直接列它们，一区一页。 */
 export const SETTINGS_SECTIONS: [string, string, string][] = [
@@ -122,12 +122,9 @@ function tierPlan(): string {
 
 function rhythm(): string {
   const p = prefs();
-  const active = !!day();
   const idle = p.idle_reminder_enabled ? p.idle_reminder_minutes : 0;
   const uniform = p.uniform_block_minutes;
   const inner = `<div class="settings-panel">
-    ${settingRow("默认档位", active ? "今天进行中，去今天页切换" : "", select({ change: "default-profile", value: defaultProfileId(), options: p.profiles.map((x) => ({ value: x.id, label: `${x.name} · ${meter(profileTotalMinutes(x) * 60)}` })), width: 134, label: "默认档位", disabled: active }))}
-    ${hair()}
     ${settingRow("每格之后休息", "", select({ change: "break-default", value: p.break_minutes, options: withValue(BREAK_OPTIONS, p.break_minutes).map((n) => ({ value: n, label: n === 0 ? "不休息" : `${n} 分` })), width: 104, label: "每格之后休息" }))}
     ${hair()}
     ${settingRow(

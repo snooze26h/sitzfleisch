@@ -56,7 +56,7 @@ function compositionStrip(d: Day): string {
       const done = c.accepted_seconds;
       const live = target > 0 || done > 0;
       const ratio = target > 0 ? Math.min(1, done / target) : done > 0 ? 1 : 0;
-      const title = target > 0 ? `${c.name} ${duration(done)} / ${meter(target)}` : done > 0 ? `${c.name} ${duration(done)}（当前目标为 0）` : `${c.name}（这一档不排）`;
+      const title = target > 0 ? `${c.name} ${duration(done)} / ${meter(target)}` : done > 0 ? `${c.name} ${duration(done)}（当前目标为 0）` : `${c.name}（那天没排）`;
       return `<i class="${live ? "" : "idle"}" title="${esc(title)}"><b style="width:${(ratio * 100).toFixed(1)}%"></b></i>`;
     })
     .join("");

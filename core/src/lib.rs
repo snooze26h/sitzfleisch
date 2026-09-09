@@ -2,7 +2,7 @@
 //! - 一天从「开始今天」那一刻起算，永不跨午夜重置；
 //! - 心跳间隔超过 120 秒判为挂起，那段空档一秒都不记；进程不在的空档不吃宽限；
 //! - 每个专注格结束必须验收：采纳才计入配额进度，拒收只留在台账上；
-//! - 项目与档位是用户数据（preferences），学习日开始时把配额拷走冻结。
+//! - 项目与那份计划是用户数据（preferences），学习日开始时把配额拷走冻结。
 
 use serde::{Deserialize, Serialize};
 
@@ -112,7 +112,7 @@ pub struct Preferences {
     /// 统一块长（分钟）；0 表示按项目各自的默认块长。
     #[serde(default)]
     pub uniform_block_minutes: i64,
-    /// 开始页与菜单栏默认选中的档位；空串表示第一个档位。
+    /// 保留字段：老存档收拢多份计划时用它挑出用户在用的那一份。
     #[serde(default)]
     pub default_profile_id: String,
     /// 计时结束时响一声；生活提醒始终静音。
@@ -245,13 +245,13 @@ pub fn validate_url(raw: &str) -> Result<String, &'static str> {
     Ok(normalized)
 }
 
-/// 计划编辑的准入检查：空名、空档位、幽灵引用、离谱数值一律拒绝。
+/// 计划编辑的准入检查：空名、空计划、幽灵引用、离谱数值一律拒绝。
 pub fn validate_preferences(prefs: &Preferences) -> RuleResult {
     if prefs.categories.is_empty() {
         return Err("至少要有一个项目");
     }
     if prefs.profiles.is_empty() {
-        return Err("至少要有一个档位");
+        return Err("至少要有一份计划");
     }
     if !(0..=120).contains(&prefs.break_minutes) {
         return Err("休息时长要在 0–120 分钟之间");
@@ -264,7 +264,7 @@ pub fn validate_preferences(prefs: &Preferences) -> RuleResult {
     if !prefs.default_profile_id.is_empty()
         && !prefs.profiles.iter().any(|p| p.id == prefs.default_profile_id)
     {
-        return Err("默认档位不存在");
+        return Err("默认计划不存在");
     }
     if !(1..=24).contains(&prefs.hydration_goal_cups) {
         return Err("喝水目标要在 1–24 杯之间");
@@ -303,12 +303,12 @@ pub fn validate_preferences(prefs: &Preferences) -> RuleResult {
     }
     for profile in &prefs.profiles {
         if profile.name.trim().is_empty() {
-            return Err("档位名不能为空");
+            return Err("计划名不能为空");
         }
         let mut active = 0;
         for q in &profile.quotas {
             if !ids.contains(&q.category) {
-                return Err("档位引用了不存在的项目");
+                return Err("计划引用了不存在的项目");
             }
             if !(0..=24 * 60).contains(&q.minutes) {
                 return Err("配额要在 0–24 小时之间");
@@ -318,7 +318,7 @@ pub fn validate_preferences(prefs: &Preferences) -> RuleResult {
             }
         }
         if active == 0 {
-            return Err("每个档位至少要给一个项目配时");
+            return Err("至少要给一个项目配时");
         }
     }
     Ok(())
@@ -405,7 +405,7 @@ pub struct CategoryState {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Day {
     pub profile_name: String,
-    /// 开始今天时选的档位 id；进行中改档会更新。
+    /// 开始今天时用的那份计划 id。
     #[serde(default)]
     pub profile_id: String,
     pub started_at: i64,
@@ -435,7 +435,7 @@ pub struct Day {
 }
 
 impl Day {
-    /// 学习日开始时把档位配额拷走冻结；配 0 分钟的项目不进今天。
+    /// 学习日开始时把计划里的配额拷走冻结；配 0 分钟的项目不进今天。
     fn from_profile(prefs: &Preferences, profile: &ProfileDef, now: i64) -> Self {
         let categories = profile
             .quotas

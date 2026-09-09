@@ -172,10 +172,6 @@ export function profileTotalMinutes(p: { quotas: { minutes: number }[] }): numbe
   return p.quotas.reduce((sum, q) => sum + Math.max(0, q.minutes), 0);
 }
 
-export function defaultProfileId(): string {
-  const p = prefs();
-  return p.profiles.some((x) => x.id === p.default_profile_id) ? p.default_profile_id : (p.profiles[0]?.id ?? "");
-}
 
 /** 一行一条，把输入框里的文字变成任务清单。 */
 export function parseTasks(text: string): TaskItem[] {
