@@ -1,0 +1,4 @@
+{
+  "prompt": "Edit this supplied 3D ribbon image. Keep the existing ribbon object, its exact shape, ivory material, vermilion red cut face, camera and lighting unchanged. Replace ALL checkerboard squares with a flat uniform deep warm charcoal background, solid RGB color #191816. The entire surrounding background, including the holes inside the ribbon, must be a smooth solid opaque color. Do not show or simulate transparency. Do not add any checkerboard. No vignette, horizon, floor, text, logo, border or extra objects. Preserve the whole silhouette without clipping and keep generous padding. The image will be used as a single full-bleed material plate inside a premium focus app. Match the specified background color right up to every outer edge. Output a square image.",
+  "createdAt": "2026-09-09T14:55:14.192Z"
+}

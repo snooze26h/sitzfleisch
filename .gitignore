@@ -37,3 +37,8 @@ backup-apps/
 AGENTS.md
 DESIGN.md
 PRODUCT.md
+
+# 视觉更新的生成原图只留本地：最终 WebP 已在 src/assets，7MB 原图不进仓库。
+design/visual-refresh-20260909/originals/
+# DESIGN.md 的改版前快照：与 DESIGN.md 一样只留本地。
+design/visual-refresh-20260909/DESIGN.before.md

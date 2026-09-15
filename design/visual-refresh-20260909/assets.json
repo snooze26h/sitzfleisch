@@ -1,0 +1,53 @@
+[
+  {
+    "key": "fold-open",
+    "initialPrompt": "Edit the supplied Sitzfleisch app icon into a standalone premium 3D brand object for a focus timer app. Preserve the exact bone ivory ribbon material, small vermilion red cut end, generous thickness and sophisticated soft studio lighting of the reference. REMOVE the square black app-icon backing completely. The ivory ribbon should unfold into a graceful upright open S, with a little more air between its folds, three-quarter view, one red cut face on the upper right tip. It must be one coherent continuous ribbon, not letters or typography. Center the isolated object with 15 percent clear padding on all sides. True transparent alpha background, no floor, no backdrop, no typography, no UI, no border, no watermark, no checkered background baked in. Soft form shadows on the object itself only. Crisp silhouette, detailed matte porcelain-paper finish, restrained and tactile. Square 1024x1024 output. This is the OPEN / READY member of a consistent brand asset family, to appear at 180-300 CSS pixels. Produce exactly one isolated object.",
+    "finalPrompt": "Edit this supplied 3D ribbon image. Keep the existing ribbon object, its exact shape, ivory material, vermilion red cut face, camera and lighting unchanged. Replace ALL checkerboard squares with a flat uniform deep warm charcoal background, solid RGB color #191816. The entire surrounding background, including the holes inside the ribbon, must be a smooth solid opaque color. Do not show or simulate transparency. Do not add any checkerboard. No vignette, horizon, floor, text, logo, border or extra objects. Preserve the whole silhouette without clipping and keep generous padding. The image will be used as a single full-bleed material plate inside a premium focus app. Match the specified background color right up to every outer edge. Output a square image.",
+    "source": "/Users/snooze26h/.codex/generated_images/01a07ea0-b66a-7f52-b149-9ce672506c63/exec-9ed4aae4-0576-45b7-841f-30f72d3e1da3.png",
+    "background": "opaque charcoal",
+    "tool": "built-in image_gen",
+    "model": "gpt-image-2 (C2PA softwareAgent version 2.0)",
+    "workspaceAsset": "src/assets/time-fold/fold-open.webp",
+    "originalCopy": "design/visual-refresh-20260909/originals/fold-open.png",
+    "initialReference": "design/app-icon/time-fold/source.png",
+    "removedFromWorkspace": "2026-09-14：深色改版后未被任何代码引用，WebP 已从 src/assets 移除；原图仍在 originalCopy（仅本地保留，不入仓库）。"
+  },
+  {
+    "key": "fold-rest",
+    "initialPrompt": "Edit the supplied Sitzfleisch app icon into a new REST / PAUSE variant of its bone ivory ribbon. Preserve the reference's thick bone ivory ribbon, small vermilion red cut end, matte porcelain-paper material and soft upper-left studio lighting. REMOVE the square black app-icon backing entirely. Fold the same continuous ribbon gently down into a low resting S-shaped loop, like an elegantly folded bookmark resting quietly on its own broad base. Three-quarter front view, visually stable and horizontal, red cut face at the right end, no additional objects. Center with 15 percent clear padding. True transparent alpha background, no floor or backdrop, no baked checkerboard, no text, no UI, no border, no watermark. Shadows belong to the form only. Delicate tangible material, crisp edges, restrained professional design, not cartoonish, no glossy plastic. Square 1024x1024 output. It must clearly belong to the same object family as the reference. Produce exactly one isolated object.",
+    "finalPrompt": "Edit this supplied 3D ribbon image. Keep the existing ribbon object, its exact shape, ivory material, vermilion red cut face, camera and lighting unchanged. Replace ALL checkerboard squares with a flat uniform warm bone ivory background, solid RGB color #e8e1d5. The entire surrounding background, including the holes inside the ribbon, must be a smooth solid opaque color. Do not show or simulate transparency. Do not add any checkerboard. No vignette, horizon, floor, text, logo, border or extra objects. Preserve the whole silhouette without clipping and keep generous padding. The image will be used as a single full-bleed material plate inside a premium focus app. Match the specified background color right up to every outer edge. Output a square image.",
+    "source": "/Users/snooze26h/.codex/generated_images/01a07ea0-b66a-7f52-b149-9ce672506c63/exec-08d2db02-f7f0-48b0-ada8-fd371cab3222.png",
+    "background": "opaque ivory",
+    "tool": "built-in image_gen",
+    "model": "gpt-image-2 (C2PA softwareAgent version 2.0)",
+    "workspaceAsset": "src/assets/time-fold/fold-rest.webp",
+    "originalCopy": "design/visual-refresh-20260909/originals/fold-rest.png",
+    "initialReference": "design/app-icon/time-fold/source.png",
+    "removedFromWorkspace": "2026-09-14：深色改版后未被任何代码引用，WebP 已从 src/assets 移除；原图仍在 originalCopy（仅本地保留，不入仓库）。"
+  },
+  {
+    "key": "fold-archive",
+    "initialPrompt": "Edit the supplied Sitzfleisch app icon into an ARCHIVE / FINISHED variant of its ivory ribbon. Preserve the same thick bone ivory material, small vermilion cut face, matte porcelain-paper texture and soft upper-left studio lighting. REMOVE the black rounded-square icon backing. Fold the single ribbon into three tidy stacked horizontal accordion folds, an elegant small sculptural stack of completed pages, with the vermilion cut edge visible at the lower front-right tip. Three-quarter front view, slightly elevated camera matching a premium desktop UI illustration family. One coherent ivory folded object only, no loose paper and no other props. Center with 15 percent padding. True transparent alpha background, no floor, no backdrop, no checkerboard baked in, no text or symbols or check marks, no trophy or confetti, no watermark. Form shadows only. Crisp silhouette and subtle tactile detail at small scale. Square 1024x1024 output. Produce exactly one isolated object.",
+    "finalPrompt": "Edit this supplied 3D ribbon image. Keep the existing ribbon object, its exact shape, ivory material, vermilion red cut face, camera and lighting unchanged. Replace ALL checkerboard squares with a flat uniform deep warm charcoal background, solid RGB color #191816. The entire surrounding background, including the holes inside the ribbon, must be a smooth solid opaque color. Do not show or simulate transparency. Do not add any checkerboard. No vignette, horizon, floor, text, logo, border or extra objects. Preserve the whole silhouette without clipping and keep generous padding. The image will be used as a single full-bleed material plate inside a premium focus app. Match the specified background color right up to every outer edge. Output a square image.",
+    "source": "/Users/snooze26h/.codex/generated_images/01a07ea0-b66a-7f52-b149-9ce672506c63/exec-c9bca514-5df5-4657-bc86-8714d2ad50da.png",
+    "background": "opaque charcoal",
+    "tool": "built-in image_gen",
+    "model": "gpt-image-2 (C2PA softwareAgent version 2.0)",
+    "workspaceAsset": "src/assets/time-fold/fold-archive.webp",
+    "originalCopy": "design/visual-refresh-20260909/originals/fold-archive.png",
+    "initialReference": "design/app-icon/time-fold/source.png"
+  },
+  {
+    "key": "paper-grain",
+    "initialPrompt": "Generate a seamless tileable macro material texture for the quiet bone-white working surface of a premium focus timer desktop app. Uniform warm ivory fine paper fiber and very subtle matte mineral grain. Extremely restrained low contrast, no directional lighting, no shadows, no vignette, no gradients, no folds, no borders, no marks, no stains, no pattern, no text. Base color approximately #e8e1d5 with tiny tonal variation only. Flat orthographic texture filling the entire square 1024x1024 image. It should remain visually quiet when shown underneath readable dark UI text. Opaque background.",
+    "finalPrompt": "Generate a seamless tileable macro material texture for the quiet bone-white working surface of a premium focus timer desktop app. Uniform warm ivory fine paper fiber and very subtle matte mineral grain. Extremely restrained low contrast, no directional lighting, no shadows, no vignette, no gradients, no folds, no borders, no marks, no stains, no pattern, no text. Base color approximately #e8e1d5 with tiny tonal variation only. Flat orthographic texture filling the entire square 1024x1024 image. It should remain visually quiet when shown underneath readable dark UI text. Opaque background.",
+    "source": "/Users/snooze26h/.codex/generated_images/01a07ea0-b66a-7f52-b149-9ce672506c63/exec-6b0009ed-a3dc-495c-96bf-d51b1f1bb800.png",
+    "background": "opaque texture",
+    "tool": "built-in image_gen",
+    "model": "gpt-image-2 (C2PA softwareAgent version 2.0)",
+    "workspaceAsset": "src/assets/time-fold/paper-grain.webp",
+    "originalCopy": "design/visual-refresh-20260909/originals/paper-grain.png",
+    "initialReference": null,
+    "removedFromWorkspace": "2026-09-14：深色改版后未被任何代码引用，WebP 已从 src/assets 移除；原图仍在 originalCopy（仅本地保留，不入仓库）。"
+  }
+]

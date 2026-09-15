@@ -1,6 +1,6 @@
 /* ==========================================================================
-   Sitzfleisch · 坐功 — 设计系统（与 DESIGN.md 一一对应）
-   石墨面板上的骨白油墨，深色一套到底。没有投影、没有光晕、没有渐变填充。
+   Sitzfleisch · 坐功 — 基础组件与布局
+   时间折页的颜色、材质与页面层次由 visual.css 统一覆盖，参见 DESIGN.md。
    ========================================================================== */
 
 :root {
@@ -161,22 +161,26 @@ textarea {
 
 .wordmark {
   display: flex;
-  flex-direction: column;
-  gap: 5px;
+  align-items: center;
+  gap: 13px;
   padding: 0 20px 24px;
 }
 
+.wordmark-symbol { flex: none; color: var(--stroke); }
+.wordmark-type { display: flex; flex-direction: column; gap: 5px; min-width: 0; }
+
 .wordmark-en {
-  font-size: 12.5px;
-  font-weight: 700;
-  letter-spacing: 2.2px;
-  color: var(--ink-high);
+  font-size: 9px;
+  font-weight: 600;
+  letter-spacing: 1.5px;
+  color: var(--ink-muted);
 }
 
 .wordmark-cn {
-  font-size: 14px;
-  letter-spacing: 1.8px;
-  color: var(--ink-faint);
+  font-size: 23px;
+  font-weight: 600;
+  letter-spacing: 3px;
+  color: var(--ink-high);
 }
 
 .sidebar > .hair {
@@ -213,6 +217,8 @@ textarea {
   width: 16px;
   color: var(--ink-muted);
 }
+
+.nav-item .brand-glyph { width: 20px; height: 20px; }
 
 .nav-item:hover {
   background: var(--plate);

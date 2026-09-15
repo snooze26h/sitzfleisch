@@ -144,7 +144,7 @@ export interface Snapshot {
 export type View = "today" | "history" | "settings";
 
 
-/** 设置页图标选择器：Lucide 名 → 中文名。 */
+/** 通用图标目录；专属项目图标优先展示，仍兼容这里的旧标识。 */
 export const ICON_NAMED: [string, string][] = [
   ["flask-conical", "烧瓶"],
   ["compass", "指南针"],

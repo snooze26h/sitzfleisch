@@ -3,7 +3,8 @@
 import type { ArchivedDay, Day } from "../types";
 import { dayLabel, dayOfMonth, duration, esc, meter, wallClock } from "../format";
 import { icon } from "../icons";
-import { btn, emptyState, hair, plate, quotaLane, reading, sectionLabel, sessionRow } from "../components";
+import { foldArt } from "../brand";
+import { btn, hair, plate, quotaLane, reading, sectionLabel, sessionRow } from "../components";
 import { HISTORY_LIMIT, history, netSeconds, quotaSeconds, ui } from "../state";
 
 export function historyEmpty(): boolean {
@@ -13,9 +14,9 @@ export function historyEmpty(): boolean {
 export function historyPage(): string {
   const days = [...history()].reverse();
   if (!days.length) {
-    return emptyState("archive", "还没有归档的日子", `结束第一个学习日之后，成果和净投入会保存在这里，最多留 ${HISTORY_LIMIT} 天。`);
+    return `<section class="history-empty">${foldArt("archive")}<div><h1>还没有归档</h1><p>收工后自动留存，最多 ${HISTORY_LIMIT} 天。</p></div></section>`;
   }
-  return `<header class="page-heading"><h1>历史</h1><p>已归档 ${esc(days.length)} 天</p></header>` + runChart(days) + archiveList(days);
+  return `<header class="page-heading history-heading"><div class="heading-copy"><h1>历史</h1><p>已归档 ${esc(days.length)} 天</p></div>${foldArt("archive", "heading-art")}</header>` + runChart(days) + archiveList(days);
 }
 
 function runChart(days: ArchivedDay[]): string {
@@ -69,6 +70,7 @@ function archiveRow(entry: ArchivedDay): string {
   const accepted = d.ledger.filter((l) => l.accepted).length;
   const header = `<button class="archive-row${ui.selectedHistoryDay === d.started_at ? " on" : ""}" id="archive-${d.started_at}" data-action="toggle-day" data-id="${d.started_at}" aria-expanded="${open}" aria-controls="archive-detail-${d.started_at}" aria-label="${open ? "折叠" : "展开"} ${esc(dayLabel(d.started_at))} 的归档详情">
       ${icon(open ? "chevron-down" : "chevron-right", 12)}
+      <span class="archive-fold" aria-hidden="true"></span>
       <span class="titles"><b>${esc(dayLabel(d.started_at))}</b><span>${esc(wallClock(d.started_at))}–${esc(wallClock(entry.ended_at))} · ${accepted} 格通过</span></span>
       ${compositionStrip(d)}
       <span class="nums"><b>${esc(meter(netSeconds(d)))}</b><span>目标 ${esc(meter(quotaSeconds(d)))}</span></span>

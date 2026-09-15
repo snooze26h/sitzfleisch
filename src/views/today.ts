@@ -3,6 +3,7 @@
 import type { BlockTimer, Day } from "../types";
 import { clock, duration, esc, meter, wallClock } from "../format";
 import { icon } from "../icons";
+import { ribbonScene, type RibbonPhase } from "../brand";
 import {
   bigReading,
   btn,
@@ -52,8 +53,8 @@ function startBoard(): string {
   const days = history();
   const last = days.length ? days[days.length - 1] : null;
   if (!plan) {
-    return `<div class="masthead"><h1 class="t-masthead">一天从你坐下的那一刻算起</h1>
-      <p class="sub">先去「设置 · 项目」建一个项目。</p></div>`;
+    return `<div class="masthead"><h1 class="t-masthead">落座，便是今天。</h1>
+      <p class="sub">先在设置中添加项目。</p></div>`;
   }
   const rows = p.categories
     .map((c) => {
@@ -70,10 +71,10 @@ function startBoard(): string {
     })
     .join("");
   const total = profileTotalMinutes(plan);
-  return `<div class="masthead">
-      <h1 class="t-masthead">一天从你坐下的那一刻算起</h1>
-      <p class="sub">不看几点起床，也不在午夜清零。定好今天各项目的时间，然后坐下。</p>
-    </div>
+  return `<section class="start-hero"><div class="masthead">
+      <h1 class="t-masthead">落座，便是今天。</h1>
+      <p class="sub">给要紧的事，留些时间。</p>
+    </div>${ribbonScene("ready", "start-ribbon")}</section>
     <div class="plan">
       <div class="plan-head"><span class="engraved">今天的安排</span><span class="engraved">分钟</span></div>
       ${hair()}
@@ -138,20 +139,24 @@ function headerBar(d: Day): string {
 
 function focusPanel(d: Day): string {
   let inner: string;
+  let phase: RibbonPhase;
   if (d.timer && isPaused(d)) inner = pausedPanel(d, d.timer);
   else if (d.timer) inner = runningPanel(d, d.timer);
   else inner = nextBlockPanel(d);
-  return `<section class="plate focus${d.timer && !isPaused(d) ? " is-running" : ""}" id="focus"><div class="inner">${inner}</div></section>`;
+  if (d.timer) phase = isPaused(d) ? "rest" : "flow";
+  else if (!suggest(d, prefs(), ui.now)) phase = "done";
+  else phase = resting(d) ? "rest" : "ready";
+  return `<section class="plate focus${d.timer && !isPaused(d) ? " is-running" : ""}${d.timer && isPaused(d) ? " is-paused" : ""}" id="focus" data-phase="${phase}">${ribbonScene(phase, "focus-ribbon")}<div class="inner">${inner}</div></section>`;
 }
 
 /** 格在走、但被按停了。 */
 function pausedPanel(d: Day, t: BlockTimer): string {
   const auto = pausedAutomatically(d);
-  const why = auto ? "检测到计时中断，已自动暂停。" : `继续后「${nameOf(t.category, d)}」接着走。`;
+  const why = auto ? "计时中断，已自动暂停。" : `继续「${nameOf(t.category, d)}」。`;
   const left = Math.max(0, t.total_seconds - t.elapsed_seconds);
   return `<div class="panel-head">${icon("pause", 15, "caution")}<span class="name">${esc(nameOf(t.category, d))} · 已暂停</span><span class="right t-caption">还剩 ${esc(duration(left))}</span></div>
     ${hair()}
-    <div class="away-body">${bigReading(clock(pauseNowSeconds(d)), "已暂停", { tint: "ink-muted" })}<span class="t-caption" style="font-size:13px">${esc(why)}</span></div>
+    <div class="away-body"><div class="state-reading">${bigReading(clock(pauseNowSeconds(d)), "已暂停", { tint: "ink-muted" })}<span class="t-caption">${esc(why)}</span></div></div>
     <div class="spacer"></div>
     <div class="btn-row">${btn("继续", { kind: "primary", action: "toggle", icon: "play" })}${btn("结束这一格", { kind: "plate", action: "finish" })}</div>`;
 }
@@ -184,7 +189,7 @@ function runningPanel(d: Day, t: BlockTimer): string {
   ].join("");
   return `<div class="panel-head">${icon(iconOf(t.category), 15, "signal")}<span class="name">${esc(nameOf(t.category, d))}</span></div>
     ${hair()}
-    <div class="bigreading-pad">${bigReading(clock(remaining), "剩余")}</div>
+    <div class="focus-reading"><div class="bigreading-pad">${bigReading(clock(remaining), "剩余")}</div></div>
     ${runStrip({ elapsed: t.elapsed_seconds, planned: t.total_seconds, running: true, focus: true, startedAt, projectedEnd: ui.now + remaining })}
     ${taskList(t)}
     <div class="spacer" style="min-height:16px"></div>
@@ -202,27 +207,26 @@ function nextBlockPanel(d: Day): string {
   const brk = ui.breakDraft ?? p.break_minutes;
   const pausedStrip = restingNow
     ? `<div class="pause-strip resting">${icon("coffee", 13)}<span>休息中，还剩 <b class="mono">${esc(clock(breakRemaining(d)))}</b></span>${btn("不休息了", { kind: "quiet", cls: "sm", action: "end-break" })}</div>`
-    : `<div class="pause-strip">${icon("pause", 13)}<span>已暂停 <b class="mono">${esc(clock(pauseNowSeconds(d)))}</b>，开一格就继续</span></div>`;
+    : `<div class="pause-strip">${icon("pause", 13)}<span>已暂停 <b class="mono">${esc(clock(pauseNowSeconds(d)))}</b></span></div>`;
   const suggestionLine = `<div class="suggestion${suggestion.pressing ? " pressing" : ""}">
       ${icon(suggestion.pressing ? "triangle-alert" : "signpost", 14)}
       <div class="text"><b>建议 ${esc(nameOf(suggestion.category, d))} · ${suggestion.minutes} 分钟</b><span>${esc(suggestion.reason)}</span></div>
-      ${selected !== suggestion.category ? btn(`选${nameOf(suggestion.category, d)}`, { kind: "quiet", cls: "high", action: "adopt" }) : ""}
     </div>`;
   const task = `<div class="task">
-      <textarea class="field task-input" data-input="task" rows="2" aria-label="这一格要做的事" placeholder="要做的事，一行一条（可以不写）">${esc(ui.taskDraft)}</textarea>
+      <textarea class="field task-input" data-input="task" rows="2" aria-label="这一格要做的事（选填，一行一项）" placeholder="写下这一格要做的事，一行一项">${esc(ui.taskDraft)}</textarea>
     </div>`;
   const controls = `<div class="controls-row">
       ${labelled("时长", select({ change: "minutes", value: minutes, options: withValue(BLOCK_OPTIONS, minutes).map((n) => ({ value: n, label: `${n} 分` })), width: 84, label: "专注时长" }))}
       ${labelled("之后休息", select({ change: "break", value: brk, options: withValue(BREAK_OPTIONS, brk).map((n) => ({ value: n, label: n === 0 ? "不休息" : `${n} 分` })), width: 92, label: "休息时长" }))}
       <span class="start">${btn("开始", { kind: "primary", cls: "lg", action: "start-block", title: "⌘↩" })}</span>
     </div>`;
-  return `<div class="block-body">${pausedStrip}${suggestionLine}${categoryPicker(d, selected)}${task}<div class="spacer"></div>${controls}</div>`;
+  return `<div class="block-body">${pausedStrip}<div class="choice-heading">${suggestionLine}</div>${categoryPicker(d, selected)}${task}<div class="spacer"></div>${controls}</div>`;
 }
 
 function completeBlock(d: Day): string {
   return `<div class="panel-head">${icon("check", 15, "stroke")}<span class="name">今天的安排全部走完了</span></div>
     ${hair()}
-    <div class="complete-body">${bigReading(meter(netSeconds(d)), "已学")}<span class="t-caption">可以收工，也可以接着开格。</span></div>
+    <div class="complete-body"><div class="state-reading">${bigReading(meter(netSeconds(d)), "已学")}<span class="t-caption">可以收工，也可以接着开格。</span></div></div>
     <div class="spacer"></div>
     <div class="btn-row">${btn("收工归档…", { kind: "primary", action: "end-day" })}</div>`;
 }

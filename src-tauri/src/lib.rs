@@ -52,6 +52,8 @@ struct Shared {
     data_dir: PathBuf,
     /// 上一次装到托盘上的菜单形状，形状没变就不重建。
     tray_shape: Mutex<Option<TrayMenuState>>,
+    /// 标题、提示和暂停标记分别去重；文字相同时也不能漏掉暂停状态的切换。
+    tray_display: Mutex<Option<TrayDisplay>>,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -92,7 +94,7 @@ fn default_profile(state: &core::State) -> Option<&core::ProfileDef> {
 }
 
 /// 菜单的「形状」。**里面绝不能放每秒都变的数字**——菜单一旦被重建，正打开的那份就会被
-/// 系统收走，表现出来就是「点开秒缩」。倒计时只放在菜单栏标题上，那里可以随便刷。
+/// 系统收走，表现出来就是「点开秒缩」。倒计时只放在菜单栏标题上，以等宽数字随文本变化更新。
 /// 它必须便宜：每秒都要算一次，用来决定要不要真的去造那一整套原生菜单项。
 fn tray_shape(state: &core::State) -> TrayMenuState {
     match &state.day {
@@ -369,7 +371,7 @@ fn clock_text(seconds: i64) -> String {
     }
 }
 
-/// 菜单栏标题：深度工作 42:11 / 休息 07:20 / 暂停 12:03 / 下一格 阅读 / 今日达成。
+/// 菜单栏的完整状态文字，供悬浮提示使用；紧凑标题由 `tray_display` 生成。
 fn tray_text(state: &core::State) -> String {
     let Some(day) = &state.day else { return "坐功".into() };
     let now = state.last_tick;
@@ -395,6 +397,83 @@ fn tray_text(state: &core::State) -> String {
     }
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct TrayDisplay {
+    title: String,
+    tooltip: String,
+    paused: bool,
+}
+
+/// 菜单栏只占一小段：跨小时后省略秒数，完整时长仍在悬浮提示中。
+fn compact_tray_clock(seconds: i64) -> String {
+    let safe = seconds.max(0);
+    match safe {
+        0..3_600 => clock_text(safe),
+        3_600..36_000 => format!("{}h{:02}", safe / 3_600, (safe % 3_600) / 60),
+        36_000..360_000 => format!("{}h", safe / 3_600),
+        _ => "99h+".into(),
+    }
+}
+
+fn tray_display(state: &core::State) -> TrayDisplay {
+    let text = tray_text(state);
+    let mut display = TrayDisplay { title: text.clone(), tooltip: format!("坐功 · {text}"), paused: false };
+    let Some(day) = &state.day else { return display };
+    if let Some(timer) = &day.timer {
+        display.paused = day.is_paused();
+        let seconds = if display.paused { day.current_pause_seconds(state.last_tick) } else { timer.remaining_seconds() };
+        // 暂停放进原图标的角标，不向标题插入额外文字，避免暂停时整项变宽被系统挤掉。
+        display.title = format!("{} {}", short_name(state, &timer.category), compact_tray_clock(seconds));
+    } else if day.resting(state.last_tick) {
+        display.title = format!("休息 {}", compact_tray_clock(day.break_remaining(state.last_tick)));
+    }
+    display
+}
+
+/// 在原图标内部画暂停角标，保持画布尺寸与宽高比，菜单栏占位不会随暂停增加。
+fn tray_icon(icon: &tauri::image::Image<'_>, paused: bool) -> tauri::image::Image<'static> {
+    if !paused {
+        return icon.clone().to_owned();
+    }
+    let (width, height) = (icon.width() as usize, icon.height() as usize);
+    let side = width.min(height);
+    let mut rgba = icon.rgba().to_vec();
+    if side >= 16 && width.checked_mul(height).and_then(|n| n.checked_mul(4)) == Some(rgba.len()) {
+        let badge = side / 2;
+        let edge = (side / 32).max(1);
+        let left = width - badge;
+        let top = height - badge;
+        for y in 0..badge {
+            for x in 0..badge {
+                let border = x < edge || y < edge || x >= badge - edge || y >= badge - edge;
+                let bar = y >= badge / 4 && y < badge * 3 / 4
+                    && ((x >= badge / 4 && x < badge * 7 / 16) || (x >= badge * 9 / 16 && x < badge * 3 / 4));
+                let color = if border { [25, 24, 21, 255] } else if bar { [235, 229, 215, 255] } else { [168, 73, 48, 255] };
+                let index = ((top + y) * width + left + x) * 4;
+                rgba[index..index + 4].copy_from_slice(&color);
+            }
+        }
+    }
+    tauri::image::Image::new_owned(rgba, icon.width(), icon.height())
+}
+
+#[cfg(target_os = "macos")]
+fn configure_tray_digits(tray: &tauri::tray::TrayIcon) -> tauri::Result<()> {
+    use objc2::MainThreadMarker;
+    use objc2_app_kit::{NSFont, NSFontWeightRegular};
+
+    tray.with_inner_tray_icon(|inner| {
+        let Some(mtm) = MainThreadMarker::new() else { return };
+        let Some(item) = inner.ns_status_item() else { return };
+        let Some(button) = item.button(mtm) else { return };
+        let size = button.font().map(|font| font.pointSize()).unwrap_or_else(NSFont::systemFontSize);
+        // 数字等宽，保留系统字号与中文显示；避免秒数变化反复改变菜单栏占位。
+        // 此常量由已链接的 AppKit 提供，在整个进程生命周期内有效。
+        let font = NSFont::monospacedDigitSystemFontOfSize_weight(size, unsafe { NSFontWeightRegular });
+        button.setFont(Some(&font));
+    })
+}
+
 fn broadcast(app: &AppHandle) {
     let shared = app.state::<Shared>();
     // 心跳推送不带历史：历史只在命令返回和首次拉取时随快照走一遍。
@@ -405,15 +484,27 @@ fn broadcast(app: &AppHandle) {
     let handle = app.clone();
     let _ = app.run_on_main_thread(move || {
         let shared = handle.state::<Shared>();
-        let (text, shape) = {
+        let (display, shape) = {
             let state = shared.state.lock().unwrap();
-            (tray_text(&state), tray_shape(&state))
+            (tray_display(&state), tray_shape(&state))
         };
         let Some(tray) = handle.tray_by_id("main") else { return };
-        // macOS 菜单栏直接显示倒计时文字；Windows 托盘没有标题位，挂在悬停提示上。
-        #[cfg(target_os = "macos")]
-        let _ = tray.set_title(Some(text.clone()));
-        let _ = tray.set_tooltip(Some(format!("坐功 · {text}")));
+        let previous = shared.tray_display.lock().unwrap().clone();
+        if previous.as_ref() != Some(&display) {
+            // 原生调用之前释放缓存锁；失败时不记为已应用，下次推送继续重试。
+            #[cfg(target_os = "macos")]
+            let title_applied = previous.as_ref().is_some_and(|p| p.title == display.title)
+                || tray.set_title(Some(&display.title)).is_ok();
+            #[cfg(not(target_os = "macos"))]
+            let title_applied = true;
+            let tooltip_applied = previous.as_ref().is_some_and(|p| p.tooltip == display.tooltip)
+                || tray.set_tooltip(Some(&display.tooltip)).is_ok();
+            let icon_applied = previous.as_ref().is_some_and(|p| p.paused == display.paused)
+                || handle.default_window_icon().is_some_and(|icon| tray.set_icon(Some(tray_icon(icon, display.paused))).is_ok());
+            if title_applied && tooltip_applied && icon_applied {
+                *shared.tray_display.lock().unwrap() = Some(display);
+            }
+        }
         // shape 便宜，先算它：形状没变就不去造那一整套原生菜单项（这是每秒都会走的路径）。
         let changed = shared.tray_shape.lock().unwrap().as_ref() != Some(&shape);
         if changed {
@@ -1248,6 +1339,7 @@ pub fn run() {
                 path,
                 data_dir: dir.clone(),
                 tray_shape: Mutex::new(None),
+                tray_display: Mutex::new(None),
             });
             browser_blocking::start(app.handle(), isolated);
             #[cfg(target_os = "macos")]
@@ -1260,12 +1352,19 @@ pub fn run() {
                 *shared.tray_shape.lock().unwrap() = Some(shape);
                 menu
             };
-            TrayIconBuilder::with_id("main")
-                .icon(app.default_window_icon().unwrap().clone())
+            let initial_display = tray_display(&app.state::<Shared>().state.lock().unwrap());
+            let tray_builder = TrayIconBuilder::with_id("main")
+                .icon(tray_icon(app.default_window_icon().unwrap(), initial_display.paused))
+                .tooltip(&initial_display.tooltip)
                 .menu(&menu)
                 .show_menu_on_left_click(true)
-                .on_menu_event(|app, event| handle_tray_menu(app, event.id.as_ref()))
-                .build(app)?;
+                .on_menu_event(|app, event| handle_tray_menu(app, event.id.as_ref()));
+            #[cfg(target_os = "macos")]
+            let tray_builder = tray_builder.title(&initial_display.title);
+            let _tray = tray_builder.build(app)?;
+            #[cfg(target_os = "macos")]
+            configure_tray_digits(&_tray)?;
+            *app.state::<Shared>().tray_display.lock().unwrap() = Some(initial_display);
 
             // 每秒走一格；只有「自然走完」的转变才配通知（用户手点的不用提醒自己）。
             let handle = app.handle().clone();
@@ -1431,6 +1530,7 @@ mod tests {
                 path: dir.join("state.json"),
                 data_dir: dir,
                 tray_shape: Mutex::new(None),
+                tray_display: Mutex::new(None),
             })
         }
     }
@@ -1872,6 +1972,84 @@ mod tests {
 
         state.end_break().unwrap();
         assert!(tray_text(&state).starts_with("下一格 "), "休息结束回到该做什么");
+    }
+
+    #[test]
+    fn tray_pause_preserves_the_project_and_clock_without_expanding_the_title() {
+        let mut state = state_with_day();
+        state.start_block("main", 25, vec![]).unwrap();
+        state.tick(1_060);
+        let running = tray_display(&state);
+        assert_eq!(running.title, "深度工作 24:00");
+        assert!(!running.paused);
+
+        state.toggle_pause(1_060).unwrap();
+        state.tick(1_120);
+        let paused = tray_display(&state);
+        assert_eq!(paused.title, "深度工作 01:00");
+        assert_eq!(paused.title.chars().count(), running.title.chars().count());
+        assert!(paused.paused);
+        assert_eq!(paused.tooltip, "坐功 · 深度工作 暂停 01:00");
+        assert!(tray_menu_line(&state, state.day.as_ref().unwrap()).contains("已暂停"));
+
+        state.toggle_pause(1_120).unwrap();
+        assert_eq!(tray_display(&state), running, "继续时恢复运行图标、剩余时间和提示");
+    }
+
+    #[test]
+    fn tray_auto_pause_keeps_a_visible_title_and_a_pause_marker() {
+        let mut state = state_with_day();
+        state.start_block("main", 25, vec![]).unwrap();
+        state.tick(1_000 + core::SUSPEND_GAP_SECONDS + 1);
+        let paused = tray_display(&state);
+        assert!(paused.paused);
+        assert!(paused.title.starts_with("深度工作 "));
+        assert!(paused.tooltip.contains("暂停"));
+        assert!(!tray_display(&core::State::new(1_000)).paused);
+    }
+
+    #[test]
+    fn tray_pause_changes_the_display_even_when_clock_digits_match() {
+        let mut state = state_with_day();
+        state.start_block("main", 5, vec![]).unwrap();
+        let running = tray_display(&state);
+        state.toggle_pause(1_000).unwrap();
+        state.tick(1_300);
+        let paused = tray_display(&state);
+        assert_eq!(paused.title, running.title);
+        assert_ne!(paused, running, "相同文字也要更新暂停角标和悬浮提示，不能被缓存跳过");
+    }
+
+    #[test]
+    fn tray_clock_stays_compact_across_hours_and_keeps_full_time_in_tooltip() {
+        assert_eq!(compact_tray_clock(-1), "00:00");
+        assert_eq!(compact_tray_clock(3_599), "59:59");
+        assert_eq!(compact_tray_clock(3_600), "1h00");
+        assert_eq!(compact_tray_clock(36_000), "10h");
+        assert_eq!(compact_tray_clock(i64::MAX), "99h+");
+        for seconds in [0, 59, 3_599, 3_600, 35_999, 36_000, 359_999, 360_000, i64::MAX] {
+            assert!(compact_tray_clock(seconds).chars().count() <= 5);
+        }
+        let mut state = state_with_day();
+        state.start_block("main", 25, vec![]).unwrap();
+        state.toggle_pause(1_000).unwrap();
+        state.tick(4_965);
+        let paused = tray_display(&state);
+        assert_eq!(paused.title, "深度工作 1h06");
+        assert_eq!(paused.tooltip, "坐功 · 深度工作 暂停 1:06:05");
+    }
+
+    #[test]
+    fn tray_pause_badge_preserves_the_icon_canvas_and_original_pixels() {
+        for size in [16, 32, 64] {
+            let pixels = vec![100; size * size * 4];
+            let icon = tauri::image::Image::new(&pixels, size as u32, size as u32);
+            let paused = tray_icon(&icon, true);
+            assert_eq!((paused.width(), paused.height()), (icon.width(), icon.height()));
+            assert_ne!(paused.rgba(), icon.rgba());
+            assert_eq!(&paused.rgba()[..size * (size / 2) * 4], &pixels[..size * (size / 2) * 4]);
+            assert_eq!(tray_icon(&icon, false).rgba(), pixels, "继续后还原原图，不累积角标");
+        }
     }
 
     #[test]

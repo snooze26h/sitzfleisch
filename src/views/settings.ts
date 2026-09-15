@@ -7,6 +7,8 @@ import { conflictingHost, MAX_BLOCK_RULES, normalizeHost, normalizeUrl } from ".
 import { ICON_NAMED } from "../types";
 import { esc, meter, shortNameFrom } from "../format";
 import { icon } from "../icons";
+import { ribbonScene } from "../brand";
+import { PROJECT_ICON_CHOICES } from "../project-icons";
 import { btn, hair, labelled, plate, select, stepper, toggle } from "../components";
 import { BLOCK_OPTIONS, BREAK_OPTIONS, IDLE_OPTIONS, day, prefs, profileTotalMinutes, ui, withValue } from "../state";
 
@@ -37,7 +39,7 @@ export function settingsPage(): string {
   const current = SETTINGS_SECTIONS.find(([id]) => id === ui.settingsSection) ?? SETTINGS_SECTIONS[0];
   const [id, title] = current;
   // 一次只画一个分区：整页一根滚动条到底是上一版最难用的地方。
-  return `<header class="page-heading"><h1>${esc(title)}</h1><p role="status">${ui.pendingPrefs > 0 ? "正在保存…" : "更改自动保存"}</p></header>`
+  return `<header class="page-heading settings-heading"><div class="heading-copy"><h1>${esc(title)}</h1><p role="status">${ui.pendingPrefs > 0 ? "正在保存…" : "自动保存"}</p></div>${ribbonScene("ready", "settings-ribbon")}</header>`
     + sectionBody(id).replace('<section class="plate"', `<section class="plate settings-section" id="panel-${esc(id)}" tabindex="-1" aria-label="${esc(title)}"`);
 }
 
@@ -68,22 +70,25 @@ function projectRow(c: CategoryDef): string {
 }
 
 function projectEditor(c: CategoryDef): string {
-  const names = ICON_NAMED.some(([name]) => name === c.icon) ? ICON_NAMED : [[c.icon, c.icon] as [string, string], ...ICON_NAMED];
+  const names = PROJECT_ICON_CHOICES.some(([name]) => name === c.icon) ? PROJECT_ICON_CHOICES
+    : [[c.icon, ICON_NAMED.find(([name]) => name === c.icon)?.[1] ?? "当前图标"] as [string, string], ...PROJECT_ICON_CHOICES];
   const glyphs = names
     .map(
       ([name, label]) =>
-        `<button class="glyph${c.icon === name ? " on" : ""}" data-action="set-icon" data-id="${esc(c.id)}" data-icon="${esc(name)}" title="${esc(label)}" aria-label="${esc(label)}" aria-pressed="${c.icon === name}">${icon(name, 16)}</button>`
+        `<button class="glyph project-choice${c.icon === name ? " on" : ""}" data-action="set-icon" data-id="${esc(c.id)}" data-icon="${esc(name)}" title="${esc(label)}" aria-label="${esc(label)}" aria-pressed="${c.icon === name}">${icon(name, 25)}<span>${esc(label)}</span></button>`
     )
     .join("");
+  const otherGlyphs = ICON_NAMED.filter(([name]) => !names.some(([primary]) => primary === name))
+    .map(([name, label]) => `<button class="glyph" data-action="set-icon" data-id="${esc(c.id)}" data-icon="${esc(name)}" title="${esc(label)}" aria-label="${esc(label)}" aria-pressed="false">${icon(name, 18)}</button>`).join("");
   const uniform = prefs().uniform_block_minutes;
   return `<div class="project-editor" id="editor-${esc(c.id)}">
     <div class="identity">
       ${labelled("名称", `<input class="field sm" style="width:150px" data-change="project-name" data-id="${esc(c.id)}" value="${esc(c.name)}" placeholder="项目名称" aria-label="编辑项目名称 ${esc(c.name)}" />`)}
       ${labelled("短名", `<input class="field sm" style="width:84px" data-change="project-short-name" data-id="${esc(c.id)}" value="${esc(c.short_name)}" placeholder="${esc(shortNameFrom(c.name))}" aria-label="${esc(c.name)}在侧栏与菜单栏上的短名，留空自动" />`)}
       ${labelled("一格", select({ change: "block-length", data: { id: c.id }, value: uniform > 0 ? uniform : c.default_block_minutes, options: withValue(BLOCK_OPTIONS, uniform > 0 ? uniform : c.default_block_minutes).map((n) => ({ value: n, label: `${n} 分` })), width: 84, label: `${c.name}默认一格多长`, disabled: uniform > 0 }))}
-      ${uniform > 0 ? `<span class="t-note">节奏里开着「统一块长」，所有项目都用 ${uniform} 分</span>` : ""}
+      ${uniform > 0 ? `<span class="t-note">统一块长在「节奏」中调整。</span>` : ""}
     </div>
-    <div class="s-field"><span class="engraved">图标</span><div class="glyphs">${glyphs}</div></div>
+    <div class="s-field"><span class="engraved">图标</span><div class="glyphs project-glyphs" role="group" aria-label="折页图标">${glyphs}</div><details class="more-icons" id="more-icons-${esc(c.id)}" data-preserve-open><summary>更多图标</summary><div class="glyphs" role="group" aria-label="通用图标">${otherGlyphs}</div></details></div>
     <div class="foot">${btn("删除项目", { kind: "quiet-danger", action: "del-project", data: { id: c.id } })}</div>
   </div>`;
 }
@@ -129,11 +134,11 @@ function rhythm(): string {
     ${hair()}
     ${settingRow(
       "统一块长",
-      uniform > 0 ? "所有项目都用这个长度，项目里的「一格」暂时不生效" : "按每个项目各自的「一格」",
+      uniform > 0 ? "所有项目使用同一块长。" : "按项目分别设置。",
       `${uniform > 0 ? select({ change: "uniform-length", value: uniform, options: withValue(BLOCK_OPTIONS, uniform).map((n) => ({ value: n, label: `${n} 分` })), width: 84, label: "统一块长" }) : ""}${toggle({ change: "uniform-toggle", checked: uniform > 0, label: "统一块长" })}`
     )}
     ${hair()}
-    ${settingRow("暂停提醒", "未开格时按间隔提醒，显示本次暂停总时长", select({ change: "idle", value: idle, options: withValue(IDLE_OPTIONS, idle).map((n) => ({ value: n, label: n === 0 ? "关闭" : `${n} 分` })), width: 104, label: "暂停提醒间隔" }))}
+    ${settingRow("暂停提醒", "未开格时定时提醒。", select({ change: "idle", value: idle, options: withValue(IDLE_OPTIONS, idle).map((n) => ({ value: n, label: n === 0 ? "关闭" : `${n} 分` })), width: 104, label: "暂停提醒间隔" }))}
     ${hair()}
     ${settingRow("登录时自动启动", ui.autostart === null ? "正在读取系统设置…" : "", toggle({ change: "autostart", checked: ui.autostart === true, disabled: ui.autostart === null, label: "登录时自动启动" }))}
   </div>`;
@@ -162,11 +167,11 @@ export function blockState(): BlockState {
 
 function browserBlockState(): BlockState {
   const b = ui.snap!.blocking.browser;
-  if (!inTauri) return { title: "预览模式 · 扩展未连接", detail: "浏览器预览只演示设置，不会拦截网页。请在桌面应用中连接扩展。", problem: false };
+  if (!inTauri) return { title: "预览模式 · 扩展未连接", detail: "预览不拦截网页。请在桌面应用中连接扩展。", problem: false };
   if (b.error) return { title: "扩展连接需要处理", detail: b.error, problem: true };
-  if (!b.available) return { title: "本地连接服务未启动", detail: "请重启坐功，再检查扩展连接状态。", problem: true };
-  if (!b.connected) return { title: "扩展未连接", detail: "需要在 Chrome 或 Edge 中安装并启用扩展，保持坐功运行。", problem: false };
-  if (!b.synced) return { title: "扩展已连接 · 等待同步", detail: "约每 30 秒尝试同步规则，当前修改尚未确认生效。", problem: false };
+  if (!b.available) return { title: "本地连接服务未启动", detail: "重启坐功后重试。", problem: true };
+  if (!b.connected) return { title: "扩展未连接", detail: "启用 Chrome / Edge 扩展，并保持坐功运行。", problem: false };
+  if (!b.synced) return { title: "扩展已连接 · 等待同步", detail: "规则待同步，可在扩展中立即同步。", problem: false };
   if (!prefs().blocked_urls.length) return { title: "扩展已连接 · 未配置精确网址", problem: false };
   return day()
     ? { title: "扩展已同步 · 精确网址生效中", detail: "仅在已连接的浏览器中拦截。", problem: false }
@@ -176,10 +181,10 @@ function browserBlockState(): BlockState {
 function wholeSiteBrowserState(): BlockState {
   const b = ui.snap!.blocking.browser;
   if (!inTauri) return { title: "浏览器预览不执行整站拦截。", problem: false };
-  if (!b.connected || b.error || !b.available) return { title: "浏览器整站拦截未连接，请安装或启用扩展。仅写入系统规则无法确认浏览器已拦截。", problem: true };
-  if (!b.supports_hosts) return { title: "当前扩展只支持精确网址，请更新并重新加载扩展以启用整站拦截。", problem: true };
-  if (!b.synced) return { title: "浏览器整站规则等待同步，请在扩展中点击「立即同步」。", problem: false };
-  return { title: !prefs().blocked_hosts.length ? "浏览器已连接，添加整站规则后会同步。" : day() ? "浏览器已同步 · 整站拦截生效中" : "浏览器已同步 · 下次学习日生效", problem: false };
+  if (!b.connected || b.error || !b.available) return { title: "浏览器未连接，请启用扩展并同步。", problem: true };
+  if (!b.supports_hosts) return { title: "扩展需更新并重新加载，才能拦截整站。", problem: true };
+  if (!b.synced) return { title: "规则待同步，请在扩展中立即同步。", problem: false };
+  return { title: !prefs().blocked_hosts.length ? "已连接，添加规则后同步。" : day() ? "浏览器已同步 · 整站拦截生效中" : "浏览器已同步 · 下次学习日生效", problem: false };
 }
 
 function statusLabel(state: BlockState): string {
@@ -222,7 +227,7 @@ function websiteBlock(): string {
   const existingConflicts = [...new Set(p.blocked_urls.map((url) => conflictingHost(url, p.blocked_hosts)).filter((host): host is string => !!host))];
   const conflicts = [...new Set([...existingConflicts, ...(conflict ? [conflict] : [])])];
   const warning = conflicts.length
-    ? `<p class="blocking-conflict" role="status">整站规则 <b>${conflicts.map(esc).join("、")}</b> 仍会屏蔽对应网站的收藏和视频。若只想拦推荐页，请解除下方对应的整站规则。</p>`
+    ? `<p class="blocking-conflict" role="status">整站规则 <b>${conflicts.map(esc).join("、")}</b> 也会屏蔽收藏和视频。只拦推荐页时，请先解除整站规则。</p>`
     : "";
   const problem = hostState.problem
     ? `<div class="problem-block"><span class="titles"><b>${esc(hostState.title)}</b>${hostState.detail ? `<span>${esc(hostState.detail)}</span>` : ""}</span>${btn("重新应用整站规则", { kind: "plate", cls: "caution", action: "reapply-blocking" })}</div>`
@@ -235,7 +240,7 @@ function websiteBlock(): string {
     ${browserState.detail ? `<p class="blocking-note${browserState.problem ? " caution" : ""}">${esc(browserState.detail)}</p>` : ""}
     ${ruleEditor("url")}
     ${ruleRows("url", p.blocked_urls)}
-    <details id="blocking-help" class="blocking-help" data-preserve-open><summary>安装浏览器扩展与填写示例</summary>
+    <details id="blocking-help" class="blocking-help" data-preserve-open><summary>安装与用法</summary>
       <ol><li>打开 Chrome 的 <span class="mono sel">chrome://extensions</span> 或 Edge 的 <span class="mono sel">edge://extensions</span>，开启「开发者模式」。</li><li>点击下方按钮找到扩展目录，再在浏览器中选择「加载已解压的扩展程序」，选中该目录。</li><li>保持坐功运行；扩展约每 30 秒尝试同步规则。上方显示「已同步」后，在学习日期间生效。</li></ol>
       ${btn("打开扩展文件夹", { kind: "plate", action: "reveal-browser-extension" })}
       <p class="blocking-note">抖音推荐页：<span class="mono sel">https://www.douyin.com/?recommend=1</span>。收藏页路径不同，可以正常打开。</p>
@@ -260,7 +265,7 @@ function bodyPanel(): string {
   const water = `${p.water_reminder_enabled ? stepper({ bind: "water-min", value: p.water_reminder_minutes, label: `${p.water_reminder_minutes} 分`, min: 10, max: 180, step: 5, ariaLabel: "喝水提醒间隔" }) : ""}${toggle({ change: "water-on", checked: p.water_reminder_enabled, label: "喝水提醒" })}`;
   const stretch = `${p.stretch_reminder_enabled ? stepper({ bind: "stretch-min", value: p.stretch_reminder_minutes, label: `${p.stretch_reminder_minutes} 分`, min: 15, max: 180, step: 5, ariaLabel: "起身提醒间隔" }) : ""}${toggle({ change: "stretch-on", checked: p.stretch_reminder_enabled, label: "起身护眼提醒" })}`;
   const inner = `<div class="settings-panel">
-    ${settingRow("喝水提醒", "只在专注计时中提醒，记一杯水后重新计时", water)}
+    ${settingRow("喝水提醒", "专注时提醒；记水后重计。", water)}
     ${hair()}
     ${settingRow("每天喝水目标", "", stepper({ bind: "goal", value: p.hydration_goal_cups, label: `${p.hydration_goal_cups} 杯`, min: 1, max: 20, step: 1, ariaLabel: "每天喝水目标" }))}
     ${hair()}
@@ -276,9 +281,9 @@ function notificationStatusText(): string {
     case "granted":
       return "已允许";
     case "denied":
-      return "系统里被拒了，改用界面里的提示条";
+      return "未获系统授权，使用应用内提示。";
     case "unknown":
-      return "还没允许，点右边申请";
+      return "尚未授权";
     default:
       return "正在检查…";
   }
@@ -291,7 +296,7 @@ function notificationPanel(): string {
     ? ""
     : btn("申请权限", { kind: "plate", action: "notif-recheck" });
   const inner = `<div class="settings-panel">
-    ${settingRow("提示音", "提醒时响一声，窗口关着也听得见", toggle({ change: "sound", checked: p.sound_enabled, label: "提示音" }))}
+    ${settingRow("提示音", "提醒时播放声音。", toggle({ change: "sound", checked: p.sound_enabled, label: "提示音" }))}
     ${hair()}
     ${settingRow("系统通知", notificationStatusText(), `${grant}${btn("试一条", { kind: "plate", action: "notif-test" })}${btn("打开系统设置", { kind: "quiet", action: "notif-open" })}`)}
   </div>`;

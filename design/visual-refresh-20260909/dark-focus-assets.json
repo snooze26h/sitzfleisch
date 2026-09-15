@@ -1,0 +1,29 @@
+{
+  "tool": "image_gen built-in",
+  "createdAt": "2026-09-09",
+  "purpose": "深色工作区中的状态折带；保留骨白边线和朱红切面，不复用 S 图标轮廓",
+  "compositing": "Opaque pure-black plates blended with CSS screen, not transparent cutouts",
+  "assets": [
+    {
+      "id": "ribbon-ready",
+      "source": "/Users/snooze26h/.codex/generated_images/01a07ea0-b66a-7f52-b149-9ce672506c63/exec-08435710-02b7-45da-94e5-c2d6a82e8c83.png",
+      "original": "design/visual-refresh-20260909/originals/ribbon-ready.png",
+      "asset": "src/assets/time-fold/ribbon-ready.webp",
+      "prompt": "Use case: stylized-concept. Create an ORIGINAL background illustration for the Sitzfleisch desktop focus app. The reference is MATERIAL/PALETTE inspiration only: ivory folded ribbon with a vermilion cut. DO NOT reproduce the S logo or any letter. Reinterpret it as a delicate sculptural drawn ribbon: dark graphite faces, slender continuous warm ivory edge lines, a small solid vermilion #c9583c exposed cut face. More empty space than object, quiet editorial 3D craft, refined physical folds, light touches of bone-white only, NO broad white sheet. Entire image background must be exact uniform pure black #000000, including holes and all four corners; no floor, cast shadow, horizon, vignette, frame, tile, checkerboard or fake transparency. Designed to blend additively onto a charcoal UI, so object must float without a visible image boundary. No text, UI, logos, symbols, sparkles, glow or extra decoration. Landscape 1536x1024. Keep all artwork inside the center 72 percent of the canvas with black padding.\nSpecific state: READY / UNFOLD. A single thin ribbon travelling horizontally, one broad gentle upward arch and one crisp turned-back fold near its right end, like a line about to open into a page. Low and elongated, asymmetric, with one visible small vermilion cut at the right tip. Mostly ivory EDGE line, inner faces almost black. No closed loop, no S shape. Camera softly above, object crosses the lower middle of the composition."
+    },
+    {
+      "id": "ribbon-flow",
+      "source": "/Users/snooze26h/.codex/generated_images/01a07ea0-b66a-7f52-b149-9ce672506c63/exec-03172eb5-4bb2-466e-a91e-f5008f4c50d1.png",
+      "original": "design/visual-refresh-20260909/originals/ribbon-flow.png",
+      "asset": "src/assets/time-fold/ribbon-flow.webp",
+      "prompt": "Use case: stylized-concept. Create an ORIGINAL background illustration for the Sitzfleisch desktop focus app. The reference is MATERIAL/PALETTE inspiration only: ivory folded ribbon with a vermilion cut. DO NOT reproduce the S logo or any letter. Reinterpret it as a delicate sculptural drawn ribbon: dark graphite faces, slender continuous warm ivory edge lines, a small solid vermilion #c9583c exposed cut face. More empty space than object, quiet editorial 3D craft, refined physical folds, light touches of bone-white only, NO broad white sheet. Entire image background must be exact uniform pure black #000000, including holes and all four corners; no floor, cast shadow, horizon, vignette, frame, tile, checkerboard or fake transparency. Designed to blend additively onto a charcoal UI, so object must float without a visible image boundary. No text, UI, logos, symbols, sparkles, glow or extra decoration. Landscape 1536x1024. Keep all artwork inside the center 72 percent of the canvas with black padding.\nSpecific state: FOCUS / FLOW. A single long fine folded ribbon stretched confidently left to right. Its ivory upper and lower edges form two quiet parallel lines, then one elegant half twist near the right third lifts into a small angled vermilion cut. A continuous horizontal gesture, like a physical time line unrolling. No S, no stacked loop. A little sense of tension and direction but absolutely static. Match the reference's soft ceramic tactility while keeping the actual ribbon faces dark charcoal."
+    },
+    {
+      "id": "ribbon-rest",
+      "source": "/Users/snooze26h/.codex/generated_images/01a07ea0-b66a-7f52-b149-9ce672506c63/exec-54c14345-6383-47b8-8fed-245f79fb8bd1.png",
+      "original": "design/visual-refresh-20260909/originals/ribbon-rest.png",
+      "asset": "src/assets/time-fold/ribbon-rest.webp",
+      "prompt": "Use case: stylized-concept. Create an ORIGINAL background illustration for the Sitzfleisch desktop focus app. The reference is MATERIAL/PALETTE inspiration only: ivory folded ribbon with a vermilion cut. DO NOT reproduce the S logo or any letter. Reinterpret it as a delicate sculptural drawn ribbon: dark graphite faces, slender continuous warm ivory edge lines, a small solid vermilion #c9583c exposed cut face. More empty space than object, quiet editorial 3D craft, refined physical folds, light touches of bone-white only, NO broad white sheet. Entire image background must be exact uniform pure black #000000, including holes and all four corners; no floor, cast shadow, horizon, vignette, frame, tile, checkerboard or fake transparency. Designed to blend additively onto a charcoal UI, so object must float without a visible image boundary. No text, UI, logos, symbols, sparkles, glow or extra decoration. Landscape 1536x1024. Keep all artwork inside the center 72 percent of the canvas with black padding.\nSpecific state: PAUSE / REST / GATHER. The same slender dark-faced ribbon rests in two shallow nested U shaped folds, a relaxed low open cradle seen from a slightly elevated angle. Ivory fine edges trace the folds, and one small vermilion cut face caps the foremost right end. Airy, balanced, restful with abundant black negative space. No upright letter, no S logo, no object on a floor. Width about twice its height, physically coherent continuous ribbon."
+    }
+  ]
+}

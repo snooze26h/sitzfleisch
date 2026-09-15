@@ -1,0 +1,33 @@
+{
+  "tool": "image_gen built-in",
+  "method": "AI silhouette matte + original source pixels; ImageMagick alpha refinement and lossless WebP export",
+  "original": "design/app-icon/time-fold/source.png",
+  "matte": "design/visual-refresh-20260909/sidebar-mark/sitzfleisch-matte.png",
+  "fullCutout": "design/visual-refresh-20260909/sidebar-mark/sitzfleisch-cutout.png",
+  "asset": "src/assets/brand/sitzfleisch-mark.webp",
+  "prompt": "Use case: background-extraction mask. Produce ONLY an exact black-and-white segmentation MATTE for the supplied app icon. Match the original 1254x1254 canvas, original subject position and size EXACTLY. Do NOT center, enlarge, shrink, redraw, reinterpret, rotate, or crop the shape. Paint the whole foreground folded ribbon S (ivory ribbon and vermilion end, including every shaded foreground surface) solid pure WHITE. Paint everything else pure BLACK: the rounded-square black backing, its outer transparent region, its cast shadows, and both open gaps between the ribbon folds. The mask must describe the exact outer and inner silhouette of the existing original ribbon. Pure binary silhouette, only a subpixel antialiased contour. No texture, internal lines, grey self-shading, 3D shading, checkerboard, text or new shapes. Foreground bounding box should remain approximately x=270..970, y=185..1055 on the original canvas. We will apply this mask to the ORIGINAL pixels so geometry registration matters more than visual restyling. Output one 1254x1254 PNG matte, white subject on black.",
+  "processing": [
+    "Maximum original RGB channel leveled from 25% to 40% for foreground edge alpha",
+    "Generated matte thresholded at 50% and dilated by 12px as spatial constraint",
+    "Multiply both alpha masks and apply to original image with CopyOpacity",
+    "Trim transparent margin, add 12px transparent padding, downscale to fit 256x320, clear hidden RGB, encode lossless WebP with exact transparent RGB preservation"
+  ],
+  "discardedAttempt": {
+    "reason": "RGB image with baked checkerboard, not transparent; not shipped",
+    "prompt": "Use case: background-extraction. Edit the supplied Sitzfleisch app icon into a genuinely transparent PNG cutout of ONLY its original sculptural ivory ribbon S with the small vermilion red cut face. This is extraction, not a redesign. Preserve the exact S silhouette, proportions, folded geometry, ivory texture, red end face, camera, lighting, and self-shading from the reference. Remove the ENTIRE rounded black square backing and all cast shadows that fall on that backing. Remove the backing inside both open gaps between folds as well. Everything outside the ribbon itself, including those interior gaps, must have real alpha=0 transparency. Keep soft antialiased edges; keep all shading belonging to the ivory object opaque. Do not create a new S, flatten it, simplify it, add outlines, change its material, or add a new shadow. No black/white/colored backdrop, no baked checkerboard, no frame, no badge, no text. Output an RGBA PNG with actual transparent pixels, with the whole original object centered and a small clean transparent margin; intended for a high-quality 40-48px app wordmark."
+  },
+  "dimensions": [
+    256,
+    318
+  ],
+  "bytes": 50348,
+  "verification": {
+    "true_alpha": true,
+    "outside_and_both_gaps_alpha": 0,
+    "visible_source_rgb_changes_before_resize": 0,
+    "display_size_css": [
+      38,
+      48
+    ]
+  }
+}

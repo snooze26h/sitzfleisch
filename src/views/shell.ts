@@ -2,16 +2,17 @@
 
 import { clock, esc, meter } from "../format";
 import { icon } from "../icons";
+import { brandIcon, brandMark } from "../brand";
 import { hair, tickedTrack } from "../components";
 import { suggest } from "../scheduler";
 import type { View } from "../types";
 import { SETTINGS_SECTIONS } from "./settings";
 import { breakRemaining, day, iconOf, isPaused, nameOf, netSeconds, pauseNowSeconds, prefs, quotaSeconds, resting, shortName, ui } from "../state";
 
-const NAV: [View, string, string][] = [
-  ["today", "timer", "今天"],
-  ["history", "calendar-days", "历史"],
-  ["settings", "sliders-horizontal", "设置"],
+const NAV: [View, string][] = [
+  ["today", "今天"],
+  ["history", "历史"],
+  ["settings", "设置"],
 ];
 
 export function sidebar(): string {
@@ -25,11 +26,11 @@ export function sidebar(): string {
             `<button class="nav-item${ui.settingsSection === id ? " on" : ""}" data-action="jump-settings" data-id="${id}" aria-current="${ui.settingsSection === id ? "page" : "false"}"><i class="rail"></i>${icon(ic, 14)}<span>${label}</span></button>`
         ).join("")
     : NAV.map(
-        ([view, ic, label]) =>
-          `<button class="nav-item${ui.view === view ? " on" : ""}" data-action="tab" data-view="${view}" aria-current="${ui.view === view ? "page" : "false"}"><i class="rail"></i>${icon(ic, 14)}<span>${label}</span></button>`
+        ([view, label]) =>
+          `<button class="nav-item${ui.view === view ? " on" : ""}" data-action="tab" data-view="${view}" aria-current="${ui.view === view ? "page" : "false"}"><i class="rail"></i>${brandIcon(view)}<span>${label}</span></button>`
       ).join("");
   return `<aside class="sidebar" id="sidebar">
-    <div class="wordmark"><span class="wordmark-en">SITZFLEISCH</span><span class="wordmark-cn">坐功</span></div>
+    <div class="wordmark"><span class="wordmark-symbol">${brandMark()}</span><span class="wordmark-type"><span class="wordmark-cn">坐功</span><span class="wordmark-en">SITZFLEISCH</span></span></div>
     ${hair()}
     <nav class="nav" aria-label="${inSettings ? "设置分区" : "主导航"}">${nav}</nav>
     ${inSettings ? "" : nowBlock()}

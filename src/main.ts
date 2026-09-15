@@ -431,17 +431,6 @@ async function handleAction(action: string, el: HTMLElement) {
       ui.minutesDraft = null;
       render();
       break;
-    case "adopt": {
-      if (!d) break;
-      const s = suggest(d, prefs(), ui.now);
-      if (s) {
-        if (ui.selectedCategory !== s.category) ui.taskDraft = "";
-        ui.selectedCategory = s.category;
-        ui.minutesDraft = s.minutes;
-        render();
-      }
-      break;
-    }
     case "start-block":
       await startBlock();
       break;

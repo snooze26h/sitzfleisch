@@ -99,15 +99,14 @@ export function runStrip(opts: {
     const passed = at < ratio;
     const height = major ? 46 : 24;
     const color = passed ? `rgba(0,0,0,${major ? 0.45 : 0.28})` : `rgba(255,255,255,${major ? 0.22 : 0.12})`;
-    ticks += `<i class="tick" style="left:${(at * 100).toFixed(3)}%;height:${height}%;background:${color}"></i>`;
+    ticks += `<i class="tick ${passed ? "passed" : "ahead"}" style="left:${(at * 100).toFixed(3)}%;height:${height}%;background:${color}"></i>`;
   }
-  // 填充一律骨白：整条铺朱红会变成一块警报板，而朱红在这套语言里是「记号」，不是「底色」。
-  // 真的在跑这件事由旗杆和面板头部的图标承担。
+  // 骨白细带表示已走过的时间，朱红切面标出进度；颜色变化不承担额外业务状态。
   const fillCls = "fill";
   const flagCls = opts.running ? "flag" : "flag caution";
-  const flag = ratio > 0 ? `<i class="${flagCls}" style="left:calc(${(ratio * 100).toFixed(3)}% - 0.75px)"></i>` : "";
+  const flag = `<i class="${flagCls}" style="left:clamp(0px, calc(${(ratio * 100).toFixed(3)}% - 3px), calc(100% - 6px))"></i>`;
   return `<div>
-    <div class="strip">${ratio > 0 ? `<i class="${fillCls}" style="width:${(ratio * 100).toFixed(3)}%"></i>` : ""}${ticks}${flag}</div>
+    <div class="strip" role="progressbar" aria-label="这一格的进度" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${Math.round(ratio * 100)}" aria-valuetext="已专注 ${esc(duration(opts.elapsed))}">${ratio > 0 ? `<i class="${fillCls}" style="width:${(ratio * 100).toFixed(3)}%"></i>` : ""}${ticks}${flag}</div>
     <div class="strip-foot">
       <span>${esc(wallClock(opts.startedAt))}</span>
       <span class="mid${opts.running ? "" : " caution"}">${opts.running ? `计划 ${minutes} 分钟` : "已暂停"}</span>
@@ -211,8 +210,4 @@ export function sessionRow(entry: LedgerEntry, d: Day): string {
       ${tasks}
     </div>
   </div>`;
-}
-
-export function emptyState(iconName: string, title: string, detail: string): string {
-  return `<div class="empty">${icon(iconName, 30)}<b>${esc(title)}</b><p>${esc(detail)}</p></div>`;
 }
