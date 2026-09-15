@@ -1,0 +1,103 @@
+# 开发与验证
+
+[返回项目首页](../README.md) · [使用说明](usage.md)
+
+## 开发环境
+
+CI 使用 Node.js 22、Rust stable。原生开发还需安装对应平台的构建工具，见 [Tauri 2 环境准备](https://v2.tauri.app/start/prerequisites/)。
+
+在仓库根目录运行：
+
+```bash
+npm ci
+npm run dev          # 浏览器预览，使用内存中的模拟数据
+npm run tauri dev    # 原生开发模式
+npm run tauri build  # 构建当前系统的安装包
+```
+
+上面的启动命令按需选择。macOS 构建产物为 `.app` 和 `.dmg`，Windows 为 NSIS 安装包。`cargo` 需在 PATH 中；使用 rustup 默认安装且终端未加载路径时，可执行：
+
+```bash
+export PATH="$HOME/.cargo/bin:$PATH"
+```
+
+## 目录结构
+
+```text
+core/               纯 Rust 规则引擎
+src-tauri/          Tauri 系统集成：命令、托盘、心跳、存储与网站屏蔽
+src/                TypeScript 界面，使用 morphdom 更新页面
+browser-extension/  Chrome / Edge 扩展、本地协议与回归测试
+docs/               使用说明、开发说明与 README 截图
+scripts/            静态检查与回归检查脚本
+```
+
+两个 Rust crate 编译进应用，前端打包为静态资源；界面由系统 WebView 渲染。应用不附带 Node.js、Python 或 Chromium，`scripts/` 不进入安装包。
+
+## 自动检查
+
+按变更范围运行受影响的检查。完整 CI 检查集见 [check.yml](../.github/workflows/check.yml)，在仓库根目录可执行：
+
+```bash
+npx tsc --noEmit
+node scripts/check-dead-exports.mjs
+node scripts/check-snapshot-order.mjs
+node scripts/check-short-name.mjs
+node scripts/check-blocking-rules.mjs
+node --test browser-extension/*.test.mjs
+cargo test --manifest-path core/Cargo.toml
+cargo clippy --manifest-path core/Cargo.toml --all-targets -- -D warnings
+cargo test --manifest-path src-tauri/Cargo.toml
+cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings
+```
+
+## 界面预览
+
+运行 `npm run dev` 后，在浏览器打开 `http://localhost:1420/`，通过 URL 片段选择内置场景，例如 `http://localhost:1420/#qa=running`。切换片段后刷新页面以重新加载场景。
+
+```text
+#qa=start | fresh | chooser | running | paused | suspended | resting | done | protected | savefail | nohistory
+```
+
+这些场景来自 [src/dev/mock.ts](../src/dev/mock.ts)，不会读取真实存档，也不执行系统网站屏蔽。`savefail` 模拟保存失败；浏览器没有应用退出流程，可在控制台执行 `qaQuitBlocked()` 查看退出前保存失败的对话框。
+
+### README 截图
+
+[images/](images/) 中的三张 WebP 来自当前前端的浏览器预览，使用内置演示数据；只用于展示界面，不作为原生功能验收证据。
+
+| 文件 | 场景 | 视口（CSS 像素） |
+| --- | --- | --- |
+| `plan.webp` | `#qa=nohistory`，开始页 | 1240 × 820 |
+| `focus.webp` | `#qa=running` | 1240 × 920 |
+| `history.webp` | `#qa=start`，点击「历史」 | 1240 × 840 |
+
+截图于 2026-09-15 制作，设备像素比为 2，WebP 质量为 88。为固定演示日期与倒计时，页面加载前将 `Date.now()` 固定为 `2026-09-15T16:10:00-07:00`。保留了界面原有布局和文案，没有读取个人记录。
+
+## 隔离原生测试数据
+
+`SITZFLEISCH_DATA_DIR` 可将状态文件、hosts 暂存文件和 QA 报告放入独立目录。
+
+- 未设置时，使用[默认数据目录](usage.md#历史与数据)。
+- 设置后，必须是可创建的绝对路径。空值、纯空白、相对路径或非 UTF-8 值都会报错停止，不创建窗口，也不回退到真实目录。
+- 隔离目录首次启动使用内置默认计划，生成的是测试数据。
+- 窗口位置记忆与开机自启不受此变量影响；系统 hosts 也没有被虚拟化，测试整站屏蔽仍会影响系统。
+
+## 构建与发布
+
+[build.yml](../.github/workflows/build.yml) 在 macOS 和 Windows runner 上构建安装包。可在 Actions 中手动触发并下载 Artifacts；推送 `v*` 标签会构建并发布 GitHub Release。
+
+macOS 发布包是 Apple 芯片与 Intel 通用二进制。当前仅做 ad-hoc 签名，未做 Developer ID 签名与公证；Windows 构建成功不等同于真机验收通过。
+
+## 已有验证记录
+
+以下承接整理前 README 的已有记录，并非本次文档更新重新执行的原生验收：
+
+- 在隔离数据目录手动验证过 16 个原生场景，记录为 16 通过、0 失败。覆盖学习日与计时操作、计时中断自动暂停、记水、关窗与 Dock 唤回、⌘Q 与重启、设置控件、通知、hosts 写入与解除、菜单栏操作、收工归档、历史与 Markdown 复制，以及放弃测试日。记录中真实存档与 `/etc/hosts` 在验收前后逐字节一致。
+- 计时中断使用冻结进程复现，未做真实合盖验收。WKWebView 原生 `<select>` 选项未能逐个自动点击；Windows 特有系统集成路径没有自动覆盖，完整检查工作流使用 macOS runner。
+- 原有屏蔽解除验收覆盖系统解析层，不保证浏览器旧连接和内部 DNS 缓存同步恢复；用户真实 Chrome / Edge 登录会话尚未完成全面验收。
+
+专项记录：
+
+- [视觉更新说明](../design/visual-refresh-20260909/README.md)与[验证范围](../design/visual-refresh-20260909/VALIDATION.md)
+- [菜单栏稳定性记录](../design/menu-bar-stability-20260914.md)
+- [浏览器扩展协议与回归测试](../browser-extension/README.md)
