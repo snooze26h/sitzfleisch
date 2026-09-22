@@ -43,6 +43,12 @@ jobs:
       - name: 短名规则与 Rust 对齐
         run: node scripts/check-short-name.mjs
 
+      - name: 调度边界与 Rust 对齐
+        run: node scripts/check-scheduler.mjs
+
+      - name: 时间轴暂停空隙回归
+        run: node scripts/check-timeline.mjs
+
       - name: 精确网址输入与扩展回归
         run: |
           node scripts/check-blocking-rules.mjs

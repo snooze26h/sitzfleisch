@@ -21,12 +21,13 @@ const artwork = {
 const ribbons = {
   ready: new URL("./assets/time-fold/ribbon-ready.webp", import.meta.url).href,
   flow: new URL("./assets/time-fold/ribbon-flow.webp", import.meta.url).href,
+  paused: new URL("./assets/time-fold/fold-pause.webp", import.meta.url).href,
   rest: new URL("./assets/time-fold/ribbon-rest.webp", import.meta.url).href,
 };
 
-export type RibbonPhase = "ready" | "flow" | "rest" | "done";
+export type RibbonPhase = "ready" | "flow" | "paused" | "rest" | "done";
 
-/** 三张图保持在同一层里：状态切换可以交叠过渡，心跳重绘不会重播动画。 */
+/** 状态图保持在同一层里：切换可以交叠过渡，心跳重绘不会重播动画。 */
 export function ribbonScene(phase: RibbonPhase, cls = ""): string {
   return `<figure class="ribbon-scene${cls ? ` ${cls}` : ""}" data-phase="${phase}" aria-hidden="true">${Object.entries(ribbons).map(([name, src]) => `<img class="ribbon-frame ribbon-${name}" src="${src}" alt="" width="960" height="640" decoding="async" draggable="false" />`).join("")}</figure>`;
 }

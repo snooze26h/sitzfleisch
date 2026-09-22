@@ -1,9 +1,73 @@
-import { icons } from "lucide";
+import {
+  Activity,
+  Anchor,
+  Archive,
+  Badge,
+  Bell,
+  Bike,
+  Binary,
+  BookOpen,
+  Box,
+  Brain,
+  ChartColumn,
+  Check,
+  ChevronDown,
+  ChevronLeft,
+  ChevronRight,
+  ChevronUp,
+  Code,
+  Coffee,
+  Columns,
+  Compass,
+  Copy,
+  Dumbbell,
+  Edit,
+  EllipsisVertical,
+  Flag,
+  FlaskConical,
+  Focus,
+  Globe,
+  GraduationCap,
+  Grid,
+  Group,
+  HeartPulse,
+  History,
+  Info,
+  Languages,
+  Layers,
+  Leaf,
+  Menu,
+  MessageSquare,
+  Minus,
+  Mountain,
+  Move,
+  Music,
+  Newspaper,
+  Pause,
+  PenLine,
+  Play,
+  Plus,
+  Rows,
+  Ruler,
+  Settings,
+  Shell,
+  Shield,
+  Sidebar,
+  Signal,
+  Signpost,
+  SlidersHorizontal,
+  Target,
+  Text,
+  Timer,
+  TriangleAlert,
+  View,
+  X,
+} from "lucide";
 import { projectGlyph } from "./project-icons";
 
 // 项目使用专属折页图形，通用操作与旧图标保留 Lucide；导航图形位于 brand.ts。
 
-type IconNode = [tag: string, attrs: Record<string, string | number>][];
+import type { IconNode } from "lucide";
 
 function pascal(name: string): string {
   return name
@@ -12,14 +76,79 @@ function pascal(name: string): string {
     .join("");
 }
 
-const table = icons as unknown as Record<string, IconNode>;
+// 只打包实际界面和项目目录需要的图标，避免整库进入主脚本。
+const table: Record<string, IconNode> = {
+  Activity,
+  Anchor,
+  Archive,
+  Badge,
+  Bell,
+  Bike,
+  Binary,
+  BookOpen,
+  Box,
+  Brain,
+  ChartColumn,
+  Check,
+  ChevronDown,
+  ChevronLeft,
+  ChevronRight,
+  ChevronUp,
+  Code,
+  Coffee,
+  Columns,
+  Compass,
+  Copy,
+  Dumbbell,
+  Edit,
+  EllipsisVertical,
+  Flag,
+  FlaskConical,
+  Focus,
+  Globe,
+  GraduationCap,
+  Grid,
+  Group,
+  HeartPulse,
+  History,
+  Info,
+  Languages,
+  Layers,
+  Leaf,
+  Menu,
+  MessageSquare,
+  Minus,
+  Mountain,
+  Move,
+  Music,
+  Newspaper,
+  Pause,
+  PenLine,
+  Play,
+  Plus,
+  Rows,
+  Ruler,
+  Settings,
+  Shell,
+  Shield,
+  Sidebar,
+  Signal,
+  Signpost,
+  SlidersHorizontal,
+  Target,
+  Text,
+  Timer,
+  TriangleAlert,
+  View,
+  X,
+};
 
 export function icon(name: string, size = 15, cls = ""): string {
   const custom = projectGlyph(name);
   const candidate = table[pascal(name)];
   const node = Array.isArray(candidate) ? candidate : table.BookOpen;
   const inner = custom ?? node
-    .map(([tag, attrs]) => `<${tag} ${Object.entries(attrs).map(([k, v]) => `${k}="${v}"`).join(" ")}></${tag}>`)
+    .map(([tag, attrs]) => `<${tag} ${Object.entries(attrs).filter(([, v]) => v !== undefined).map(([k, v]) => `${k}="${v}"`).join(" ")}></${tag}>`)
     .join("");
   return `<svg class="ic${custom ? " project-glyph" : ""}${cls ? ` ${cls}` : ""}" width="${size}" height="${size}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="${custom ? 1.6 : 2}" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${inner}</svg>`;
 }

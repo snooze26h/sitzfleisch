@@ -2,6 +2,7 @@
 // 每条建议都带着产生它的那一句理由——没有理由的建议是噪音。
 
 import type { CategoryState, Day, Preferences } from "./types";
+import { MIN_BLOCK_MINUTES } from "./types";
 import { duration } from "./format";
 
 export interface Suggestion {
@@ -36,7 +37,7 @@ export function blockMinutes(category: CategoryState, prefs: Preferences): numbe
   const preferred = effectiveBlockMinutes(prefs, category.id);
   const remainingMinutes = Math.ceil(remainingSeconds(category) / 60);
   if (remainingMinutes <= 0) return preferred;
-  return Math.max(5, Math.min(preferred, remainingMinutes));
+  return Math.max(MIN_BLOCK_MINUTES, Math.min(preferred, remainingMinutes));
 }
 
 interface Scored {

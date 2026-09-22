@@ -12,7 +12,8 @@ import type {
   Snapshot,
   TaskItem,
 } from "../types";
-import { MAX_BLOCK_MINUTES, MIN_BLOCK_MINUTES, SUSPEND_GAP_SECONDS } from "../types";
+import { MAX_BLOCK_MINUTES, MIN_BLOCK_MINUTES, SUSPEND_GAP_SECONDS, MAX_COMPLETION_NOTE_CHARS } from "../types";
+import { version } from "../../package.json";
 import { MAX_BLOCK_RULES, normalizeHost, normalizeUrl } from "../blocking";
 
 const HISTORY_LIMIT = 60;
@@ -21,7 +22,7 @@ function nowUnix(): number {
   return Math.floor(Date.now() / 1000);
 }
 
-// ---------- 出厂计划（用户真实的项目与档位） ----------
+// ---------- 示例计划（仅供预览，不读取真实用户数据） ----------
 
 function prefsFixture(): Preferences {
   return {
@@ -38,7 +39,7 @@ function prefsFixture(): Preferences {
     break_minutes: 10,
     hydration_goal_cups: 8,
     water_reminder_enabled: true,
-    water_reminder_minutes: 45,
+    water_reminder_minutes: 30,
     stretch_reminder_enabled: true,
     stretch_reminder_minutes: 50,
     idle_reminder_enabled: true,
@@ -136,6 +137,7 @@ function record(day: Day, timer: NonNullable<Day["timer"]>, accepted: boolean, n
     tasks: timer.tasks,
     started_at: timer.started_at > 0 ? timer.started_at : now - seconds,
     ended_at: now,
+    completion_note: accepted ? null : "",
   });
 }
 
@@ -169,7 +171,6 @@ function tick(now: number) {
   const overflow = delta - worked;
   timer.elapsed_seconds += worked;
   day.seated_seconds += worked;
-  day.seated_since_water += worked;
   day.seated_since_relief += worked;
   if (timer.elapsed_seconds < timer.total_seconds) return;
   const endedAt = now - overflow;
@@ -246,15 +247,15 @@ const ops = {
     if (state.history.length === before) throw "没有这一天的归档";
   },
   start_block(categoryId: string, minutes: number, tasks: TaskItem[], breakMinutes: number) {
+    if (!Number.isInteger(minutes) || minutes < MIN_BLOCK_MINUTES || minutes > MAX_BLOCK_MINUTES) throw "专注时长要在 1–180 分钟之间";
     const day = needDay();
     if (day.timer) throw "已经有一格在走";
     if (!day.categories.some((c) => c.id === categoryId)) throw "今天没有这个项目";
     day.break_until = null;
     closePause(day, state.last_tick);
-    const clamped = Math.min(MAX_BLOCK_MINUTES, Math.max(MIN_BLOCK_MINUTES, minutes));
     day.timer = {
       category: categoryId,
-      total_seconds: clamped * 60,
+      total_seconds: minutes * 60,
       elapsed_seconds: 0,
       tasks: tasks.map((t) => ({ text: t.text.trim(), done: t.done })).filter((t) => t.text),
       started_at: state.last_tick,
@@ -276,7 +277,9 @@ const ops = {
   extend_block(minutes: number) {
     const timer = state.day?.timer;
     if (!timer) throw "没有在走的计时";
-    const total = Math.min(MAX_BLOCK_MINUTES * 2, timer.total_seconds / 60 + Math.max(1, minutes));
+    if (!Number.isInteger(minutes) || minutes < 1 || minutes > MAX_BLOCK_MINUTES * 2) throw "增加时长要在 1–360 分钟之间";
+    const total = timer.total_seconds / 60 + minutes;
+    if (total > MAX_BLOCK_MINUTES * 2) throw "一格最多延长到 360 分钟";
     timer.total_seconds = total * 60;
   },
   finish_block(now: number) {
@@ -305,29 +308,14 @@ const ops = {
     if (day.break_until === null) throw "现在不在休息";
     day.break_until = null;
   },
-  toggle_task(index: number) {
-    const timer = state.day?.timer;
-    if (!timer) throw "没有在走的计时";
-    const item = timer.tasks[index];
-    if (!item) throw "没有这条任务";
-    item.done = !item.done;
-  },
-  add_task(text: string) {
-    const trimmed = text.trim();
-    if (!trimmed) throw "任务不能为空";
-    const timer = state.day?.timer;
-    if (!timer) throw "没有在走的计时";
-    timer.tasks.push({ text: trimmed, done: false });
-  },
-  drink_water() {
-    const day = needDay();
-    day.cups += 1;
-    day.seated_since_water = 0;
-  },
-  undo_water() {
-    const day = needDay();
-    if (day.cups <= 0) throw "今天还没记过水";
-    day.cups -= 1;
+  set_completion_note(dayStartedAt: number, entryIndex: number, endedAt: number, note: string) {
+    if (typeof note !== "string" || [...note].length > MAX_COMPLETION_NOTE_CHARS) throw "完成记录最多 2000 字";
+    if (/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f-\u009f]/.test(note)) throw "完成记录含有不支持的控制字符";
+    const target = [state.day, ...state.history.map((a) => a.day)].find((d) => d?.started_at === dayStartedAt);
+    const entry = target?.ledger[entryIndex];
+    if (!target) throw "这一天的记录已不存在";
+    if (!Number.isInteger(entryIndex) || !entry?.accepted || entry.ended_at !== endedAt) throw "这段记录已改变，请重新打开";
+    entry.completion_note = note.replace(/\r\n?/g, "\n").trim();
   },
   update_preferences(prefs: Preferences) {
     // 旧开发场景没有精确网址字段，按空列表接入，保留原来的整站规则。
@@ -337,14 +325,14 @@ const ops = {
     prefs.blocked_urls = [...new Set(prefs.blocked_urls.map(validateUrl))];
     if (!prefs.categories.length) throw "至少要有一个项目";
     if (!prefs.profiles.length) throw "至少要有一个档位";
+    if (prefs.uniform_block_minutes !== 0 && (!Number.isInteger(prefs.uniform_block_minutes) || prefs.uniform_block_minutes < MIN_BLOCK_MINUTES || prefs.uniform_block_minutes > MAX_BLOCK_MINUTES)) throw "统一块长要在 1–180 分钟之间";
     if (prefs.break_minutes < 0 || prefs.break_minutes > 120) throw "休息时长要在 0–120 分钟之间";
-    if (prefs.hydration_goal_cups < 1 || prefs.hydration_goal_cups > 24) throw "喝水目标要在 1–24 杯之间";
-    for (const m of [prefs.water_reminder_minutes, prefs.stretch_reminder_minutes, prefs.idle_reminder_minutes]) {
+    for (const m of [prefs.stretch_reminder_minutes, prefs.idle_reminder_minutes]) {
       if (m < 5 || m > 240) throw "提醒间隔要在 5–240 分钟之间";
     }
     for (const c of prefs.categories) {
       if (!c.id.trim() || !c.name.trim()) throw "项目名不能为空";
-      if (c.default_block_minutes < MIN_BLOCK_MINUTES || c.default_block_minutes > MAX_BLOCK_MINUTES) throw "默认块时长要在 5–180 分钟之间";
+      if (!Number.isInteger(c.default_block_minutes) || c.default_block_minutes < MIN_BLOCK_MINUTES || c.default_block_minutes > MAX_BLOCK_MINUTES) throw "默认块时长要在 1–180 分钟之间";
     }
     for (const p of prefs.profiles) {
       if (!p.name.trim()) throw "档位名不能为空";
@@ -354,6 +342,7 @@ const ops = {
         if (x.minutes < 0 || x.minutes > 24 * 60) throw "配额要在 0–24 小时之间";
       }
     }
+    if (state.day && prefs.water_reminder_enabled !== state.preferences.water_reminder_enabled) state.day.seated_since_water = 0;
     state.preferences = structuredClone(prefs);
   },
 };
@@ -381,12 +370,12 @@ function midDay(now: number, prefs: Preferences): Day {
   const day = dayFromProfile(prefs, profile, minutesAgo(now, 426));
   const m = (min: number) => minutesAgo(now, min);
   day.ledger = [
-    { category: "deep", seconds: 90 * 60, accepted: true, tasks: [task("把引言重写一遍", true), task("补图 1")], started_at: m(426), ended_at: m(336) },
-    { category: "browse", seconds: 30 * 60, accepted: true, tasks: [task("刷一圈论坛", true)], started_at: m(330), ended_at: m(300) },
-    { category: "reading", seconds: 30 * 60, accepted: false, tasks: [task("听力")], started_at: m(280), ended_at: m(250) },
-    { category: "reading", seconds: 45 * 60, accepted: true, tasks: [task("背 40 个单词", true), task("复习昨天的", true)], started_at: m(200), ended_at: m(155) },
+    { category: "deep", seconds: 90 * 60, accepted: true, completion_note: "", tasks: [task("把引言重写一遍", true), task("补图 1")], started_at: m(426), ended_at: m(336) },
+    { category: "browse", seconds: 30 * 60, accepted: true, completion_note: "", tasks: [task("刷一圈论坛", true)], started_at: m(330), ended_at: m(300) },
+    { category: "reading", seconds: 30 * 60, accepted: false, completion_note: "", tasks: [task("听力")], started_at: m(280), ended_at: m(250) },
+    { category: "reading", seconds: 45 * 60, accepted: true, completion_note: "", tasks: [task("背 40 个单词", true), task("复习昨天的", true)], started_at: m(200), ended_at: m(155) },
     // 这一格中间被暂停了 20 分钟：墙钟 90 分钟，计入 70 分钟。
-    { category: "deep", seconds: 70 * 60, accepted: true, tasks: [], started_at: m(150), ended_at: m(60) },
+    { category: "deep", seconds: 70 * 60, accepted: true, completion_note: "", tasks: [], started_at: m(150), ended_at: m(60) },
   ];
   // 每个格之间的空档都得是一段暂停：一天没有缝。
   day.pauses = [
@@ -414,10 +403,22 @@ function focusTimer(now: number): NonNullable<Day["timer"]> {
     category: "reading",
     total_seconds: 45 * 60,
     elapsed_seconds: 25 * 60 + 54,
-    tasks: [task("听力 20 分钟", true), task("阅读 20 分钟"), task("背单词")],
+    tasks: [],
     started_at: minutesAgo(now, 26),
     break_minutes: 10,
   };
+}
+
+/** 示例也保持「专注 + 暂停 = 墙钟跨度」，避免用不可能的暂停顺序验收时间轴。 */
+function attachTimer(day: Day, timer: NonNullable<Day["timer"]>, now: number, pausedSeconds = 0, auto = false) {
+  const stoppedAt = now - pausedSeconds;
+  timer.started_at = stoppedAt - timer.elapsed_seconds;
+  day.pauses[day.pauses.length - 1].ended_at = timer.started_at;
+  if (pausedSeconds > 0) day.pauses.push({ started_at: stoppedAt, ended_at: null, auto });
+  day.seated_seconds += timer.elapsed_seconds;
+  day.paused_seconds -= timer.elapsed_seconds;
+  day.paused_without_block = 0;
+  day.timer = timer;
 }
 
 function historyFixture(now: number, prefs: Preferences): ArchivedDay[] {
@@ -439,13 +440,13 @@ function historyFixture(now: number, prefs: Preferences): ArchivedDay[] {
       c.accepted_seconds = remaining;
       while (remaining > 0) {
         const seconds = Math.min(remaining, def.default_block_minutes * 60);
-        day.ledger.push({ category: c.id, seconds, accepted: true, tasks: [], started_at: cursor, ended_at: cursor + seconds });
+        day.ledger.push({ category: c.id, seconds, accepted: true, completion_note: "", tasks: [], started_at: cursor, ended_at: cursor + seconds });
         cursor += seconds + 10 * 60;
         remaining -= seconds;
       }
     }
     if (i % 3 === 0) {
-      day.ledger.push({ category: day.categories[0].id, seconds: 20 * 60, accepted: false, tasks: [], started_at: cursor, ended_at: cursor + 20 * 60 });
+      day.ledger.push({ category: day.categories[0].id, seconds: 20 * 60, accepted: false, completion_note: "", tasks: [], started_at: cursor, ended_at: cursor + 20 * 60 });
     }
     day.pauses = [
       { started_at: startedAt + 3 * 3600 + 25 * 60, ended_at: startedAt + 4 * 3600 + 5 * 60, auto: false },
@@ -462,7 +463,7 @@ function historyFixture(now: number, prefs: Preferences): ArchivedDay[] {
 function buildScenario(name: string): MockState {
   const now = nowUnix();
   const prefs = prefsFixture();
-  const base: MockState = { schema: 3, last_tick: now, preferences: prefs, day: null, history: historyFixture(now, prefs) };
+  const base: MockState = { schema: 5, last_tick: now, preferences: prefs, day: null, history: historyFixture(now, prefs) };
   switch (name) {
     case "nohistory":
       base.history = [];
@@ -474,29 +475,31 @@ function buildScenario(name: string): MockState {
       base.day.paused_seconds = 60;
       return base;
     }
+    case "completed":
+      base.day = midDay(now, prefs);
+      base.day.ledger[base.day.ledger.length - 1].completion_note = null;
+      return base;
+    case "finishing":
+      base.day = midDay(now, prefs);
+      attachTimer(base.day, { ...focusTimer(now), elapsed_seconds: 45 * 60 - 2 }, now);
+      return base;
     case "chooser":
       base.day = midDay(now, prefs);
       return base;
     case "running":
       base.day = midDay(now, prefs);
-      base.day.timer = focusTimer(now);
-      // 开格就把最后那段暂停收口。
-      base.day.pauses[base.day.pauses.length - 1].ended_at = minutesAgo(now, 26);
+      attachTimer(base.day, focusTimer(now), now);
       return base;
     case "paused":
       // 格在走时被按停：走过的时间只到按下暂停那一刻。
       base.day = midDay(now, prefs);
-      base.day.timer = { ...focusTimer(now), elapsed_seconds: 14 * 60 };
+      attachTimer(base.day, { ...focusTimer(now), elapsed_seconds: 14 * 60 }, now, 20 * 60);
       return base;
     case "suspended": {
       // 休眠 20 分钟：暂停段必须从合眼那一刻起算，运行图才不会把这 20 分钟画成在做事。
       base.day = midDay(now, prefs);
-      base.day.timer = { ...focusTimer(now), elapsed_seconds: 4 * 60 };
-      const last = base.day.pauses[base.day.pauses.length - 1];
-      last.auto = true;
-      last.started_at = minutesAgo(now, 20);
+      attachTimer(base.day, { ...focusTimer(now), elapsed_seconds: 4 * 60 }, now, 20 * 60, true);
       base.day.suspend_seconds = 20 * 60;
-      base.day.paused_seconds += 20 * 60;
       return base;
     }
     case "resting":
@@ -572,24 +575,21 @@ export async function mockInvoke<T>(command: string, args: Record<string, unknow
       return mutate(() => ops.switch_profile(a.profileId)) as T;
     case "start_block":
       return mutate(() => ops.start_block(a.categoryId, a.minutes, a.tasks ?? [], (a.breakMinutes as number | undefined) ?? 0)) as T;
-    case "toggle_task":
-      return mutate(() => ops.toggle_task(a.index)) as T;
-    case "add_task":
-      return mutate(() => ops.add_task(a.text)) as T;
     case "toggle_pause":
       return mutate(() => ops.toggle_pause(nowUnix())) as T;
     case "extend_block":
-      return mutate(() => ops.extend_block(a.minutes)) as T;
+      return mutate(() => {
+        if (a.timerStartedAt !== undefined && state.day?.timer?.started_at !== a.timerStartedAt) throw "原来的计时已结束，请重新选择延长时间";
+        ops.extend_block(a.minutes);
+      }) as T;
+    case "set_completion_note":
+      return mutate(() => ops.set_completion_note(a.dayStartedAt, a.entryIndex, a.endedAt, a.note)) as T;
     case "finish_block":
       return mutate(() => ops.finish_block(nowUnix())) as T;
     case "end_break":
       return mutate(() => ops.end_break()) as T;
     case "abandon_block":
       return mutate(() => ops.abandon_block(nowUnix())) as T;
-    case "drink_water":
-      return mutate(() => ops.drink_water()) as T;
-    case "undo_water":
-      return mutate(() => ops.undo_water()) as T;
     case "end_day":
       return mutate(() => ops.end_day(nowUnix())) as T;
     case "abandon_day":
@@ -632,6 +632,7 @@ export async function mockInvoke<T>(command: string, args: Record<string, unknow
       return "granted" as T;
     case "open_notification_settings":
       return undefined as T;
+    case "test_water_sound":
     case "test_notification":
       return undefined as T;
     case "reveal_state_file":
@@ -639,7 +640,7 @@ export async function mockInvoke<T>(command: string, args: Record<string, unknow
     case "reveal_browser_extension":
       throw "浏览器预览无法打开扩展目录，请在坐功桌面应用中使用这个按钮。";
     case "app_version":
-      return "0.8.1-mock" as unknown as T;
+      return `${version}（预览）` as T;
     case "autostart_status":
       return autostart as T;
     case "set_autostart":

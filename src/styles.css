@@ -132,9 +132,9 @@ textarea {
 /* ---------- 字级 ---------- */
 
 .t-masthead { font-size: 30px; font-weight: 600; color: var(--ink-high); line-height: 1.2; }
-.t-caption { font-size: 14px; color: var(--ink-muted); }
-.t-note { font-size: 13.5px; color: var(--ink-muted); }
-.engraved { font-size: 12.5px; font-weight: 600; letter-spacing: 0.8px; color: var(--ink-muted); white-space: nowrap; }
+.t-caption { font-size: 15px; color: var(--ink-muted); }
+.t-note { font-size: 14px; color: var(--ink-muted); }
+.engraved { font-size: 14px; font-weight: 600; letter-spacing: 0.8px; color: var(--ink-muted); white-space: nowrap; }
 .engraved.caution { color: var(--caution); }
 .high { color: var(--ink-high); }
 .muted { color: var(--ink-muted); }
@@ -395,7 +395,7 @@ textarea {
 }
 
 .section .title {
-  font-size: 13px;
+  font-size: 15px;
   font-weight: 600;
   letter-spacing: 0.8px;
   color: var(--ink-body);
@@ -411,7 +411,7 @@ textarea {
 }
 
 .section .note {
-  font-size: 12px;
+  font-size: 14px;
   color: var(--ink-faint);
 }
 
@@ -477,21 +477,21 @@ textarea {
 .btn-primary {
   background: var(--stroke);
   color: var(--bed);
-  font-size: 13.5px;
+  font-size: 15px;
   font-weight: 600;
   padding: 9px 16px;
 }
 
 .btn-primary:hover { filter: brightness(1.05); }
 .btn-primary:active { filter: brightness(0.92); }
-.btn-primary.lg { font-size: 14px; }
-.btn-primary.sm { font-size: 12.5px; }
+.btn-primary.lg { font-size: 15px; }
+.btn-primary.sm { font-size: 14px; }
 
 .btn-plate {
   background: var(--plate);
   box-shadow: var(--ring);
   color: var(--ink-body);
-  font-size: 12.5px;
+  font-size: 15px;
   font-weight: 500;
   padding: 8px 13px;
 }
@@ -503,7 +503,7 @@ textarea {
 .btn-quiet {
   border-radius: 4px;
   color: var(--ink-muted);
-  font-size: 12.5px;
+  font-size: 15px;
   font-weight: 500;
   padding: 6px 9px;
 }
@@ -512,12 +512,12 @@ textarea {
 .btn-quiet:active { background: rgba(255, 255, 255, 0.09); color: var(--ink-high); }
 .btn-quiet.body { color: var(--ink-body); }
 .btn-quiet.high { color: var(--ink-high); }
-.btn-quiet.sm { font-size: 12px; }
+.btn-quiet.sm { font-size: 14px; }
 
 .btn-danger {
   border-radius: 4px;
   color: rgba(217, 99, 76, 0.82);
-  font-size: 12.5px;
+  font-size: 15px;
   font-weight: 600;
   padding: 7px 11px;
   background: rgba(199, 69, 47, 0.11);
@@ -530,7 +530,7 @@ textarea {
 .btn-quiet-danger {
   border-radius: 4px;
   color: var(--ink-faint);
-  font-size: 12px;
+  font-size: 14px;
   font-weight: 500;
   padding: 6px 8px;
 }
@@ -564,7 +564,7 @@ textarea {
   border: 0;
   border-radius: 5px;
   padding: 8px 26px 8px 10px;
-  font-size: 13px;
+  font-size: 15px;
   font-weight: 500;
   color: var(--ink-body);
   line-height: 1.3;
@@ -670,13 +670,13 @@ textarea {
   user-select: text;
   -webkit-user-select: text;
   cursor: text;
-  font-size: 14px;
+  font-size: 15px;
 }
 
-.field.sm { padding: 8px; font-size: 13.5px; font-weight: 500; }
-.field.xs { padding: 8px; font-size: 12.5px; color: var(--ink-body); }
-.field.md { padding: 9px; font-size: 13px; color: var(--ink-body); }
-.field.mono { font-family: var(--font-mono); font-size: 13px; }
+.field.sm { padding: 8px; font-size: 15px; font-weight: 500; }
+.field.xs { padding: 8px; font-size: 15px; color: var(--ink-body); }
+.field.md { padding: 9px; font-size: 15px; color: var(--ink-body); }
+.field.mono { font-family: var(--font-mono); font-size: 15px; }
 .field::placeholder { color: var(--ink-faint); }
 .field:focus { outline: 1px solid var(--stroke); outline-offset: 2px; }
 
@@ -707,7 +707,7 @@ textarea.field {
   display: inline-flex;
   align-items: center;
   gap: 5px;
-  font-size: 12.5px;
+  font-size: 14px;
   font-weight: 500;
   color: var(--ink-body);
   padding: 6px 8px;
@@ -741,7 +741,7 @@ textarea.field {
   gap: 8px;
   padding: 6px 9px;
   border-radius: 4px;
-  font-size: 13px;
+  font-size: 14px;
   color: var(--ink-body);
   white-space: nowrap;
   width: 100%;
@@ -836,7 +836,7 @@ textarea.field {
 .lane.complete .head .ic { color: var(--stroke); }
 
 .lane .name {
-  font-size: 13.5px;
+  font-size: 15px;
   color: var(--ink-body);
   overflow: hidden;
   text-overflow: ellipsis;
@@ -849,7 +849,7 @@ textarea.field {
   margin-left: auto;
   font-family: var(--font-mono);
   font-variant-numeric: tabular-nums;
-  font-size: 13px;
+  font-size: 14px;
   font-weight: 500;
   color: var(--ink-high);
 }
@@ -858,7 +858,7 @@ textarea.field {
 
 .lane .of {
   font-family: var(--font-mono);
-  font-size: 12px;
+  font-size: 14px;
   color: var(--ink-faint);
   white-space: nowrap;
 }
@@ -913,7 +913,7 @@ textarea.field {
   margin-top: 7px;
   font-family: var(--font-mono);
   font-variant-numeric: tabular-nums;
-  font-size: 11px;
+  font-size: 14px;
   color: var(--ink-faint);
 }
 
@@ -1077,8 +1077,6 @@ textarea.field {
 .suggestion .text b { font-size: 13.5px; font-weight: 600; color: var(--ink-high); }
 .suggestion .text span { font-size: 12.5px; color: var(--ink-muted); }
 
-.task { display: flex; flex-direction: column; gap: 9px; }
-.task .q { font-size: 13.5px; font-weight: 600; color: var(--ink-body); }
 
 .controls-row {
   display: flex;
@@ -1096,19 +1094,36 @@ textarea.field {
 .rail { display: flex; flex-direction: column; gap: 20px; }
 .quotas { display: flex; flex-direction: column; gap: 4px; }
 .quotas .section { padding-bottom: 4px; }
-.estimate { font-size: 12.5px; color: var(--ink-muted); padding-top: 8px; }
+.estimate { font-size: 15px; color: var(--ink-muted); padding-top: 8px; }
 
-.body-panel { display: flex; flex-direction: column; gap: 14px; }
-.hydration { display: flex; align-items: center; gap: 10px; }
-.hydration .ic { color: var(--ink-muted); width: 14px; }
-.cups { display: flex; gap: 2px; }
-.cup { width: 5px; height: 14px; border-radius: 1px; background: var(--groove); box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.1); transition: background 0.2s ease-out; }
-.cup.on { background: var(--stroke); box-shadow: none; }
-.hydration .count { margin-left: auto; font-family: var(--font-mono); font-size: 12.5px; font-weight: 500; color: var(--ink-muted); }
+.minute-input { display: inline-flex; align-items: center; gap: 6px; flex: none; }
+.minute-input .field { width: 60px; text-align: center; font-family: var(--font-mono); appearance: textfield; -moz-appearance: textfield; }
+.minute-input input::-webkit-inner-spin-button, .minute-input input::-webkit-outer-spin-button { -webkit-appearance: none; margin: 0; }
+.minute-input button { display: inline-flex; align-items: center; justify-content: center; width: 28px; height: 32px; border: 1px solid var(--control-border, var(--ink-muted)); border-radius: 7px; color: var(--ink-body); background: var(--plate); }
+.minute-input button:hover:not(:disabled) { background: var(--plate-lift); }
+.minute-input .unit { color: var(--ink-muted); font-size: 14px; }
+
+/* 提示字放大后允许自然换行，保留窄窗口中的完整说明与操作。 */
+.section .row, .section .trail, .panel-head, .dialog .btns { flex-wrap: wrap; }
+.cell .label, .dialog p, .toast > span { min-width: 0; overflow-wrap: anywhere; }
+.dialog p { line-height: 1.6; }
+.sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
+.dialog.completion-dialog { width: min(560px, calc(100vw - 48px)); max-height: calc(100vh - 48px); overflow-y: auto; }
+.completion-dialog textarea.field { width: 100%; min-height: 160px; resize: vertical; font-size: 16px; line-height: 1.65; }
+.completion-dialog .completion-meta { color: var(--ink-body); }
+.completion-foot { display: flex; justify-content: space-between; align-items: baseline; gap: 16px; color: var(--ink-muted); font-size: 14px; }
+.completion-foot > :last-child { flex: none; }
+.completion-error { color: var(--signal-line); overflow-wrap: anywhere; }
+.session-note { margin: 4px 0; font-size: 16px; line-height: 1.7; white-space: pre-wrap; overflow-wrap: anywhere; user-select: text; }
+.session-edit { align-self: flex-start; }
+.extension-editor { display: flex; flex-direction: column; gap: 12px; font-size: 15px; }
+.extension-value { display: flex; align-items: center; gap: 10px; }
+.extension-value .field { width: 100px; font-size: 18px; }
+.extension-presets { display: flex; flex-wrap: wrap; gap: 8px; }
 
 .diagram-block { display: flex; flex-direction: column; gap: 14px; }
 .legend { display: flex; align-items: center; gap: 14px; }
-.legend span { display: inline-flex; align-items: center; gap: 5px; font-size: 11px; color: var(--ink-faint); }
+.legend span { display: inline-flex; align-items: center; gap: 5px; font-size: 14px; color: var(--ink-faint); }
 .legend i { display: inline-block; width: 16px; height: 7px; border-radius: 1px; background: var(--stroke); }
 .legend i.hollow { background: transparent; box-shadow: inset 0 0 0 1px var(--ink-faint); }
 .legend i.rest { background: rgba(176, 136, 67, 0.45); }
@@ -1126,11 +1141,11 @@ textarea.field {
 .session.rejected > .ic { color: var(--ink-faint); }
 .session .body { display: flex; flex-direction: column; gap: 3px; min-width: 0; }
 .session .meta { display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap; }
-.session .meta .nm { font-size: 12.5px; font-weight: 600; color: var(--ink-body); }
+.session .meta .nm { font-size: 15px; font-weight: 600; color: var(--ink-body); }
 .session.rejected .meta .nm { color: var(--ink-muted); }
-.session .meta .dur { font-size: 12.5px; color: var(--ink-muted); }
-.session .meta .at { font-family: var(--font-mono); font-size: 12px; color: var(--ink-faint); }
-.session .meta .badge { font-size: 11px; font-weight: 600; letter-spacing: 0.6px; color: var(--caution); }
+.session .meta .dur { font-size: 14px; color: var(--ink-muted); }
+.session .meta .at { font-family: var(--font-mono); font-size: 14px; color: var(--ink-faint); }
+.session .meta .badge { font-size: 14px; font-weight: 600; letter-spacing: 0.6px; color: var(--caution); }
 
 .complete-body { display: flex; flex-direction: column; gap: 6px; padding-top: 16px; }
 .complete-body .t-caption { font-size: 14px; }
@@ -1250,14 +1265,14 @@ textarea.field {
 
 /* 时间安排沿用开始页那套 .plan-row，不再有第二套表格样式。 */
 
-.website-block .blocking-intro { font-size: 13px; color: var(--ink-body); line-height: 1.6; }
+.website-block .blocking-intro { font-size: 15px; color: var(--ink-body); line-height: 1.6; }
 .website-block .blocking-editor { padding-top: 12px; }
 .website-block .blocking-input-label { display: block; padding-bottom: 7px; font-size: 13px; color: var(--ink-muted); }
 .host-add { display: flex; align-items: center; gap: 9px; }
 .host-add .field { flex: 1; min-width: 0; }
-.website-block .blocking-note { font-size: 13px; color: var(--ink-muted); line-height: 1.6; padding-top: 8px; overflow-wrap: anywhere; }
+.website-block .blocking-note { font-size: 15px; color: var(--ink-muted); line-height: 1.6; padding-top: 8px; overflow-wrap: anywhere; }
 .website-block .blocking-note.caution { color: var(--caution); }
-.website-block .blocking-conflict { margin-top: 12px; padding: 10px 12px; border: 1px solid var(--caution); border-radius: 4px; font-size: 13px; color: var(--caution); line-height: 1.6; overflow-wrap: anywhere; }
+.website-block .blocking-conflict { margin-top: 12px; padding: 10px 12px; border: 1px solid var(--caution); border-radius: 4px; font-size: 15px; color: var(--caution); line-height: 1.6; overflow-wrap: anywhere; }
 .blocking-group-heading .t-note { margin-right: auto; }
 .blocking-group-heading { display: flex; flex-wrap: wrap; align-items: baseline; justify-content: space-between; gap: 8px 16px; padding-top: 4px; }
 .blocking-group-heading > b { font-size: 13px; font-weight: 600; color: var(--ink-high); }
@@ -1268,14 +1283,14 @@ textarea.field {
 .rule-value { display: block; min-width: 0; overflow-wrap: anywhere; }
 .blocking-rule .rule-value { font-size: 13px; line-height: 1.6; color: var(--ink-high); }
 .blocking-rule .btn { flex: none; }
-.blocking-help { padding-top: 14px; font-size: 13px; color: var(--ink-muted); line-height: 1.6; }
+.blocking-help { padding-top: 14px; font-size: 15px; color: var(--ink-muted); line-height: 1.6; }
 .blocking-help summary { cursor: pointer; width: fit-content; color: var(--ink-body); }
 .blocking-help summary:hover { color: var(--ink-high); }
 .blocking-help summary:focus-visible { outline: 2px solid var(--stroke); outline-offset: 4px; }
 .blocking-help ol { margin: 12px 0; padding-left: 20px; }
 .blocking-help li + li { padding-top: 7px; }
 .website-block .foot-note { padding-top: 12px; flex-wrap: wrap; }
-.website-block .foot-note p { min-width: 200px; font-size: 13px; color: var(--ink-muted); }
+.website-block .foot-note p { min-width: 200px; font-size: 15px; color: var(--ink-muted); }
 .website-block .problem-block { padding-top: 12px; flex-wrap: wrap; }
 
 .status-dot { display: inline-flex; align-items: center; gap: 7px; font-size: 12px; font-weight: 500; color: var(--ink-muted); }
@@ -1284,7 +1299,7 @@ textarea.field {
 .problem-block { display: flex; align-items: flex-start; gap: 12px; padding-bottom: 12px; }
 .problem-block .titles { flex: 1; display: flex; flex-direction: column; gap: 4px; }
 .problem-block .titles b { font-size: 12.5px; font-weight: 600; color: var(--caution); }
-.problem-block .titles span { font-size: 12px; color: var(--ink-muted); }
+.problem-block .titles span { font-size: 15px; color: var(--ink-muted); }
 .foot-note { display: flex; align-items: flex-start; gap: 12px; }
 .foot-note p { flex: 1; font-size: 12px; color: var(--ink-faint); line-height: 1.5; }
 
@@ -1323,7 +1338,7 @@ textarea.field {
   background: var(--plate-lift);
   border-radius: 5px;
   box-shadow: 0 6px 16px rgba(0, 0, 0, 0.5), inset 0 1px 0 var(--edge-lit), inset 0 -1px 0 var(--edge-shade);
-  font-size: 13px;
+  font-size: 15px;
   color: var(--ink-high);
   z-index: 30;
   animation: toast-in 0.2s ease-out;
@@ -1359,13 +1374,13 @@ textarea.field {
 }
 
 .dialog.sheet { width: 500px; gap: 18px; }
-.dialog h2 { font-size: 15px; font-weight: 600; color: var(--ink-high); }
+.dialog h2 { font-size: 18px; font-weight: 600; color: var(--ink-high); }
 .dialog.sheet h2 { font-size: 20px; }
-.dialog p { font-size: 13.5px; color: var(--ink-body); line-height: 1.5; }
+.dialog p { font-size: 16px; color: var(--ink-body); line-height: 1.5; }
 .dialog .btns { display: flex; align-items: center; gap: 10px; margin-top: 4px; }
 .dialog .btns .spacer { flex: 1; }
 .dialog .confirm-field { display: flex; flex-direction: column; gap: 9px; }
-.dialog .confirm-field label, .dialog .confirm-field span { font-size: 13px; color: var(--ink-muted); line-height: 1.6; }
+.dialog .confirm-field label, .dialog .confirm-field span { font-size: 15px; color: var(--ink-muted); line-height: 1.6; }
 .dialog .confirm-field .rule-value { padding-top: 5px; color: var(--ink-high); }
 .dialog .confirm-field .field { min-width: 0; width: 100%; }
 
@@ -1397,76 +1412,11 @@ textarea.field {
   .settings-section { scroll-margin-top: 116px; }
 }
 
-/* ---------- 一格里的任务清单 ---------- */
-
-.tasks {
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-  padding-top: 16px;
-}
-
-.task-row {
-  display: flex;
-  align-items: flex-start;
-  gap: 10px;
-  padding: 7px 8px 7px 0;
-  border-radius: 4px;
-  width: 100%;
-  text-align: left;
-  transition: background 0.12s ease-out;
-}
-
-.task-row:hover { background: rgba(255, 255, 255, 0.04); }
-
-.task-row .box {
-  flex: none;
-  width: 15px;
-  height: 15px;
-  margin-top: 1px;
-  border-radius: 3px;
-  background: var(--groove);
-  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.16);
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  color: var(--bed);
-  transition: background 0.12s ease-out;
-}
-
-.task-row.done .box { background: var(--stroke); box-shadow: none; }
-
-.task-row .text {
-  font-size: 14px;
-  color: var(--ink-body);
-  line-height: 1.4;
-}
-
-.task-row.done .text { color: var(--ink-faint); text-decoration: line-through; text-decoration-color: var(--ink-faint); }
-
-.task-more {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  align-self: flex-start;
-  margin-top: 2px;
-  padding: 6px 8px 6px 0;
-  font-size: 12.5px;
-  color: var(--ink-faint);
-  border-radius: 4px;
-}
-
-.task-more:hover { color: var(--ink-body); }
-
-.task-add { display: flex; align-items: center; gap: 8px; padding-top: 6px; }
-.task-add .field { flex: 1; }
-
 /* 选到 textarea.field（0,1,1）同一档，否则它的 height: 96px 会一直压着这一条。 */
 textarea.task-input { resize: none; height: 62px; line-height: 1.5; }
-.task .q i { font-style: normal; font-weight: 400; font-size: 12px; color: var(--ink-faint); margin-left: 8px; }
 
 .session-tasks { display: flex; flex-wrap: wrap; gap: 4px 14px; }
-.session-tasks span { display: inline-flex; align-items: center; gap: 5px; font-size: 12.5px; color: var(--ink-muted); }
+.session-tasks span { display: inline-flex; align-items: center; gap: 5px; font-size: 14px; color: var(--ink-muted); }
 .session-tasks span .ic { color: var(--ink-faint); }
 .session-tasks span.done { color: var(--ink-body); }
 .session-tasks span.done .ic { color: var(--stroke); }
@@ -1511,7 +1461,7 @@ textarea.task-input { resize: none; height: 62px; line-height: 1.5; }
   border-radius: 5px;
   background: color-mix(in srgb, #fff 3%, var(--plate));
   box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.05);
-  font-size: 12.5px;
+  font-size: 15px;
   color: var(--ink-muted);
 }
 

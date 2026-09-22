@@ -68,6 +68,7 @@ export interface LedgerEntry {
   tasks: TaskItem[];
   started_at: number;
   ended_at: number;
+  completion_note: string | null;
 }
 
 /** 一段暂停：手动按的，或休眠、锁屏自动判定的（auto）。 */
@@ -171,6 +172,7 @@ export const ICON_NAMED: [string, string][] = [
   ["mountain", "山"],
 ];
 
-export const MIN_BLOCK_MINUTES = 5;
+export const MIN_BLOCK_MINUTES = 1;
 export const MAX_BLOCK_MINUTES = 180;
 export const SUSPEND_GAP_SECONDS = 120;
+export const MAX_COMPLETION_NOTE_CHARS = 2000;

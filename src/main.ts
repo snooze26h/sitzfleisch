@@ -1,9 +1,10 @@
 // 主循环：快照进来 → 拼 HTML → morphdom 打补丁 → 画运行图。所有交互走事件委托。
 
 import morphdom from "morphdom";
-import { invoke, onQuitBlocked, onReminder, onSnapshot, setWindowTitle } from "./api";
+import { invoke, onExtendRequested, onQuitBlocked, onReminder, onSnapshot, setWindowTitle } from "./api";
 import { conflictingHost, MAX_BLOCK_RULES, normalizeHost, normalizeUrl } from "./blocking";
-import type { Preferences, Snapshot, View } from "./types";
+import type { Day, Preferences, Snapshot, View } from "./types";
+import { MAX_BLOCK_MINUTES, MIN_BLOCK_MINUTES, MAX_COMPLETION_NOTE_CHARS } from "./types";
 import { SHORT_NAME_WIDTH, dayLabel, displayWidth, duration, esc, nowUnix } from "./format";
 import {
   MAX_PROJECTS,
@@ -13,7 +14,6 @@ import {
   history,
   isPaused,
   nameOf,
-  parseTasks,
   prefs,
   remainingOf,
   topOverlay,
@@ -70,6 +70,8 @@ function render() {
   if (!ui.snap) return;
   ui.now = nowUnix();
   reconcileSelection();
+  const hadCompletion = !!ui.completion;
+  promptPendingCompletion();
   // 状态文件损坏或来自更高版本时 App 不落盘：这件事必须在每一页都看得见。
   const protect = ui.snap.write_protected
     ? `<div class="protect-banner" id="protect"><b>状态文件处于保护模式，本次运行不会保存任何改动。</b><span>${esc(ui.snap.write_protected)} 应用不会覆盖原文件：${esc(ui.snap.state_path)}</span></div>`
@@ -103,6 +105,7 @@ function render() {
     const main = app.querySelector<HTMLElement>("[data-scroll]");
     if (main) main.scrollTop = 0;
   }
+  if (!hadCompletion && topOverlay() === "completion") app.querySelector<HTMLTextAreaElement>("#completion-note")?.focus({ preventScroll: true });
   drawDiagrams();
   void setWindowTitle(TITLES[ui.view]);
 }
@@ -221,6 +224,10 @@ function ask(dialog: Omit<Dialog, "token">) {
 /** 打开或恢复可点状态之后，把焦点放回它自己指定的那个键。 */
 function focusDialog(dialog: Dialog) {
   if (!dialog.focus) return;
+  if (dialog.focus === "input") {
+    app.querySelector<HTMLInputElement>("#extension-minutes")?.focus();
+    return;
+  }
   const action = dialog.focus === "confirm" ? "dialog-confirm" : "dialog-cancel";
   app.querySelector<HTMLElement>(`.dialog [data-action="${action}"]`)?.focus();
 }
@@ -234,6 +241,7 @@ function dialogFocusables(): HTMLElement[] {
 function closeDialog() {
   ui.dialog = null;
   render();
+  if (topOverlay() === "completion") return;
   const opener = dialogOpener;
   dialogOpener = null;
   if (opener?.isConnected) opener.focus();
@@ -385,7 +393,7 @@ async function handleAction(action: string, el: HTMLElement) {
     case "discard-day":
       ask({
         title: "返回开始页？",
-        message: "今天记下的所有格、暂停和喝水都会删掉，不归档，也无法恢复。设置和历史记录不受影响。",
+        message: "今天记下的所有格和暂停都会删掉，不归档，也无法恢复。设置和历史记录不受影响。",
         confirmLabel: "丢弃并返回",
         cancelLabel: "继续今天",
         destructive: true,
@@ -425,37 +433,41 @@ async function handleAction(action: string, el: HTMLElement) {
     }
     case "choose-cat":
       if (!d || d.timer || !d.categories.some((c) => c.id === id)) break;
-      // 换项目就把任务框清掉：上一个项目的任务留在这里只会写错。
-      if (ui.selectedCategory !== id) ui.taskDraft = "";
       ui.selectedCategory = id;
       ui.minutesDraft = null;
+      ui.rejectedStartMinutes = false;
       render();
       break;
     case "start-block":
       await startBlock();
       break;
     case "extend":
-      if (await act("extend_block", { minutes: 10 })) toast("再加 10 分钟。");
+      openExtensionDialog();
+      break;
+    case "extend-preset":
+      if (ui.dialog?.extension && !dialogIsBusy()) {
+        ui.dialog.extension.minutes = el.dataset.minutes ?? "10";
+        const field = app.querySelector<HTMLInputElement>("#extension-minutes");
+        if (field) field.value = ui.dialog.extension.minutes;
+        render();
+      }
       break;
     case "finish":
       await finishBlock();
       break;
-    case "toggle-task":
-      await act("toggle_task", { index: Number(el.dataset.index) });
+    case "completion-save":
+      await saveCompletion(false);
       break;
-    case "add-task":
-      ui.addingTask = true;
-      ui.addTaskDraft = "";
-      render();
-      app.querySelector<HTMLInputElement>("[data-input='add-task']")?.focus();
+    case "completion-cancel":
+      await cancelCompletion();
       break;
-    case "commit-task": {
-      const text = ui.addTaskDraft.trim();
-      if (!text) break;
-      if (await act("add_task", { text })) {
-        ui.addTaskDraft = "";
+    case "edit-completion": {
+      const recordDay = [day(), ...history().map((a) => a.day)].find((x) => x?.started_at === Number(el.dataset.day));
+      const index = Number(el.dataset.index);
+      if (recordDay && Number.isInteger(index) && recordDay.ledger[index]?.ended_at === Number(el.dataset.ended)) {
+        openCompletion(recordDay, index, false);
         render();
-        app.querySelector<HTMLInputElement>("[data-input='add-task']")?.focus();
+        app.querySelector<HTMLTextAreaElement>("#completion-note")?.focus();
       }
       break;
     }
@@ -475,16 +487,6 @@ async function handleAction(action: string, el: HTMLElement) {
       });
       break;
     }
-    case "water": {
-      const snap = await act("drink_water");
-      const after = snap?.state.day;
-      if (after && after.cups === snap.state.preferences.hydration_goal_cups) toast("今天的水喝够了。");
-      break;
-    }
-    case "water-undo":
-      await act("undo_water");
-      break;
-
     // ----- 历史 -----
     case "open-chart-day": {
       const key = Number(id);
@@ -641,6 +643,9 @@ async function handleAction(action: string, el: HTMLElement) {
       break;
 
     // ----- 设置：提醒 / 关于 -----
+    case "water-sound-test":
+      await invoke("test_water_sound").catch((error) => toast(String(error)));
+      break;
     case "notif-recheck":
       try {
         ui.notificationStatus = await invoke<string>("request_notification_permission");
@@ -667,6 +672,8 @@ async function handleAction(action: string, el: HTMLElement) {
 }
 
 async function startBlock() {
+  // 非法输入失焦后会恢复旧值，但这次启动必须中止，避免悄悄按旧时长开格。
+  if (ui.rejectedStartMinutes) { ui.rejectedStartMinutes = false; return; }
   const d = day();
   if (!d || d.timer) return;
   const p = prefs();
@@ -677,20 +684,16 @@ async function startBlock() {
     toast("这个项目不在今天的计划里。");
     return;
   }
-  // 任务可以一条都不写。
-  const tasks = parseTasks(ui.taskDraft);
   const minutes = ui.minutesDraft ?? (selected === s?.category && s ? s.minutes : blockMinutes(cat, p));
   const breakMinutes = ui.breakDraft ?? p.break_minutes;
-  const snap = await act("start_block", { categoryId: cat.id, minutes, tasks, breakMinutes });
+  const snap = await act("start_block", { categoryId: cat.id, minutes, tasks: [], breakMinutes });
   if (!snap) return;
-  ui.taskDraft = "";
   ui.minutesDraft = null;
-  ui.addingTask = false;
-  toast(tasks.length ? `开始${cat.name}：${tasks.map((t) => t.text).join(" · ")}` : `开始${cat.name}，${minutes} 分钟。`);
+  toast(`开始${cat.name}，${minutes} 分钟。`);
   if (breakMinutes !== p.break_minutes) await savePrefs((x) => { x.break_minutes = breakMinutes; });
 }
 
-/** 结束这一格：直接计入，不问任何问题。 */
+/** 先结算实际时间，完成记录由新台账项统一触发，填写期间不再计时。 */
 async function finishBlock() {
   const d = day();
   const t = d?.timer;
@@ -698,11 +701,93 @@ async function finishBlock() {
   const snap = await act("finish_block");
   const after = snap?.state.day;
   if (!after) return;
-  ui.addingTask = false;
   const entry = after.ledger[after.ledger.length - 1];
   if (entry?.accepted) {
     pulseQuota(entry.category);
     creditToast(after, entry.category, entry.seconds);
+  }
+}
+
+function openExtensionDialog() {
+  const timer = day()?.timer;
+  if (!timer) return;
+  const max = MAX_BLOCK_MINUTES * 2 - timer.total_seconds / 60;
+  if (max < 1) { toast("这一格已达到 360 分钟上限。"); return; }
+  ask({
+    id: "extend-block", title: "延长这一格", message: `输入想增加的分钟数，最多还能加 ${max} 分钟。`,
+    confirmLabel: "延长", cancelLabel: "取消", destructive: false, focus: "input",
+    extension: { minutes: String(Math.min(10, max)), max },
+    onConfirm: async (self) => {
+      const value = self.extension!.minutes;
+      const minutes = Number(value);
+      if (!/^\d{1,3}$/.test(value) || !Number.isInteger(minutes) || minutes < 1 || minutes > max) {
+        self.message = `请输入 1 到 ${max} 的整数分钟。`;
+        return "keep";
+      }
+      const current = day()?.timer;
+      if (!current || current.started_at !== timer.started_at || current.category !== timer.category) {
+        toast("原来的计时已结束，请为当前任务重新选择。");
+        return;
+      }
+      if (!await act("extend_block", { minutes, timerStartedAt: timer.started_at })) return "keep";
+      toast(`已增加 ${minutes} 分钟。`);
+    },
+  });
+}
+
+function openCompletion(recordDay: Day, entryIndex: number, automatic: boolean) {
+  const entry = recordDay.ledger[entryIndex];
+  if (!entry?.accepted) return;
+  ui.completion = {
+    dayStartedAt: recordDay.started_at, entryIndex, endedAt: entry.ended_at,
+    title: nameOf(entry.category, recordDay), seconds: entry.seconds,
+    draft: entry.completion_note ?? "", automatic, busy: false, error: "",
+  };
+}
+
+function promptPendingCompletion() {
+  if (ui.completion || ui.dialog || ui.removal) return;
+  // 待填写状态随台账保存，自动结束、托盘结束和重启都走同一条补记路径。
+  for (const recordDay of [day(), ...history().slice().reverse().map((a) => a.day)]) {
+    if (!recordDay) continue;
+    const index = recordDay.ledger.findIndex((entry) => entry.accepted && entry.completion_note === null);
+    if (index >= 0) { openCompletion(recordDay, index, true); return; }
+  }
+}
+
+async function saveCompletion(skip: boolean) {
+  const editor = ui.completion;
+  if (!editor || editor.busy) return;
+  const note = skip ? "" : editor.draft;
+  if (note.length > MAX_COMPLETION_NOTE_CHARS) {
+    editor.error = `最多填写 ${MAX_COMPLETION_NOTE_CHARS} 字。`;
+    render();
+    return;
+  }
+  editor.busy = true;
+  editor.error = "";
+  render();
+  try {
+    const snap = await invoke<Snapshot>("set_completion_note", { dayStartedAt: editor.dayStartedAt, entryIndex: editor.entryIndex, endedAt: editor.endedAt, note });
+    // 先接纳新快照再关弹窗，避免旧快照上的待填写标记把同一个弹窗重新打开。
+    applySnapshot(snap);
+    if (ui.completion === editor) ui.completion = null;
+    render();
+    if (!topOverlay()) app.querySelector<HTMLElement>("#content")?.focus({ preventScroll: true });
+  } catch (error) {
+    editor.busy = false;
+    editor.error = String(error);
+    render();
+  }
+}
+
+async function cancelCompletion() {
+  if (!ui.completion || ui.completion.busy) return;
+  if (ui.completion.automatic) await saveCompletion(true);
+  else {
+    ui.completion = null;
+    render();
+    if (!topOverlay()) app.querySelector<HTMLElement>("#content")?.focus({ preventScroll: true });
   }
 }
 
@@ -729,14 +814,13 @@ async function stepValue(el: HTMLElement) {
       await savePrefs((x) => updateQuota(x, profileId, categoryId, adjust));
       break;
     }
-    case "water-min":
-      await savePrefs((x) => { x.water_reminder_minutes = adjust(x.water_reminder_minutes); });
+    case "minutes":
+      ui.rejectedStartMinutes = false;
+      ui.minutesDraft = adjust(ui.minutesDraft ?? Number(el.dataset.value));
+      render();
       break;
     case "stretch-min":
       await savePrefs((x) => { x.stretch_reminder_minutes = adjust(x.stretch_reminder_minutes); });
-      break;
-    case "goal":
-      await savePrefs((x) => { x.hydration_goal_cups = adjust(x.hydration_goal_cups); });
       break;
     default:
       break;
@@ -790,6 +874,17 @@ async function addBlockingRule(kind: "url" | "host") {
   }
 }
 
+/** 心跳保留编辑中的 DOM，所以回退必须读已接受的值，不能读可能过期的 HTML 属性。 */
+function savedMinutes(el: HTMLInputElement | HTMLSelectElement): string {
+  switch (el.dataset.change) {
+    case "minutes": return String(ui.minutesDraft ?? Number(el.getAttribute("value")));
+    case "uniform-length": return String(prefs().uniform_block_minutes);
+    case "block-length": return String(prefs().categories.find((c) => c.id === el.dataset.id)?.default_block_minutes ?? MIN_BLOCK_MINUTES);
+    case "quota-minutes": return String(prefs().profiles.find((p) => p.id === el.dataset.profile)?.quotas.find((q) => q.category === el.dataset.category)?.minutes ?? 0);
+    default: return el.getAttribute("value") ?? "";
+  }
+}
+
 async function handleChange(key: string, el: HTMLInputElement | HTMLSelectElement) {
   const id = el.dataset.id ?? "";
   const value = el.value;
@@ -808,20 +903,27 @@ async function handleChange(key: string, el: HTMLInputElement | HTMLSelectElemen
       break;
     }
     case "minutes":
-      ui.minutesDraft = Number(value);
+    case "block-length":
+    case "uniform-length": {
+      const minutes = Number(value);
+      if (!/^\d{1,3}$/.test(value) || !Number.isInteger(minutes) || minutes < MIN_BLOCK_MINUTES || minutes > MAX_BLOCK_MINUTES) {
+        if (key === "minutes") ui.rejectedStartMinutes = true;
+        el.value = savedMinutes(el);
+        toast("时长请输入 1 到 180 的整数分钟，已恢复原值。");
+        return;
+      }
+      if (key === "minutes") { ui.minutesDraft = minutes; ui.rejectedStartMinutes = false; }
+      else if (key === "uniform-length") await savePrefs((x) => { x.uniform_block_minutes = minutes; });
+      else await savePrefs((x) => { const c = x.categories.find((c) => c.id === id); if (c) c.default_block_minutes = minutes; });
+      render();
       break;
+    }
     case "break":
       ui.breakDraft = Number(value);
-      break;
-    case "block-length":
-      await savePrefs((x) => { const c = x.categories.find((c) => c.id === id); if (c) c.default_block_minutes = Number(value); });
       break;
     case "uniform-toggle":
       // 勾上 = 开启统一块长；关掉时把值清成 0，重新打开时尽量沿用上次的数。
       await savePrefs((x) => { x.uniform_block_minutes = checked ? (x.uniform_block_minutes > 0 ? x.uniform_block_minutes : 60) : 0; });
-      break;
-    case "uniform-length":
-      await savePrefs((x) => { x.uniform_block_minutes = Number(value); });
       break;
     case "break-default":
       await savePrefs((x) => { x.break_minutes = Number(value); });
@@ -909,11 +1011,15 @@ document.addEventListener("click", (event) => {
 document.addEventListener("input", (event) => {
   const el = event.target as HTMLInputElement | HTMLTextAreaElement;
   switch (el.dataset.input) {
-    case "task":
-      ui.taskDraft = el.value;
+    case "completion":
+      if (ui.completion && !ui.completion.busy) {
+        ui.completion.draft = el.value;
+        ui.completion.error = "";
+        render();
+      }
       break;
-    case "add-task":
-      ui.addTaskDraft = el.value;
+    case "extend":
+      if (ui.dialog?.extension) ui.dialog.extension.minutes = el.value;
       break;
     case "host":
       ui.hostDraft = el.value;
@@ -940,12 +1046,14 @@ document.addEventListener("change", (event) => {
 
 document.addEventListener("focusout", (event) => {
   const target = event.target;
-  if (target instanceof HTMLInputElement && target.dataset.change === "quota-minutes") requestAnimationFrame(render);
+  if (target instanceof HTMLInputElement && target.type === "number") requestAnimationFrame(render);
 });
 
 document.addEventListener("keydown", (event) => {
+  // 输入法的 Esc / Enter 只处理候选词，不能跳过记录或启动计时。
+  if (event.isComposing || event.keyCode === 229) return;
   // 焦点不许跑出对话框：Tab 在框内那一圈里绕。判据与渲染共用 topOverlay()。
-  if (event.key === "Tab" && topOverlay() === "dialog") {
+  if (event.key === "Tab" && (topOverlay() === "dialog" || topOverlay() === "completion")) {
     const items = dialogFocusables();
     if (!items.length) return;
     event.preventDefault();
@@ -957,6 +1065,11 @@ document.addEventListener("keydown", (event) => {
   if (event.key === "Escape") {
     // 关的必须是**画在最上面**的那一个，所以判据和 overlays() 共用 topOverlay()。
     const top = topOverlay();
+    if (top === "completion") {
+      event.preventDefault();
+      void cancelCompletion();
+      return;
+    }
     if (top === "removal") ui.removal = null;
     else if (top === "dialog") {
       if (dialogIsBusy()) return;
@@ -965,8 +1078,8 @@ document.addEventListener("keydown", (event) => {
     } else if (ui.menu) ui.menu = null;
     else {
       const target = event.target;
-      if (!(target instanceof HTMLInputElement) || target.dataset.change !== "quota-minutes") return;
-      target.value = String(prefs().profiles.find((p) => p.id === target.dataset.profile)?.quotas.find((q) => q.category === target.dataset.category)?.minutes ?? 0);
+      if (!(target instanceof HTMLInputElement) || target.type !== "number") return;
+      target.value = savedMinutes(target);
       target.blur();
     }
     render();
@@ -974,11 +1087,21 @@ document.addEventListener("keydown", (event) => {
   }
   if (event.key !== "Enter") return;
   const target = event.target as HTMLElement;
+  if (topOverlay() === "completion") {
+    if (event.metaKey || event.ctrlKey) { event.preventDefault(); void saveCompletion(false); }
+    return;
+  }
+  if ((event.metaKey || event.ctrlKey) && ui.view === "today" && !topOverlay()) {
+    event.preventDefault();
+    if (target instanceof HTMLInputElement) target.blur();
+    void startBlock();
+    return;
+  }
   if (target instanceof HTMLInputElement) {
     switch (target.dataset.input) {
-      case "task":
+      case "extend":
         event.preventDefault();
-        void startBlock();
+        void handleAction("dialog-confirm", target);
         return;
       case "host":
       case "url":
@@ -989,18 +1112,10 @@ document.addEventListener("keydown", (event) => {
         event.preventDefault();
         void handleAction("removal-confirm", target);
         return;
-      case "add-task":
-        event.preventDefault();
-        void handleAction("commit-task", target);
-        return;
       default:
-        if (target.dataset.change === "project-name" || target.dataset.change === "quota-minutes") target.blur();
+        if (target.dataset.change === "project-name" || target.type === "number") target.blur();
         return;
     }
-  }
-  if (event.metaKey && ui.view === "today" && !ui.dialog && !ui.removal) {
-    event.preventDefault();
-    void startBlock();
   }
 });
 
@@ -1011,6 +1126,7 @@ const initialView = params.get("view");
 if (initialView === "today" || initialView === "history" || initialView === "settings") ui.view = initialView;
 
 void onSnapshot(applySnapshot);
+void onExtendRequested(openExtensionDialog);
 // 退出前那次保存没写进去：外壳不退出，在这里问用户怎么办。
 void onQuitBlocked((reason) => {
   ask({

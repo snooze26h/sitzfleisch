@@ -8,6 +8,7 @@
 // 谁也不用再拿行标去对横轴。
 
 import type { Day } from "../types";
+import { activeSpans } from "../timeline";
 
 const INK_FAINT = "#9d978d";
 const INK_HIGH = "#f4f2ee";
@@ -84,9 +85,10 @@ export function drawDiagram(
   // 一天拉长之后半点线会糊成一片，那时只留整点。
   const halfHours = hours <= 6;
   const hourStride = hours > 14 ? 2 : 1;
-  ctx.font = `500 11px ui-monospace, "SF Mono", Menlo, monospace`;
+  ctx.font = `500 13px ui-monospace, "SF Mono", Menlo, monospace`;
   ctx.textBaseline = "middle";
   ctx.textAlign = "center";
+  const endLabelGap = ctx.measureText("00:00").width * 1.5 + 12;
   while (mark.getTime() / 1000 <= end) {
     const t = mark.getTime() / 1000;
     const onHour = mark.getMinutes() === 0;
@@ -99,7 +101,7 @@ export function drawDiagram(
       ctx.lineTo(px, trackBottom + (onHour ? 5 : 2));
       ctx.stroke();
       // 两端已经写了起止钟点，靠得太近的整点就不写了，免得两个数字叠在一起。
-      if (onHour && px > 52 && px < cssW - 52) {
+      if (onHour && px > endLabelGap && px < cssW - endLabelGap) {
         ctx.fillStyle = INK_FAINT;
         ctx.fillText(`${pad2(mark.getHours())}:00`, px, trackBottom + 13);
       }
@@ -114,24 +116,17 @@ export function drawDiagram(
   const blocks: Block[] = [];
   for (const entry of day.ledger) {
     const start = entry.started_at > 0 ? entry.started_at : entry.ended_at - entry.seconds;
-    blocks.push({
-      start,
-      end: Math.min(entry.ended_at, end),
-      kind: entry.accepted ? "counted" : "dropped",
-      name: nameOfCategory(entry.category),
-      seconds: entry.seconds,
-    });
+    const stop = Math.min(entry.ended_at, end);
+    // 老记录缺起点时只保留原有的时长估计，不凭空推断缺失的暂停位置。
+    const spans = entry.started_at > 0 ? activeSpans(start, stop, day.pauses) : [{ start, end: stop }];
+    for (const span of spans) blocks.push({ ...span, kind: entry.accepted ? "counted" : "dropped", name: nameOfCategory(entry.category), seconds: span.end - span.start });
   }
   if (day.timer) {
     const t = day.timer;
-    const start = t.started_at > 0 ? t.started_at : now - t.elapsed_seconds;
-    blocks.push({
-      start,
-      end: now,
-      kind: pausedNow ? "counted" : "live",
-      name: nameOfCategory(t.category),
-      seconds: t.elapsed_seconds,
-    });
+    const stop = pausedNow ? Math.min(now, lastPause.started_at) : now;
+    const start = t.started_at > 0 ? t.started_at : stop - t.elapsed_seconds;
+    const spans = t.started_at > 0 ? activeSpans(start, stop, day.pauses) : [{ start, end: stop }];
+    for (const span of spans) if (span.end > span.start) blocks.push({ ...span, kind: pausedNow ? "counted" : "live", name: nameOfCategory(t.category), seconds: span.end - span.start });
   }
   if (restingNow && lastPause) {
     blocks.push({ start: lastPause.started_at, end: now, kind: "rest", name: "休息", seconds: now - lastPause.started_at });
@@ -163,7 +158,7 @@ export function drawDiagram(
     }
     // 块窄到写不下就不写，绝不画半个字。
     const label = `${b.name} ${meterText(b.seconds)}`;
-    ctx.font = `500 12px -apple-system, "PingFang SC", sans-serif`;
+    ctx.font = `500 14px -apple-system, "PingFang SC", sans-serif`;
     if (ctx.measureText(label).width + 14 <= w) {
       ctx.fillStyle = b.kind === "live" ? "#fff" : b.kind === "counted" ? BED : INK_HIGH;
       ctx.textAlign = "left";
@@ -191,7 +186,7 @@ export function drawDiagram(
   }
 
   // 6. 两端的钟点，写在轨下面，省得靠中间的刻度倒推一天从几点开始。
-  ctx.font = `500 11px ui-monospace, "SF Mono", Menlo, monospace`;
+  ctx.font = `500 13px ui-monospace, "SF Mono", Menlo, monospace`;
   ctx.fillStyle = INK_FAINT;
   ctx.textAlign = "left";
   const from = new Date(day.started_at * 1000);

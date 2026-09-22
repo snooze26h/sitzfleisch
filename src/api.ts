@@ -37,6 +37,10 @@ export async function onReminder(callback: (reminder: Reminder) => void): Promis
   await listen<Reminder>("reminder://show", (event) => callback(event.payload));
 }
 
+export async function onExtendRequested(callback: () => void): Promise<void> {
+  if (inTauri) await listen("timer://extend", callback);
+}
+
 /**
  * 退出前那次保存没写进去：外壳不退出，把原因推过来让界面问用户。
  * 浏览器里没有进程可退，触发口由 mock 挂到控制台（`qaQuitBlocked()`）。

@@ -1,0 +1,9 @@
+{
+  "tool": "image_gen built-in",
+  "date": "2026-09-22",
+  "intent": "replace paused artwork with a red-and-white paper crane",
+  "prompt": "A clean FLAT CUT-PAPER editorial illustration of a single origami crane resting, side three-quarter view facing left. Clearly recognizable elegant crane with a slim neck, small pointed beak, relaxed folded wings and a slim tail. Use only flat warm ivory paper faces and flat vermilion red reverse faces, with a few discrete darker-red triangular facets to explain folds. Hard crisp geometric paper edges, very restrained, graceful, designed to read well as a small 150px app illustration. No realistic lighting or 3D effects. Isolate the crane against a completely uniform solid black #000000 field, right up to all contours. All shading is confined inside the crane polygon. No blur, no gradients outside the bird, no glow, no bloom, no fog, no rim light, no shadow, no texture in the background, no floor. Landscape 1536x1024. Place the whole crane centered within the middle 60% width and 55% height; generous black padding. No letters, labels, logos, symbols or other objects. Flat color cut-paper artwork, like carefully assembled colored paper shapes photographed under perfectly even ambient light.",
+  "sourceArtifact": "exec-f03a4b92-f5ae-474c-9c62-761ce5e06dc7.png",
+  "output": "src/assets/time-fold/fold-pause.webp",
+  "background": "opaque pure black; screen compositing"
+}

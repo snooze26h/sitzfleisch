@@ -25,6 +25,10 @@ dist-ssr
 # Rust 构建产物（core 与 src-tauri 各自的 target）
 core/target/
 backup-apps/
+# 本机更新和截图记录保留原路径；对外审查结论统一写入 docs/。
+design/minute-water-20260918.md
+design/pause-art-20260919.md
+design/completion-clock-20260921.md
 
 # 各 agent 平台的本地配置，不跟仓库走
 .claude/

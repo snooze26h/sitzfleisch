@@ -1,15 +1,17 @@
 //! 坐功的规则核心，纯逻辑、无平台依赖：
 //! - 一天从「开始今天」那一刻起算，永不跨午夜重置；
 //! - 心跳间隔超过 120 秒判为挂起，那段空档一秒都不记；进程不在的空档不吃宽限；
-//! - 每个专注格结束必须验收：采纳才计入配额进度，拒收只留在台账上；
+//! - 专注格完成后按真实用时计入配额，主动放弃的格只留在台账上；
 //! - 项目与那份计划是用户数据（preferences），学习日开始时把配额拷走冻结。
 
 use serde::{Deserialize, Serialize};
 
-pub const SCHEMA_VERSION: u32 = 4;
+pub const SCHEMA_VERSION: u32 = 5;
 pub const SUSPEND_GAP_SECONDS: i64 = 120;
-pub const MIN_BLOCK_MINUTES: i64 = 5;
+pub const MIN_BLOCK_MINUTES: i64 = 1;
 pub const MAX_BLOCK_MINUTES: i64 = 180;
+pub const WATER_REMINDER_MINUTES: i64 = 30;
+pub const MAX_COMPLETION_NOTE_CHARS: usize = 2000;
 pub const HISTORY_LIMIT: usize = 60;
 pub const MAX_BLOCK_RULES: usize = 64;
 pub const MAX_BLOCK_URL_BYTES: usize = 4096;
@@ -65,7 +67,7 @@ pub struct ProfileDef {
 }
 
 fn default_water_interval() -> i64 {
-    45
+    WATER_REMINDER_MINUTES
 }
 
 fn default_stretch_interval() -> i64 {
@@ -85,12 +87,13 @@ pub struct Preferences {
     pub categories: Vec<CategoryDef>,
     pub profiles: Vec<ProfileDef>,
     pub break_minutes: i64,
-    /// 一天的喝水目标（杯）。
+    /// 兼容旧存档的喝水目标；不再用于提醒或显示。
     #[serde(default = "default_hydration_goal")]
     pub hydration_goal_cups: i64,
-    /// 在座满 N 分钟没喝水就提醒（学习日内）。
+    /// 按本地时钟的整点与半点提醒，不依赖专注、暂停或记杯数。
     #[serde(default)]
     pub water_reminder_enabled: bool,
+    /// 兼容旧存档的间隔；实际提醒固定使用 WATER_REMINDER_MINUTES。
     #[serde(default = "default_water_interval")]
     pub water_reminder_minutes: i64,
     /// 连续在座满 N 分钟没起身就提醒。
@@ -115,7 +118,7 @@ pub struct Preferences {
     /// 保留字段：老存档收拢多份计划时用它挑出用户在用的那一份。
     #[serde(default)]
     pub default_profile_id: String,
-    /// 计时结束时响一声；生活提醒始终静音。
+    /// 提醒时播放声音；喝水使用独立提示音。
     #[serde(default = "default_true")]
     pub sound_enabled: bool,
 }
@@ -161,7 +164,7 @@ pub fn builtin_preferences() -> Preferences {
         break_minutes: 10,
         hydration_goal_cups: 8,
         water_reminder_enabled: false,
-        water_reminder_minutes: 45,
+        water_reminder_minutes: WATER_REMINDER_MINUTES,
         stretch_reminder_enabled: false,
         stretch_reminder_minutes: 50,
         idle_reminder_enabled: false,
@@ -259,18 +262,14 @@ pub fn validate_preferences(prefs: &Preferences) -> RuleResult {
     if prefs.uniform_block_minutes != 0
         && !(MIN_BLOCK_MINUTES..=MAX_BLOCK_MINUTES).contains(&prefs.uniform_block_minutes)
     {
-        return Err("统一块长要在 5–180 分钟之间");
+        return Err("统一块长要在 1–180 分钟之间");
     }
     if !prefs.default_profile_id.is_empty()
         && !prefs.profiles.iter().any(|p| p.id == prefs.default_profile_id)
     {
         return Err("默认计划不存在");
     }
-    if !(1..=24).contains(&prefs.hydration_goal_cups) {
-        return Err("喝水目标要在 1–24 杯之间");
-    }
-    if !(5..=240).contains(&prefs.water_reminder_minutes)
-        || !(5..=240).contains(&prefs.stretch_reminder_minutes)
+    if !(5..=240).contains(&prefs.stretch_reminder_minutes)
         || !(5..=240).contains(&prefs.idle_reminder_minutes)
     {
         return Err("提醒间隔要在 5–240 分钟之间");
@@ -294,7 +293,7 @@ pub fn validate_preferences(prefs: &Preferences) -> RuleResult {
             return Err("项目名不能为空");
         }
         if !(MIN_BLOCK_MINUTES..=MAX_BLOCK_MINUTES).contains(&category.default_block_minutes) {
-            return Err("默认块时长要在 5–180 分钟之间");
+            return Err("默认块时长要在 1–180 分钟之间");
         }
         if ids.contains(&category.id) {
             return Err("项目 id 重复");
@@ -339,7 +338,7 @@ pub struct BlockTimer {
     pub category: String,
     pub total_seconds: i64,
     pub elapsed_seconds: i64,
-    /// 这一格打算做的事，可以为空。
+    /// 兼容旧版任务清单；新界面改为结束后记录完成内容。
     #[serde(default)]
     pub tasks: Vec<TaskItem>,
     /// 开格的墙钟时刻（运行图与走时条用）。
@@ -368,12 +367,13 @@ pub struct LedgerEntry {
     #[serde(default)]
     pub started_at: i64,
     pub ended_at: i64,
+    /// None 表示刚结束、待填写；空字符串表示已跳过。旧记录默认已跳过，不逐条催填。
+    #[serde(default = "legacy_completion_note")]
+    pub completion_note: Option<String>,
 }
 
-impl LedgerEntry {
-    pub fn done_tasks(&self) -> usize {
-        self.tasks.iter().filter(|t| t.done).count()
-    }
+fn legacy_completion_note() -> Option<String> {
+    Some(String::new())
 }
 
 /// 一段暂停：手动按的，或休眠、锁屏自动判定的。运行图靠它把时间线连起来。
@@ -417,8 +417,9 @@ pub struct Day {
     #[serde(default)]
     pub paused_seconds: i64,
     pub suspend_seconds: i64,
+    /// 仅保留旧存档数据，新学习日不再记杯数。
     pub cups: i64,
-    /// 提醒计数器：在座且没喝水/没起身的累计秒数。
+    /// 兼容旧存档的累计字段；喝水已改为钟面提醒，不再累加。
     #[serde(default)]
     pub seated_since_water: i64,
     #[serde(default)]
@@ -532,6 +533,7 @@ impl Day {
             tasks: timer.tasks,
             started_at,
             ended_at: now,
+            completion_note: if accepted { None } else { Some(String::new()) },
         });
     }
 }
@@ -550,6 +552,10 @@ pub struct State {
     pub preferences: Preferences,
     pub day: Option<Day>,
     pub history: Vec<ArchivedDay>,
+    #[serde(default)]
+    pub water_clock_checked_at: Option<i64>,
+    #[serde(default)]
+    pub water_reminded_at: Option<i64>,
 }
 
 pub type RuleResult = Result<(), &'static str>;
@@ -562,6 +568,8 @@ impl State {
             preferences: builtin_preferences(),
             day: None,
             history: Vec::new(),
+            water_clock_checked_at: Some(now),
+            water_reminded_at: None,
         }
     }
 
@@ -571,6 +579,8 @@ impl State {
     /// 暂停段必须从**空档开始的那一刻**起算，否则这段时间不属于任何暂停，
     /// 运行图会把它当成「一直在做事」画成实心条。
     pub fn resume_after_restart(&mut self, now: i64) {
+        // 启动时从现在开始观察时钟，不追发进程退出期间错过的整点。
+        self.water_clock_checked_at = Some(now);
         let gap = now - self.last_tick;
         let gap_started_at = self.last_tick;
         self.last_tick = now;
@@ -583,13 +593,30 @@ impl State {
         day.begin_pause(gap_started_at, true);
     }
 
-    /// 心跳后由外壳调用：哪个提醒到点了就返回 true 并把计数器归零。
-    /// 只在学习日内、没暂停时生效。
+    /// 外壳提供本地钟面在本小时内的秒数，避免把 UTC 半点误当成所有时区的半点。
+    pub fn take_due_water_reminder(&mut self, local_seconds_in_hour: u32) -> bool {
+        let now = self.last_tick;
+        let previous = self.water_clock_checked_at.replace(now);
+        let Some(previous) = previous else { return false };
+        if !self.preferences.water_reminder_enabled || local_seconds_in_hour >= 3600 {
+            return false;
+        }
+        // 休眠、重启或时钟回拨都不补发；下一次正常经过钟点时再提醒。
+        if now <= previous || now.saturating_sub(previous) > SUSPEND_GAP_SECONDS {
+            return false;
+        }
+        let boundary = now - i64::from(local_seconds_in_hour) % (WATER_REMINDER_MINUTES * 60);
+        if previous < boundary && self.water_reminded_at.is_none_or(|last| boundary > last) {
+            self.water_reminded_at = Some(boundary);
+            return true;
+        }
+        false
+    }
+
+    /// 起身与闲置提醒仍沿用各自的专注/暂停计数，喝水由钟面独立触发。
     pub fn take_due_reminders(&mut self) -> (bool, bool, bool) {
-        let water_interval = self.preferences.water_reminder_minutes * 60;
         let stretch_interval = self.preferences.stretch_reminder_minutes * 60;
         let idle_interval = self.preferences.idle_reminder_minutes * 60;
-        let water_on = self.preferences.water_reminder_enabled;
         let stretch_on = self.preferences.stretch_reminder_enabled;
         let idle_on = self.preferences.idle_reminder_enabled;
         let Some(day) = &mut self.day else { return (false, false, false) };
@@ -601,17 +628,12 @@ impl State {
             }
             return (false, false, idle_due);
         }
-        let mut water_due = false;
         let mut stretch_due = false;
-        if water_on && day.seated_since_water >= water_interval {
-            day.seated_since_water = 0;
-            water_due = true;
-        }
         if stretch_on && day.seated_since_relief >= stretch_interval {
             day.seated_since_relief = 0;
             stretch_due = true;
         }
-        (water_due, stretch_due, false)
+        (false, stretch_due, false)
     }
 
     /// 休息到点了没？到了就返回一次 true 并把标签摘掉。
@@ -671,7 +693,6 @@ impl State {
             (worked, delta - worked, timer.elapsed_seconds >= timer.total_seconds)
         };
         day.seated_seconds += worked;
-        day.seated_since_water += worked;
         day.seated_since_relief += worked;
         if !done {
             return;
@@ -692,6 +713,9 @@ impl State {
 
     pub fn update_preferences(&mut self, prefs: Preferences) -> RuleResult {
         validate_preferences(&prefs)?;
+        if prefs.water_reminder_enabled != self.preferences.water_reminder_enabled {
+            self.water_clock_checked_at = Some(self.last_tick);
+        }
         self.preferences = prefs;
         Ok(())
     }
@@ -806,6 +830,9 @@ impl State {
         tasks: Vec<TaskItem>,
         break_minutes: i64,
     ) -> RuleResult {
+        if !(MIN_BLOCK_MINUTES..=MAX_BLOCK_MINUTES).contains(&minutes) {
+            return Err("专注时长要在 1–180 分钟之间");
+        }
         let now = self.last_tick;
         let Some(day) = &mut self.day else { return Err("今天还没开始") };
         if day.timer.is_some() {
@@ -817,7 +844,6 @@ impl State {
         // 开格等于结束休息，也等于结束暂停。
         day.break_until = None;
         day.close_pause(now);
-        let minutes = minutes.clamp(MIN_BLOCK_MINUTES, MAX_BLOCK_MINUTES);
         let tasks: Vec<TaskItem> = tasks
             .into_iter()
             .filter_map(|t| {
@@ -854,10 +880,16 @@ impl State {
     }
 
     pub fn extend_block(&mut self, minutes: i64) -> RuleResult {
+        if !(1..=MAX_BLOCK_MINUTES * 2).contains(&minutes) {
+            return Err("增加时长要在 1–360 分钟之间");
+        }
         let Some(timer) = self.day.as_mut().and_then(|d| d.timer.as_mut()) else {
             return Err("没有在走的计时");
         };
-        let total_minutes = (timer.total_seconds / 60 + minutes.max(1)).min(MAX_BLOCK_MINUTES * 2);
+        let total_minutes = timer.total_seconds / 60 + minutes;
+        if total_minutes > MAX_BLOCK_MINUTES * 2 {
+            return Err("一格最多延长到 360 分钟");
+        }
         timer.total_seconds = total_minutes * 60;
         Ok(())
     }
@@ -872,6 +904,25 @@ impl State {
         day.begin_pause(now, false);
         day.paused_without_block = 0;
         day.break_until = if rest > 0 { Some(now + rest) } else { None };
+        Ok(())
+    }
+
+    /// 写入实际完成记录；精确定位学习日和台账项，避免迟到的弹窗写到下一格。
+    pub fn set_completion_note(&mut self, day_started_at: i64, entry_index: usize, ended_at: i64, note: &str) -> RuleResult {
+        if note.len() > MAX_COMPLETION_NOTE_CHARS * 4 || note.chars().count() > MAX_COMPLETION_NOTE_CHARS {
+            return Err("完成记录最多 2000 字");
+        }
+        if note.chars().any(|c| c.is_control() && !matches!(c, '\n' | '\r' | '\t')) {
+            return Err("完成记录含有不支持的控制字符");
+        }
+        let day = if self.day.as_ref().is_some_and(|d| d.started_at == day_started_at) {
+            self.day.as_mut()
+        } else {
+            self.history.iter_mut().find(|a| a.day.started_at == day_started_at).map(|a| &mut a.day)
+        }.ok_or("这一天的记录已不存在")?;
+        let entry = day.ledger.get_mut(entry_index).filter(|e| e.ended_at == ended_at && e.accepted)
+            .ok_or("这段记录已改变，请重新打开")?;
+        entry.completion_note = Some(note.replace("\r\n", "\n").replace('\r', "\n").trim().to_string());
         Ok(())
     }
 
@@ -895,47 +946,7 @@ impl State {
         Ok(())
     }
 
-    /// 勾掉 / 取消勾掉这一格里的第 index 条任务。
-    pub fn toggle_task(&mut self, index: usize) -> RuleResult {
-        let Some(timer) = self.day.as_mut().and_then(|d| d.timer.as_mut()) else {
-            return Err("没有在走的计时");
-        };
-        let Some(task) = timer.tasks.get_mut(index) else { return Err("没有这条任务") };
-        task.done = !task.done;
-        Ok(())
-    }
 
-    /// 计时中补一条任务。
-    pub fn add_task(&mut self, text: &str) -> RuleResult {
-        let text = text.trim().to_string();
-        if text.is_empty() {
-            return Err("任务不能为空");
-        }
-        let Some(timer) = self.day.as_mut().and_then(|d| d.timer.as_mut()) else {
-            return Err("没有在走的计时");
-        };
-        timer.tasks.push(TaskItem { text, done: false });
-        Ok(())
-    }
-
-    // ---------- 杂项 ----------
-
-    pub fn drink_water(&mut self) -> RuleResult {
-        let Some(day) = &mut self.day else { return Err("今天还没开始") };
-        day.cups += 1;
-        day.seated_since_water = 0;
-        Ok(())
-    }
-
-    /// 撤销一杯（点错了）。
-    pub fn undo_water(&mut self) -> RuleResult {
-        let Some(day) = &mut self.day else { return Err("今天还没开始") };
-        if day.cups <= 0 {
-            return Err("今天还没记过水");
-        }
-        day.cups -= 1;
-        Ok(())
-    }
 }
 
 // ---------- 「下一格」建议（与界面里的 TS 版同一套规则，菜单栏用） ----------
@@ -1042,7 +1053,7 @@ pub fn suggest(day: &Day, prefs: &Preferences, _now: i64) -> Option<Suggestion> 
     let floor = candidates
         .iter()
         .filter(|c| role_of(prefs, &c.id) == "dailyFloor" && last != Some(c.id.as_str()))
-        .max_by_key(|c| remaining_seconds(c));
+        .reduce(|best, c| if remaining_seconds(c) > remaining_seconds(best) { c } else { best });
     if let Some(floor) = floor {
         if total_remaining > 0 && remaining_seconds(floor) as f64 / total_remaining as f64 >= 0.5 {
             return Some(make(
@@ -1293,6 +1304,8 @@ pub fn from_json(raw: &str) -> Result<State, String> {
     }
     let mut state: State = serde_json::from_value(value).map_err(|e| format!("unreadable: {e}"))?;
     collapse_profiles(&mut state.preferences);
+    // 读档也走写入时的校验，不能让手改/损坏的 JSON 绕过域名与时长边界。
+    validate_preferences(&state.preferences).map_err(|reason| format!("invalid preferences: {reason}"))?;
     Ok(state)
 }
 
@@ -1549,19 +1562,16 @@ mod tests {
     }
 
     #[test]
-    fn tasks_can_be_ticked_and_added_mid_block() {
+    fn legacy_tasks_remain_in_the_ledger_after_finishing() {
         let mut state = started();
-        state.start_block("reading", 45, vec![task("听力"), task("单词")]).unwrap();
-        state.toggle_task(1).unwrap();
-        state.add_task("再做点阅读").unwrap();
-        assert!(state.add_task("   ").is_err());
-        assert!(state.toggle_task(9).is_err());
-        walk_to(&mut state, 1_300);
-        state.finish_block(1_300).unwrap();
+        state.start_block("reading", 25, vec![TaskItem { text: "旧版计划".into(), done: true }]).unwrap();
+        state = from_json(&to_json(&state)).unwrap();
+        walk_to(&mut state, 1_060);
+        state.finish_block(1_060).unwrap();
         let entry = &state.day.as_ref().unwrap().ledger[0];
-        assert_eq!(entry.tasks.len(), 3);
-        assert_eq!(entry.done_tasks(), 1);
-        assert!(entry.tasks[1].done);
+        assert_eq!(entry.tasks[0].text, "旧版计划");
+        assert!(entry.tasks[0].done);
+        assert_eq!(entry.seconds, 60);
     }
 
     #[test]
@@ -1662,17 +1672,135 @@ mod tests {
     }
 
     #[test]
-    fn water_and_stretch_only_fire_inside_a_block() {
-        let mut state = started();
+    fn water_follows_clock_boundaries_even_without_a_day_or_while_paused() {
+        let mut state = State::new(1_799);
         state.preferences.water_reminder_enabled = true;
-        state.preferences.water_reminder_minutes = 1;
-        // 还没开格：一直暂停，不催喝水
-        walk_to(&mut state, 1_000 + 600);
-        assert!(!state.take_due_reminders().0, "暂停时不催喝水");
-        state.start_block("main", 25, vec![]).unwrap();
-        let started_at = state.last_tick;
-        walk_to(&mut state, started_at + 61);
-        assert!(state.take_due_reminders().0, "格里走满就催");
+        state.tick(1_800);
+        assert!(state.take_due_water_reminder(1_800));
+        assert!(!state.take_due_water_reminder(1_800), "同一钟点只送一次");
+        state.tick(1_801);
+        assert!(!state.take_due_water_reminder(1_801));
+        state.start_day("standard", 3_599).unwrap();
+        state.last_tick = 3_599;
+        state.take_due_water_reminder(3_599);
+        state.tick(3_600);
+        assert!(state.day.as_ref().unwrap().is_paused());
+        assert!(state.take_due_water_reminder(0), "暂停不影响整点提醒");
+        state.start_block("main", 30, vec![]).unwrap();
+        walk_to(&mut state, 5_399);
+        state.take_due_water_reminder(1_799);
+        state.tick(5_400);
+        assert!(state.take_due_water_reminder(1_800), "任务恰好结束仍按半点提醒");
+    }
+
+    #[test]
+    fn water_uses_local_clock_and_tolerates_a_short_heartbeat_delay() {
+        let mut state = State::new(1_019);
+        state.preferences.water_reminder_enabled = true;
+        state.tick(1_021);
+        assert!(state.take_due_water_reminder(1), "本地整点不必是 UTC 的整点");
+        state.tick(1_022);
+        assert!(!state.take_due_water_reminder(2));
+        state.tick(1_018);
+        state.take_due_water_reminder(3_598);
+        state.tick(1_020);
+        assert!(!state.take_due_water_reminder(0), "系统时间回拨不能重复投递同一边界");
+    }
+
+    #[test]
+    fn water_does_not_replay_after_sleep_restart_or_enabling() {
+        let mut state = State::new(1_799);
+        state.preferences.water_reminder_enabled = true;
+        state.tick(7_205);
+        assert!(!state.take_due_water_reminder(5), "唤醒不补发错过的钟点");
+        state = from_json(&to_json(&state)).unwrap();
+        state.resume_after_restart(9_000);
+        assert!(!state.take_due_water_reminder(1_800), "启动当刻不补发");
+        let mut prefs = state.preferences.clone();
+        prefs.water_reminder_enabled = false;
+        state.update_preferences(prefs).unwrap();
+        state.tick(10_799);
+        state.take_due_water_reminder(3_599);
+        state.tick(10_800);
+        assert!(!state.take_due_water_reminder(0));
+        let mut prefs = state.preferences.clone();
+        prefs.water_reminder_enabled = true;
+        state.update_preferences(prefs).unwrap();
+        assert!(!state.take_due_water_reminder(0), "开启后等下一个钟点");
+        state.tick(12_599);
+        state.take_due_water_reminder(1_799);
+        state.tick(12_600);
+        assert!(state.take_due_water_reminder(1_800));
+    }
+
+    #[test]
+    fn completion_notes_survive_archive_restart_and_validate_the_target() {
+        let mut state = started();
+        state.start_block("main", 1, vec![]).unwrap();
+        walk_to(&mut state, 1_060);
+        let entry = &state.day.as_ref().unwrap().ledger[0];
+        assert!(entry.completion_note.is_none(), "自动结束留下待填记录");
+        assert!(state.set_completion_note(1_000, 0, 1_060, &"字".repeat(MAX_COMPLETION_NOTE_CHARS + 1)).is_err());
+        assert!(state.set_completion_note(1_000, 0, 1_060, "坏\0字符").is_err());
+        assert!(state.set_completion_note(1_000, 0, 1_061, "不能写错格").is_err());
+        state.set_completion_note(1_000, 0, 1_060, "  完成实验\r\n整理结果  ").unwrap();
+        assert_eq!(state.day.as_ref().unwrap().net_seconds(), 60);
+        state.end_day(1_100).unwrap();
+        state = from_json(&to_json(&state)).unwrap();
+        assert_eq!(state.history[0].day.ledger[0].completion_note.as_deref(), Some("完成实验\n整理结果"));
+        state.set_completion_note(1_000, 0, 1_060, "补充结果").unwrap();
+        assert_eq!(state.history[0].day.ledger[0].completion_note.as_deref(), Some("补充结果"));
+    }
+
+    #[test]
+    fn old_ledger_entries_do_not_prompt_and_new_notes_can_be_skipped() {
+        let mut state = started();
+        state.start_block("main", 5, vec![task("旧计划")]).unwrap();
+        walk_to(&mut state, 1_010);
+        state.finish_block(1_010).unwrap();
+        let mut old = serde_json::to_value(&state).unwrap();
+        old["schema"] = serde_json::json!(4);
+        old["day"]["ledger"][0].as_object_mut().unwrap().remove("completion_note");
+        let migrated = from_json(&old.to_string()).unwrap();
+        let entry = &migrated.day.as_ref().unwrap().ledger[0];
+        assert_eq!(entry.completion_note.as_deref(), Some(""));
+        assert_eq!(entry.tasks[0].text, "旧计划");
+        state.set_completion_note(1_000, 0, 1_010, "").unwrap();
+        assert_eq!(state.day.as_ref().unwrap().ledger[0].completion_note.as_deref(), Some(""));
+    }
+
+    #[test]
+    fn arbitrary_minutes_and_one_minute_extensions_preserve_recorded_time() {
+        let mut state = started();
+        for invalid in [i64::MIN, -1, 0, 181, i64::MAX] {
+            assert!(state.start_block("main", invalid, vec![]).is_err());
+            assert!(state.day.as_ref().unwrap().is_paused());
+            assert!(state.day.as_ref().unwrap().timer.is_none());
+        }
+        state.start_block("main", 37, vec![]).unwrap();
+        walk_to(&mut state, 1_061);
+        state.extend_block(1).unwrap();
+        let timer = state.day.as_ref().unwrap().timer.as_ref().unwrap();
+        assert_eq!(timer.total_seconds, 38 * 60);
+        assert_eq!(timer.elapsed_seconds, 61);
+        state.toggle_pause(state.last_tick).unwrap();
+        state.extend_block(1).unwrap();
+        assert!(state.day.as_ref().unwrap().is_paused());
+        for invalid in [-1, 0, 361, i64::MAX] {
+            assert!(state.extend_block(invalid).is_err());
+        }
+        state.extend_block(321).unwrap();
+        assert!(state.extend_block(1).is_err(), "延长上限为 360 分钟");
+        state.finish_block(state.last_tick).unwrap();
+        assert_eq!(state.day.as_ref().unwrap().net_seconds(), 61);
+        state.start_block("reading", 1, vec![]).unwrap();
+        walk_to(&mut state, 1_121);
+        assert!(state.day.as_ref().unwrap().timer.is_none());
+        assert_eq!(state.day.as_ref().unwrap().net_seconds(), 121);
+        let mut prefs = state.preferences.clone();
+        prefs.uniform_block_minutes = 1;
+        prefs.categories[0].default_block_minutes = 37;
+        assert!(validate_preferences(&prefs).is_ok());
     }
 
     #[test]
@@ -1689,13 +1817,14 @@ mod tests {
     }
 
     #[test]
-    fn water_can_be_logged_and_undone() {
-        let mut state = started();
-        assert!(state.undo_water().is_err());
-        state.drink_water().unwrap();
-        state.drink_water().unwrap();
-        state.undo_water().unwrap();
-        assert_eq!(state.day.as_ref().unwrap().cups, 1);
+    fn daily_floor_ties_keep_the_first_project_like_the_ui_scheduler() {
+        let mut state = State::new(1_000);
+        state.preferences.categories[0].role = "dailyFloor".into();
+        state.preferences.profiles[0].quotas = vec![quota("main", 60), quota("reading", 60)];
+        state.start_day("standard", 1_000).unwrap();
+        let suggestion = suggest(state.day.as_ref().unwrap(), &state.preferences, 1_000).unwrap();
+        assert_eq!(suggestion.category, "main");
+        assert!(suggestion.pressing);
     }
 
     #[test]
@@ -1979,7 +2108,7 @@ mod tests {
         old["preferences"].as_object_mut().unwrap().remove("blocked_urls");
         let migrated = from_json(&old.to_string()).unwrap();
         let after = serde_json::to_value(&migrated).unwrap();
-        assert_eq!(migrated.schema, 4);
+        assert_eq!(migrated.schema, SCHEMA_VERSION);
         assert!(migrated.preferences.blocked_urls.is_empty(), "不能猜测旧域名原本是哪一页");
         assert_eq!(after["day"], old["day"], "当前暂停、任务与累计时间保持原样");
         assert_eq!(after["history"], old["history"], "历史暂停、台账与累计时间保持原样");
@@ -1987,7 +2116,7 @@ mod tests {
         assert!(!after["day"]["pauses"].as_array().unwrap().is_empty());
         assert!(!after["history"][0]["day"]["pauses"].as_array().unwrap().is_empty());
         let mut expected = old;
-        expected["schema"] = serde_json::json!(4);
+        expected["schema"] = serde_json::json!(SCHEMA_VERSION);
         expected["preferences"]["blocked_urls"] = serde_json::json!([]);
         assert_eq!(after, expected, "v3 迁移只改版本并增加空页面列表");
     }
@@ -2000,6 +2129,18 @@ mod tests {
         let mut future = serde_json::to_value(&state).unwrap();
         future["schema"] = serde_json::json!(u64::from(u32::MAX) + 4);
         assert!(from_json(&future.to_string()).unwrap_err().starts_with("newer schema"));
+    }
+
+    #[test]
+    fn loading_rejects_invalid_preferences_without_rewriting_the_input() {
+        let mut value = serde_json::to_value(State::new(1_000)).unwrap();
+        value["preferences"]["uniform_block_minutes"] = serde_json::json!(999);
+        let raw = value.to_string();
+        assert!(from_json(&raw).unwrap_err().starts_with("invalid preferences:"));
+        assert_eq!(value["preferences"]["uniform_block_minutes"], 999);
+        value["preferences"]["uniform_block_minutes"] = serde_json::json!(60);
+        value["preferences"]["blocked_hosts"] = serde_json::json!(["bad\n127.0.0.1 example.com"]);
+        assert!(from_json(&value.to_string()).is_err());
     }
 
     #[test]

@@ -32,7 +32,7 @@ docs/               使用说明、开发说明与 README 截图
 scripts/            静态检查与回归检查脚本
 ```
 
-两个 Rust crate 编译进应用，前端打包为静态资源；界面由系统 WebView 渲染。应用不附带 Node.js、Python 或 Chromium，`scripts/` 不进入安装包。
+两个 Rust crate 编译进应用，前端打包为静态资源；界面由系统 WebView 渲染。应用不附带 Node.js、Python 或 Chromium。`scripts/` 中仅可选的 macOS hosts 助手及其安装脚本随应用打包，其余脚本用于开发检查。
 
 ## 自动检查
 
@@ -43,6 +43,8 @@ npx tsc --noEmit
 node scripts/check-dead-exports.mjs
 node scripts/check-snapshot-order.mjs
 node scripts/check-short-name.mjs
+node scripts/check-scheduler.mjs
+node scripts/check-timeline.mjs
 node scripts/check-blocking-rules.mjs
 node --test browser-extension/*.test.mjs
 cargo test --manifest-path core/Cargo.toml
@@ -56,7 +58,7 @@ cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings
 运行 `npm run dev` 后，在浏览器打开 `http://localhost:1420/`，通过 URL 片段选择内置场景，例如 `http://localhost:1420/#qa=running`。切换片段后刷新页面以重新加载场景。
 
 ```text
-#qa=start | fresh | chooser | running | paused | suspended | resting | done | protected | savefail | nohistory
+#qa=start | fresh | chooser | running | paused | suspended | resting | completed | finishing | done | protected | savefail | nohistory
 ```
 
 这些场景来自 [src/dev/mock.ts](../src/dev/mock.ts)，不会读取真实存档，也不执行系统网站屏蔽。`savefail` 模拟保存失败；浏览器没有应用退出流程，可在控制台执行 `qaQuitBlocked()` 查看退出前保存失败的对话框。
@@ -71,7 +73,7 @@ cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings
 | `focus.webp` | `#qa=running` | 1240 × 920 |
 | `history.webp` | `#qa=start`，点击「历史」 | 1240 × 840 |
 
-截图于 2026-09-15 制作，设备像素比为 2，WebP 质量为 88。为固定演示日期与倒计时，页面加载前将 `Date.now()` 固定为 `2026-09-15T16:10:00-07:00`。保留了界面原有布局和文案，没有读取个人记录。
+截图于 2026-09-22 更新，设备像素比为 2，WebP 质量为 88。为固定演示日期与倒计时，页面加载前将 `Date.now()` 固定为 `2026-09-22T14:20:00-07:00`。截图使用内置模拟数据，没有读取个人记录。
 
 ## 隔离原生测试数据
 
@@ -97,6 +99,8 @@ macOS 发布包是 Apple 芯片与 Intel 通用二进制。当前仅做 ad-hoc �
 - 原有屏蔽解除验收覆盖系统解析层，不保证浏览器旧连接和内部 DNS 缓存同步恢复；用户真实 Chrome / Edge 登录会话尚未完成全面验收。
 
 专项记录：
+
+- [0.11.0 项目审查与修复](audit-20260922.md)
 
 - [视觉更新说明](../design/visual-refresh-20260909/README.md)与[验证范围](../design/visual-refresh-20260909/VALIDATION.md)
 - [菜单栏稳定性记录](../design/menu-bar-stability-20260914.md)

@@ -14,7 +14,7 @@ export function markdownForDay(day: Day, endedAt: number | null, now: number): s
   lines.push(`# ${dayLabel(day.started_at)}`);
   lines.push("");
   lines.push(`- ${wallClock(day.started_at)} 坐下，${endedAt ? "收工于" : "截至"} ${wallClock(end)}`);
-  lines.push(`- 已学 ${meter(net)} / 目标 ${meter(quotaSeconds(day))} · 暂停 ${meter(day.paused_seconds)} · 水 ${day.cups} 杯`);
+  lines.push(`- 已学 ${meter(net)} / 目标 ${meter(quotaSeconds(day))} · 暂停 ${meter(day.paused_seconds)}${day.cups > 0 ? ` · 水 ${day.cups} 杯` : ""}`);
   lines.push("");
   lines.push("## 各项目");
   for (const c of day.categories) {
@@ -27,6 +27,9 @@ export function markdownForDay(day: Day, endedAt: number | null, now: number): s
       const startedAt = l.started_at > 0 ? l.started_at : l.ended_at - l.seconds;
       const head = `- ${wallClock(startedAt)}–${wallClock(l.ended_at)} ${categoryName(day, l.category)} ${duration(l.seconds)}${l.accepted ? "" : "（未计入）"}`;
       lines.push(head);
+      if (l.completion_note?.trim()) {
+        for (const line of l.completion_note.split("\n")) lines.push(`  > ${line}`);
+      }
       for (const t of l.tasks) lines.push(`  - [${t.done ? "x" : " "}] ${t.text}`);
     }
   }

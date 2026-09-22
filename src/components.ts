@@ -174,6 +174,15 @@ export function labelled(title: string, control: string): string {
   return `<span class="labelled"><span class="engraved">${esc(title)}</span>${control}</span>`;
 }
 
+/** 同一处输入支持键入和逐分钟微调，按钮与输入框共用边界。 */
+export function minuteInput(opts: { change: string; value: number; min: number; max: number; label: string; data?: Record<string, string | number> }): string {
+  const data: Record<string, string | number> = {};
+  for (const [key, value] of Object.entries(opts.data ?? {})) data[`data-${key}`] = value;
+  const key = `${opts.change}-${Object.values(opts.data ?? {}).map((value) => encodeURIComponent(String(value))).join("-")}`;
+  const adjust = (delta: number, glyph: string, verb: string) => `<button type="button" data-action="step" data-bind="${esc(opts.change)}" data-delta="${delta}" data-step="1" data-min="${opts.min}" data-max="${opts.max}" data-value="${opts.value}"${attrs(data)}${delta < 0 ? opts.value <= opts.min ? " disabled" : "" : opts.value >= opts.max ? " disabled" : ""} aria-label="${esc(opts.label)}${verb} 1 分钟">${icon(glyph, 12)}</button>`;
+  return `<span class="minute-input">${adjust(-1, "minus", "减少")}<input id="minutes-${esc(key)}" class="field sm" type="number" inputmode="numeric" min="${opts.min}" max="${opts.max}" step="1" value="${opts.value}" data-change="${esc(opts.change)}"${attrs(data)} aria-label="${esc(opts.label)}" /><span class="unit">分</span>${adjust(1, "plus", "增加")}</span>`;
+}
+
 export function menuButton(id: string, open: string | null, label: string, items: string, opts: { iconOnly?: boolean; left?: boolean; ariaLabel?: string } = {}): string {
   const isOpen = open === id;
   return `<span class="anchor">
@@ -198,6 +207,12 @@ export function sessionRow(entry: LedgerEntry, d: Day): string {
         .map((t) => `<span class="${t.done ? "done" : ""}">${icon(t.done ? "check" : "minus", 11)}${esc(t.text)}</span>`)
         .join("")}</div>`
     : "";
+  const completion = entry.completion_note?.trim()
+    ? `<p class="session-note">${esc(entry.completion_note)}</p>` : "";
+  const edit = entry.accepted ? btn(completion ? "编辑完成记录" : "补充完成记录", {
+    kind: "quiet", action: "edit-completion", cls: "session-edit",
+    data: { day: d.started_at, index: d.ledger.indexOf(entry), ended: entry.ended_at },
+  }) : "";
   return `<div class="session${entry.accepted ? "" : " rejected"}">
     ${icon(entry.accepted ? "check" : "x", 13)}
     <div class="body">
@@ -207,7 +222,7 @@ export function sessionRow(entry: LedgerEntry, d: Day): string {
         <span class="at">${esc(wallClock(startedAt))}–${esc(wallClock(entry.ended_at))}</span>
         ${entry.accepted ? "" : `<span class="badge">未计入</span>`}
       </div>
-      ${tasks}
+      ${completion}${tasks}${edit}
     </div>
   </div>`;
 }

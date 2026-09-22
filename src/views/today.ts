@@ -1,6 +1,7 @@
 // 「今天」：没开始时是开始页（当天的安排 + 上一天），开始后是运行台。
 
 import type { BlockTimer, Day } from "../types";
+import { MAX_BLOCK_MINUTES, MIN_BLOCK_MINUTES } from "../types";
 import { clock, duration, esc, meter, wallClock } from "../format";
 import { icon } from "../icons";
 import { ribbonScene, type RibbonPhase } from "../brand";
@@ -10,6 +11,7 @@ import {
   categoryPicker,
   hair,
   labelled,
+  minuteInput,
   menuButton,
   menuItem,
   plate,
@@ -21,7 +23,6 @@ import {
 } from "../components";
 import { blockMinutes, estimatedRemainingWallSeconds, remainingSeconds, suggest } from "../scheduler";
 import {
-  BLOCK_OPTIONS,
   BREAK_OPTIONS,
   breakRemaining,
   day,
@@ -108,10 +109,10 @@ function inChooser(d: Day): boolean {
 function activeBoard(d: Day): string {
   const p = prefs();
   const suggestion = inChooser(d) ? suggest(d, p, ui.now) : null;
-  // 方案 A：上排「当前这一格」｜「配额 + 身体」，运行图横跨两栏。
+  // 上排「当前这一格」与配额并排，运行图横跨两栏。
   // 三块都是 .columns 的**直接**子元素——中间再套一层 div 的话，
   // 左板就没法跟右栏在同一行里拉伸到齐平。
-  const right = `<div class="rail" id="col-right">${quotaPanel(d, suggestion?.category ?? null)}${bodyPanel(d)}</div>`;
+  const right = `<div class="rail" id="col-right">${quotaPanel(d, suggestion?.category ?? null)}</div>`;
   const wide = `<div class="wide" id="col-wide">${diagramBlock()}</div>`;
   // 有格的时候（在走或被按停）上排两块拉到齐平；「选下一格」这块板内容少，
   // 硬拉就是在它下面挖一个三百来像素的坑，那时按自然高度。
@@ -121,8 +122,8 @@ function activeBoard(d: Day): string {
 
 function headerBar(d: Day): string {
   const net = netSeconds(d);
-  const paused = isPaused(d);
-  const pausedTotal = d.paused_seconds + (paused ? pauseNowSeconds(d) : 0);
+  // 核心心跳已经累计当前暂停段，界面直接使用总账，不能再叠加一次。
+  const pausedTotal = d.paused_seconds;
   const pausedReading = pausedTotal > 0
     ? `<i class="divider"></i><div class="net secondary"><span class="engraved">已暂停</span><div class="figure"><span class="val">${esc(meter(pausedTotal))}</span></div></div>`
     : "";
@@ -143,7 +144,7 @@ function focusPanel(d: Day): string {
   if (d.timer && isPaused(d)) inner = pausedPanel(d, d.timer);
   else if (d.timer) inner = runningPanel(d, d.timer);
   else inner = nextBlockPanel(d);
-  if (d.timer) phase = isPaused(d) ? "rest" : "flow";
+  if (d.timer) phase = isPaused(d) ? "paused" : "flow";
   else if (!suggest(d, prefs(), ui.now)) phase = "done";
   else phase = resting(d) ? "rest" : "ready";
   return `<section class="plate focus${d.timer && !isPaused(d) ? " is-running" : ""}${d.timer && isPaused(d) ? " is-paused" : ""}" id="focus" data-phase="${phase}">${ribbonScene(phase, "focus-ribbon")}<div class="inner">${inner}</div></section>`;
@@ -158,24 +159,7 @@ function pausedPanel(d: Day, t: BlockTimer): string {
     ${hair()}
     <div class="away-body"><div class="state-reading">${bigReading(clock(pauseNowSeconds(d)), "已暂停", { tint: "ink-muted" })}<span class="t-caption">${esc(why)}</span></div></div>
     <div class="spacer"></div>
-    <div class="btn-row">${btn("继续", { kind: "primary", action: "toggle", icon: "play" })}${btn("结束这一格", { kind: "plate", action: "finish" })}</div>`;
-}
-
-/** 计时中的任务清单：可勾、可加，也可以一条都没有。 */
-function taskList(t: BlockTimer): string {
-  const rows = t.tasks
-    .map(
-      (task, i) =>
-        `<button class="task-row${task.done ? " done" : ""}" data-action="toggle-task" data-index="${i}" aria-pressed="${task.done}">
-          <span class="box">${task.done ? icon("check", 11) : ""}</span>
-          <span class="text">${esc(task.text)}</span>
-        </button>`
-    )
-    .join("");
-  const adder = ui.addingTask
-    ? `<div class="task-add"><input class="field xs" data-input="add-task" value="${esc(ui.addTaskDraft)}" placeholder="再加一条，回车确认" />${btn("加上", { kind: "quiet", cls: "body sm", action: "commit-task", disabled: !ui.addTaskDraft.trim() })}</div>`
-    : `<button class="task-more" data-action="add-task">${icon("plus", 11)}<span>加一条</span></button>`;
-  return `<div class="tasks">${rows}${adder}</div>`;
+    <div class="btn-row">${btn("继续", { kind: "primary", action: "toggle", icon: "play" })}${btn("延长…", { kind: "plate", action: "extend", disabled: t.total_seconds >= MAX_BLOCK_MINUTES * 120 })}${btn("结束这一格", { kind: "plate", action: "finish" })}</div>`;
 }
 
 function runningPanel(d: Day, t: BlockTimer): string {
@@ -183,7 +167,7 @@ function runningPanel(d: Day, t: BlockTimer): string {
   const startedAt = t.started_at > 0 ? t.started_at : ui.now - t.elapsed_seconds;
   const buttons = [
     btn("暂停", { kind: "plate", action: "toggle", icon: "pause" }),
-    btn("+10 分钟", { kind: "plate", action: "extend" }),
+    btn("延长…", { kind: "plate", action: "extend", disabled: t.total_seconds >= MAX_BLOCK_MINUTES * 120 }),
     btn("结束这一格", { kind: "primary", action: "finish" }),
     btn("放弃", { kind: "quiet", action: "abandon-block" }),
   ].join("");
@@ -191,7 +175,6 @@ function runningPanel(d: Day, t: BlockTimer): string {
     ${hair()}
     <div class="focus-reading"><div class="bigreading-pad">${bigReading(clock(remaining), "剩余")}</div></div>
     ${runStrip({ elapsed: t.elapsed_seconds, planned: t.total_seconds, running: true, focus: true, startedAt, projectedEnd: ui.now + remaining })}
-    ${taskList(t)}
     <div class="spacer" style="min-height:16px"></div>
     <div class="btn-row">${buttons}</div>`;
 }
@@ -212,21 +195,18 @@ function nextBlockPanel(d: Day): string {
       ${icon(suggestion.pressing ? "triangle-alert" : "signpost", 14)}
       <div class="text"><b>建议 ${esc(nameOf(suggestion.category, d))} · ${suggestion.minutes} 分钟</b><span>${esc(suggestion.reason)}</span></div>
     </div>`;
-  const task = `<div class="task">
-      <textarea class="field task-input" data-input="task" rows="2" aria-label="这一格要做的事（选填，一行一项）" placeholder="写下这一格要做的事，一行一项">${esc(ui.taskDraft)}</textarea>
-    </div>`;
   const controls = `<div class="controls-row">
-      ${labelled("时长", select({ change: "minutes", value: minutes, options: withValue(BLOCK_OPTIONS, minutes).map((n) => ({ value: n, label: `${n} 分` })), width: 84, label: "专注时长" }))}
+      ${labelled("时长", minuteInput({ change: "minutes", value: minutes, min: MIN_BLOCK_MINUTES, max: MAX_BLOCK_MINUTES, label: "专注时长" }))}
       ${labelled("之后休息", select({ change: "break", value: brk, options: withValue(BREAK_OPTIONS, brk).map((n) => ({ value: n, label: n === 0 ? "不休息" : `${n} 分` })), width: 92, label: "休息时长" }))}
       <span class="start">${btn("开始", { kind: "primary", cls: "lg", action: "start-block", title: "⌘↩" })}</span>
     </div>`;
-  return `<div class="block-body">${pausedStrip}<div class="choice-heading">${suggestionLine}</div>${categoryPicker(d, selected)}${task}<div class="spacer"></div>${controls}</div>`;
+  return `<div class="block-body">${pausedStrip}<div class="choice-heading">${suggestionLine}</div>${categoryPicker(d, selected)}<div class="spacer"></div>${controls}</div>`;
 }
 
 function completeBlock(d: Day): string {
   return `<div class="panel-head">${icon("check", 15, "stroke")}<span class="name">今天的安排全部走完了</span></div>
     ${hair()}
-    <div class="complete-body"><div class="state-reading">${bigReading(meter(netSeconds(d)), "已学")}<span class="t-caption">可以收工，也可以接着开格。</span></div></div>
+    <div class="complete-body"><div class="state-reading">${bigReading(meter(netSeconds(d)), "已学")}<span class="t-caption">今天的目标已完成，可以收工归档。</span></div></div>
     <div class="spacer"></div>
     <div class="btn-row">${btn("收工归档…", { kind: "primary", action: "end-day" })}</div>`;
 }
@@ -244,17 +224,6 @@ function quotaPanel(d: Day, marked: string | null): string {
     }
   }
   return plate(`<div class="quotas">${sectionLabel("今日配额", { trailing: selectable ? `<span class="t-note">点击选下一格</span>` : "" })}${lanes}${estimate}</div>`);
-}
-
-function bodyPanel(d: Day): string {
-  const p = prefs();
-  const goal = Math.max(1, p.hydration_goal_cups);
-  const cups = Array.from({ length: Math.max(goal, d.cups) }, (_, i) => `<i class="cup${i < d.cups ? " on" : ""}"></i>`).join("");
-  const hydration = `<div class="hydration">${icon("droplet", 14)}<div class="cups">${cups}</div><span class="count">${d.cups}/${goal}</span>
-      <button class="btn-icon" data-action="water" title="记一杯水" aria-label="记一杯水">${icon("plus", 12)}</button>
-      ${d.cups > 0 ? `<button class="btn-icon" data-action="water-undo" title="撤销一杯" aria-label="撤销一杯水">${icon("minus", 12)}</button>` : ""}
-    </div>`;
-  return plate(`<div class="body-panel">${sectionLabel("喝水")}${hydration}</div>`);
 }
 
 function diagramBlock(): string {

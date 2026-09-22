@@ -80,13 +80,10 @@ function projectEditor(c: CategoryDef): string {
     .join("");
   const otherGlyphs = ICON_NAMED.filter(([name]) => !names.some(([primary]) => primary === name))
     .map(([name, label]) => `<button class="glyph" data-action="set-icon" data-id="${esc(c.id)}" data-icon="${esc(name)}" title="${esc(label)}" aria-label="${esc(label)}" aria-pressed="false">${icon(name, 18)}</button>`).join("");
-  const uniform = prefs().uniform_block_minutes;
   return `<div class="project-editor" id="editor-${esc(c.id)}">
     <div class="identity">
       ${labelled("名称", `<input class="field sm" style="width:150px" data-change="project-name" data-id="${esc(c.id)}" value="${esc(c.name)}" placeholder="项目名称" aria-label="编辑项目名称 ${esc(c.name)}" />`)}
       ${labelled("短名", `<input class="field sm" style="width:84px" data-change="project-short-name" data-id="${esc(c.id)}" value="${esc(c.short_name)}" placeholder="${esc(shortNameFrom(c.name))}" aria-label="${esc(c.name)}在侧栏与菜单栏上的短名，留空自动" />`)}
-      ${labelled("一格", select({ change: "block-length", data: { id: c.id }, value: uniform > 0 ? uniform : c.default_block_minutes, options: withValue(BLOCK_OPTIONS, uniform > 0 ? uniform : c.default_block_minutes).map((n) => ({ value: n, label: `${n} 分` })), width: 84, label: `${c.name}默认一格多长`, disabled: uniform > 0 }))}
-      ${uniform > 0 ? `<span class="t-note">统一块长在「节奏」中调整。</span>` : ""}
     </div>
     <div class="s-field"><span class="engraved">图标</span><div class="glyphs project-glyphs" role="group" aria-label="折页图标">${glyphs}</div><details class="more-icons" id="more-icons-${esc(c.id)}" data-preserve-open><summary>更多图标</summary><div class="glyphs" role="group" aria-label="通用图标">${otherGlyphs}</div></details></div>
     <div class="foot">${btn("删除项目", { kind: "quiet-danger", action: "del-project", data: { id: c.id } })}</div>
@@ -134,9 +131,10 @@ function rhythm(): string {
     ${hair()}
     ${settingRow(
       "统一块长",
-      uniform > 0 ? "所有项目使用同一块长。" : "按项目分别设置。",
-      `${uniform > 0 ? select({ change: "uniform-length", value: uniform, options: withValue(BLOCK_OPTIONS, uniform).map((n) => ({ value: n, label: `${n} 分` })), width: 84, label: "统一块长" }) : ""}${toggle({ change: "uniform-toggle", checked: uniform > 0, label: "统一块长" })}`
+      "设置默认时长；每次开始前仍可单独调整。",
+      `${uniform > 0 ? select({ change: "uniform-length", value: uniform, options: withValue(BLOCK_OPTIONS, uniform).map((n) => ({ value: n, label: `${n} 分` })), width: 104, label: "统一块长" }) : ""}${toggle({ change: "uniform-toggle", checked: uniform > 0, label: "统一块长" })}`
     )}
+    ${uniform === 0 ? p.categories.map((c) => hair() + settingRow(c.name, "默认专注时长", select({ change: "block-length", value: c.default_block_minutes, options: withValue(BLOCK_OPTIONS, c.default_block_minutes).map((n) => ({ value: n, label: `${n} 分` })), width: 104, label: `${c.name}默认专注时长`, data: { id: c.id } }))).join("") : ""}
     ${hair()}
     ${settingRow("暂停提醒", "未开格时定时提醒。", select({ change: "idle", value: idle, options: withValue(IDLE_OPTIONS, idle).map((n) => ({ value: n, label: n === 0 ? "关闭" : `${n} 分` })), width: 104, label: "暂停提醒间隔" }))}
     ${hair()}
@@ -262,12 +260,10 @@ function websiteBlock(): string {
 
 function bodyPanel(): string {
   const p = prefs();
-  const water = `${p.water_reminder_enabled ? stepper({ bind: "water-min", value: p.water_reminder_minutes, label: `${p.water_reminder_minutes} 分`, min: 10, max: 180, step: 5, ariaLabel: "喝水提醒间隔" }) : ""}${toggle({ change: "water-on", checked: p.water_reminder_enabled, label: "喝水提醒" })}`;
+  const water = `${btn("试听", { kind: "quiet", action: "water-sound-test", disabled: !p.sound_enabled || !inTauri, title: inTauri ? "试听喝水提示音" : "请在桌面应用中试听" })}${toggle({ change: "water-on", checked: p.water_reminder_enabled, label: "喝水提醒" })}`;
   const stretch = `${p.stretch_reminder_enabled ? stepper({ bind: "stretch-min", value: p.stretch_reminder_minutes, label: `${p.stretch_reminder_minutes} 分`, min: 15, max: 180, step: 5, ariaLabel: "起身提醒间隔" }) : ""}${toggle({ change: "stretch-on", checked: p.stretch_reminder_enabled, label: "起身护眼提醒" })}`;
   const inner = `<div class="settings-panel">
-    ${settingRow("喝水提醒", "专注时提醒；记水后重计。", water)}
-    ${hair()}
-    ${settingRow("每天喝水目标", "", stepper({ bind: "goal", value: p.hydration_goal_cups, label: `${p.hydration_goal_cups} 杯`, min: 1, max: 20, step: 1, ariaLabel: "每天喝水目标" }))}
+    ${settingRow("喝水提醒", "按本地时钟，整点和半点提醒。暂停、休息时也提醒；休眠错过不补发。使用独立提示音。", water)}
     ${hair()}
     ${settingRow("起身 / 护眼提醒", "", stretch)}
   </div>`;

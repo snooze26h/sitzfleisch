@@ -7,6 +7,7 @@ use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use serde::Serialize;
+use chrono::{Local, TimeZone, Timelike};
 use sitzfleisch_core as core;
 use tauri::menu::{Menu, MenuItem, PredefinedMenuItem};
 use tauri::tray::TrayIconBuilder;
@@ -58,7 +59,7 @@ struct Shared {
 
 #[derive(Debug, PartialEq, Eq)]
 enum TrayMenuState {
-    Day { line: String, paused: Option<bool>, totals: String, cups: i64 },
+    Day { line: String, paused: Option<bool>, totals: String },
     Idle { profile: Option<(String, String)> },
 }
 
@@ -102,7 +103,6 @@ fn tray_shape(state: &core::State) -> TrayMenuState {
             line: tray_menu_line(state, day),
             paused: day.timer.as_ref().map(|_| day.is_paused()),
             totals: format!("已学 {}", core::duration_text(day.net_seconds())),
-            cups: day.cups,
         },
         None => TrayMenuState::Idle {
             profile: default_profile(state).map(|p| (p.id.clone(), p.name.clone())),
@@ -120,11 +120,11 @@ fn build_tray_menu(app: &AppHandle, state: &TrayMenuState) -> tauri::Result<Menu
     items.push(Box::new(PredefinedMenuItem::separator(app)?));
 
     match state {
-        TrayMenuState::Day { line, paused, totals, cups } => {
+        TrayMenuState::Day { line, paused, totals } => {
             items.push(Box::new(text(app, "info", line)?));
             if let Some(paused) = paused {
                 items.push(Box::new(action(app, "toggle", if *paused { "继续" } else { "暂停" })?));
-                items.push(Box::new(action(app, "extend", "+10 分钟")?));
+                items.push(Box::new(action(app, "extend", "延长时间…")?));
                 items.push(Box::new(action(app, "finish", "结束这一格")?));
             } else {
                 items.push(Box::new(action(app, "show", "去开一格")?));
@@ -132,7 +132,6 @@ fn build_tray_menu(app: &AppHandle, state: &TrayMenuState) -> tauri::Result<Menu
             items.push(Box::new(PredefinedMenuItem::separator(app)?));
             // 已学时间只到分钟，一天里最多变几百次，不会打断菜单操作。
             items.push(Box::new(text(app, "totals", totals)?));
-            items.push(Box::new(action(app, "water", &format!("记一杯水（{cups}）"))?));
         }
         TrayMenuState::Idle { profile } => {
             items.push(Box::new(text(app, "info", "今天还没开始")?));
@@ -181,13 +180,11 @@ fn handle_tray_menu(app: &AppHandle, id: &str) {
             let _ = mutate(app, |s| s.toggle_pause(now_unix()));
         }
         "extend" => {
-            let _ = mutate(app, |s| s.extend_block(10));
+            show_main_window(app);
+            let _ = app.emit("timer://extend", ());
         }
         "finish" => {
             let _ = mutate(app, |s| s.finish_block(now_unix()));
-        }
-        "water" => {
-            let _ = mutate(app, |s| s.drink_water());
         }
         "quit" => quit_saving(app),
         other => {
@@ -517,16 +514,44 @@ fn broadcast(app: &AppHandle) {
     });
 }
 
-fn take_due_reminder_notifications(state: &mut core::State) -> Vec<(&'static str, String)> {
-    let (water_due, stretch_due, idle_due) = state.take_due_reminders();
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum AlertSound {
+    Standard,
+    Water,
+}
+
+impl AlertSound {
+    #[cfg(target_os = "macos")]
+    fn file(self) -> &'static str {
+        match self {
+            Self::Standard => "/System/Library/Sounds/Glass.aiff",
+            Self::Water => "/System/Library/Sounds/Pop.aiff",
+        }
+    }
+
+    #[cfg(target_os = "windows")]
+    fn command(self) -> &'static str {
+        match self {
+            Self::Standard => "[console]::beep(880,180); [console]::beep(1320,180)",
+            Self::Water => "[console]::beep(587,120); [console]::beep(784,120)",
+        }
+    }
+}
+
+fn take_due_reminder_notifications(state: &mut core::State) -> Vec<(&'static str, String, AlertSound)> {
+    let local = Local.timestamp_opt(state.last_tick, 0).single();
+    let local_seconds = local.map(|time| time.minute() * 60 + time.second()).unwrap_or(3600);
+    let water_due = state.take_due_water_reminder(local_seconds);
+    let (_, stretch_due, idle_due) = state.take_due_reminders();
     let mut notifications = Vec::new();
     if water_due {
-        notifications.push(("喝点水吧", "忙了一阵，喝几口水再继续。".into()));
+        notifications.push(("喝点水吧", "忙了一阵，喝几口水再继续。".into(), AlertSound::Water));
     }
     if stretch_due {
         notifications.push((
             "起来活动一下",
             format!("已经连续在座 {} 分钟。", state.preferences.stretch_reminder_minutes),
+            AlertSound::Standard,
         ));
     }
     if idle_due {
@@ -534,7 +559,7 @@ fn take_due_reminder_notifications(state: &mut core::State) -> Vec<(&'static str
         let paused_minutes = state.day.as_ref()
             .map(|day| day.current_pause_seconds(state.last_tick) / 60)
             .unwrap_or(0);
-        notifications.push(("还没开格", format!("已经暂停 {paused_minutes} 分钟了。")));
+        notifications.push(("还没开格", format!("已经暂停 {paused_minutes} 分钟了。"), AlertSound::Standard));
     }
     notifications
 }
@@ -542,7 +567,7 @@ fn take_due_reminder_notifications(state: &mut core::State) -> Vec<(&'static str
 /// 系统横幅显不显示由每个 App 的通知设置说了算，App 自己既读不到也改不了。
 /// 所以提醒一次走四条路，任何一条都能让人察觉：
 /// 系统通知 · 界面提示条 · 一声响 · Dock 图标跳一下。
-fn notify(app: &AppHandle, title: &str, body: &str) {
+fn notify(app: &AppHandle, title: &str, body: &str, sound: AlertSound) {
     let delivered = app.notification().builder().title(title).body(body).show().is_ok();
     let _ = app.emit("reminder://show", serde_json::json!({
         "title": title,
@@ -551,7 +576,7 @@ fn notify(app: &AppHandle, title: &str, body: &str) {
     }));
     let sound_on = app.state::<Shared>().state.lock().unwrap().preferences.sound_enabled;
     if sound_on {
-        play_alert_sound();
+        play_alert_sound(sound);
     }
     // 人多半在别的 App 里，Dock 上跳一下比什么都直接。
     if let Some(window) = app.get_webview_window("main") {
@@ -560,14 +585,14 @@ fn notify(app: &AppHandle, title: &str, body: &str) {
 }
 
 /// 响一声。走系统自带的声音，不需要任何权限，窗口关着也听得见。
-fn play_alert_sound() {
+fn play_alert_sound(sound: AlertSound) {
     #[cfg(target_os = "macos")]
     let _ = Command::new("/usr/bin/afplay")
-        .arg("/System/Library/Sounds/Glass.aiff")
+        .arg(sound.file())
         .spawn();
     #[cfg(target_os = "windows")]
     let _ = Command::new("powershell")
-        .args(["-NoProfile", "-Command", "[console]::beep(880,180); [console]::beep(1320,180)"])
+        .args(["-NoProfile", "-Command", sound.command()])
         .spawn();
 }
 
@@ -642,8 +667,36 @@ fn install_script(staged: &Path) -> Result<String, String> {
     ))
 }
 
+/// 免密助手的固定位置。装上它，开工与收工就不再弹授权框；没装则一切照旧。
+/// 内容走标准输入而不是参数，助手自己拒收未知参数，安装脚本再把 sudoers
+/// 规则收紧到「不带参数」——三道都指向同一件事：这条免密路径只能干这一件事。
+#[cfg(target_os = "macos")]
+const HOSTS_HELPER: &str = "/usr/local/libexec/sitzfleisch-hosts-install";
+
+/// 先试免密助手。`sudo -n` 在没有免密规则时**直接失败而不弹任何窗**，
+/// 所以这条路要么静默成功，要么无声让开，不会在授权框之前多出一次打扰。
+/// 任何失败都返回 None：调用方回到 osascript 授权，行为与没装助手时完全一致。
+#[cfg(target_os = "macos")]
+fn helper_install(staged: &Path) -> Option<()> {
+    if !Path::new(HOSTS_HELPER).exists() {
+        return None;
+    }
+    let file = fs::File::open(staged).ok()?;
+    let status = Command::new("/usr/bin/sudo")
+        .args(["-n", HOSTS_HELPER])
+        .stdin(std::process::Stdio::from(file))
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .ok()?;
+    status.success().then_some(())
+}
+
 #[cfg(target_os = "macos")]
 fn privileged_install(staged: &Path) -> Result<(), String> {
+    if helper_install(staged).is_some() {
+        return Ok(());
+    }
     let script = install_script(staged)?;
     let output = Command::new("osascript")
         .arg("-e")
@@ -725,8 +778,11 @@ fn spawn_apply_blocking(app: &AppHandle) {
                 }
                 let staged = data_dir.join(format!("hosts.staged.{}", std::process::id()));
                 fs::write(&staged, &desired).map_err(|e| format!("暂存文件写入失败：{e}"))?;
-                privileged_install(&staged)?;
+                // 取消授权也要清干净：早期版本在这里用 `?` 直接返回，取消一次就留下一个
+                // hosts.staged.<pid>，攒了一堆在数据目录里。先收尾，再决定成败。
+                let installed = privileged_install(&staged);
                 let _ = fs::remove_file(&staged);
+                installed?;
                 let after =
                     fs::read_to_string(&path).map_err(|e| format!("回读系统 hosts 失败：{e}"))?;
                 if after != desired {
@@ -826,16 +882,6 @@ fn start_block(
     })
 }
 
-#[tauri::command]
-fn toggle_task(index: usize, app: AppHandle) -> Result<Snapshot, String> {
-    mutate(&app, |s| s.toggle_task(index))
-}
-
-#[tauri::command]
-fn add_task(text: String, app: AppHandle) -> Result<Snapshot, String> {
-    mutate(&app, |s| s.add_task(&text))
-}
-
 /// 换一份计划：进度与台账保留，只按新计划重铺配额。界面上没有入口，留给数据里存着多份的老档。
 #[tauri::command]
 fn switch_profile(profile_id: String, app: AppHandle) -> Result<Snapshot, String> {
@@ -848,13 +894,23 @@ fn toggle_pause(app: AppHandle) -> Result<Snapshot, String> {
 }
 
 #[tauri::command]
-fn extend_block(minutes: i64, app: AppHandle) -> Result<Snapshot, String> {
-    mutate(&app, |s| s.extend_block(minutes))
+fn extend_block(minutes: i64, timer_started_at: Option<i64>, app: AppHandle) -> Result<Snapshot, String> {
+    mutate(&app, |s| {
+        if timer_started_at.is_some_and(|expected| s.day.as_ref().and_then(|d| d.timer.as_ref()).is_none_or(|t| t.started_at != expected)) {
+            return Err("原来的计时已结束，请重新选择延长时间");
+        }
+        s.extend_block(minutes)
+    })
 }
 
 #[tauri::command]
 fn finish_block(app: AppHandle) -> Result<Snapshot, String> {
     mutate(&app, |s| s.finish_block(now_unix()))
+}
+
+#[tauri::command]
+fn set_completion_note(day_started_at: i64, entry_index: usize, ended_at: i64, note: String, app: AppHandle) -> Result<Snapshot, String> {
+    mutate(&app, |s| s.set_completion_note(day_started_at, entry_index, ended_at, &note))
 }
 
 #[tauri::command]
@@ -865,16 +921,6 @@ fn end_break(app: AppHandle) -> Result<Snapshot, String> {
 #[tauri::command]
 fn abandon_block(app: AppHandle) -> Result<Snapshot, String> {
     mutate(&app, |s| s.abandon_block(now_unix()))
-}
-
-#[tauri::command]
-fn drink_water(app: AppHandle) -> Result<Snapshot, String> {
-    mutate(&app, |s| s.drink_water())
-}
-
-#[tauri::command]
-fn undo_water(app: AppHandle) -> Result<Snapshot, String> {
-    mutate(&app, |s| s.undo_water())
 }
 
 #[tauri::command]
@@ -1002,7 +1048,14 @@ fn request_notification_permission(app: AppHandle) -> String {
 /// 设置页的「试一条」：立刻按完整链路发一条，看得见就说明这条路通。
 #[tauri::command]
 fn test_notification(app: AppHandle) {
-    notify(&app, "坐功 · 试一条", "看到这条横幅，说明系统通知这条路是通的。");
+    notify(&app, "坐功 · 试一条", "看到这条横幅，说明系统通知这条路是通的。", AlertSound::Standard);
+}
+
+#[tauri::command]
+fn test_water_sound(app: AppHandle) {
+    if app.state::<Shared>().state.lock().unwrap().preferences.sound_enabled {
+        play_alert_sound(AlertSound::Water);
+    }
 }
 
 #[tauri::command]
@@ -1393,13 +1446,13 @@ pub fn run() {
                         (focus_done, break_done, reminders)
                     };
                     if focus_done {
-                        notify(&handle, "这一格走完了", "已经记进今天的进度。");
+                        notify(&handle, "这一格走完了", "时间已计入。打开坐功，记录这段时间完成了什么。", AlertSound::Standard);
                     }
                     if break_done {
-                        notify(&handle, "休息结束", "开下一格吧。");
+                        notify(&handle, "休息结束", "开下一格吧。", AlertSound::Standard);
                     }
-                    for (title, body) in reminders {
-                        notify(&handle, title, &body);
+                    for (title, body, sound) in reminders {
+                        notify(&handle, title, &body, sound);
                     }
                     broadcast(&handle);
                 }
@@ -1449,15 +1502,12 @@ pub fn run() {
             start_day,
             switch_profile,
             start_block,
-            toggle_task,
-            add_task,
             toggle_pause,
             extend_block,
             finish_block,
+            set_completion_note,
             end_break,
             abandon_block,
-            drink_water,
-            undo_water,
             end_day,
             abandon_day,
             update_preferences,
@@ -1473,6 +1523,7 @@ pub fn run() {
             notification_status,
             request_notification_permission,
             test_notification,
+            test_water_sound,
             open_notification_settings,
             reveal_state_file,
             autostart_status,
@@ -1569,7 +1620,7 @@ mod tests {
             advance_awake_seconds(&mut state, 600);
             assert_eq!(
                 take_due_reminder_notifications(&mut state),
-                vec![("还没开格", format!("已经暂停 {expected_minutes} 分钟了。"))],
+                vec![("还没开格", format!("已经暂停 {expected_minutes} 分钟了。"), AlertSound::Standard)],
             );
             assert_eq!(state.day.as_ref().unwrap().paused_without_block, 0);
             assert!(take_due_reminder_notifications(&mut state).is_empty(), "同一次到期只消费一次");
@@ -1591,7 +1642,7 @@ mod tests {
         advance_awake_seconds(&mut state, 300);
         assert_eq!(
             take_due_reminder_notifications(&mut state),
-            vec![("还没开格", "已经暂停 10 分钟了。".into())],
+            vec![("还没开格", "已经暂停 10 分钟了。".into(), AlertSound::Standard)],
             "新暂停包含刚结束的 5 分钟休息，不累计上一段暂停",
         );
         assert_eq!(state.day.as_ref().unwrap().paused_seconds, 2_400);
@@ -1606,7 +1657,7 @@ mod tests {
         advance_awake_seconds(&mut state, 300);
         assert_eq!(
             take_due_reminder_notifications(&mut state),
-            vec![("还没开格", "已经暂停 20 分钟了。".into())],
+            vec![("还没开格", "已经暂停 20 分钟了。".into(), AlertSound::Standard)],
         );
 
         state = core::from_json(&core::to_json(&state)).unwrap();
@@ -1615,7 +1666,7 @@ mod tests {
         advance_awake_seconds(&mut state, 600);
         assert_eq!(
             take_due_reminder_notifications(&mut state),
-            vec![("还没开格", "已经暂停 60 分钟了。".into())],
+            vec![("还没开格", "已经暂停 60 分钟了。".into(), AlertSound::Standard)],
             "保存重启后仍从这一段暂停的原始起点累计",
         );
         assert_eq!(state.day.as_ref().unwrap().suspend_seconds, 2_400);
@@ -1636,26 +1687,18 @@ mod tests {
     }
 
     #[test]
-    fn water_notifications_use_the_new_copy_when_the_existing_timer_is_due() {
-        let mut state = state_with_day();
+    fn water_notifications_use_local_half_hours_and_their_own_sound() {
+        let mut state = core::State::new(1_000);
         state.preferences.water_reminder_enabled = true;
-        state.preferences.water_reminder_minutes = 1;
-        state.preferences.stretch_reminder_enabled = true;
-        state.preferences.stretch_reminder_minutes = 1;
-        advance_awake_seconds(&mut state, 60);
-        assert!(take_due_reminder_notifications(&mut state).is_empty(), "没有格时不催喝水或活动");
-
-        state.start_block("main", 25, vec![]).unwrap();
-        advance_awake_seconds(&mut state, 59);
+        let now = Local::now();
+        let boundary = now.with_minute(30).unwrap().with_second(0).unwrap().timestamp();
+        state.last_tick = boundary - 1;
+        state.water_clock_checked_at = Some(boundary - 1);
         assert!(take_due_reminder_notifications(&mut state).is_empty());
-        advance_awake_seconds(&mut state, 1);
-        assert_eq!(
-            take_due_reminder_notifications(&mut state),
-            vec![
-                ("喝点水吧", "忙了一阵，喝几口水再继续。".into()),
-                ("起来活动一下", "已经连续在座 1 分钟。".into()),
-            ],
-        );
+        state.tick(boundary);
+        assert_eq!(take_due_reminder_notifications(&mut state), vec![
+            ("喝点水吧", "忙了一阵，喝几口水再继续。".into(), AlertSound::Water),
+        ]);
         assert!(take_due_reminder_notifications(&mut state).is_empty());
     }
 
@@ -2074,8 +2117,8 @@ mod tests {
         assert_ne!(tray_shape(&state), before, "暂停这种真的改了菜单的事必须进 shape");
 
         state.toggle_pause(1_140).unwrap();
-        state.drink_water().unwrap();
-        assert_ne!(tray_shape(&state), before, "记一杯水会改菜单里的数字");
+        state.day.as_mut().unwrap().cups = 5;
+        assert_eq!(tray_shape(&state), before, "旧杯数不再参与菜单重建");
 
         assert!(matches!(tray_shape(&core::State::new(1_000)), TrayMenuState::Idle { .. }));
     }
@@ -2274,6 +2317,50 @@ mod tests {
             assert!(output.status.success(), "「{raw}」转义后 AppleScript 解析失败");
             assert_eq!(String::from_utf8_lossy(&output.stdout).trim_end(), raw, "「{raw}」转义后必须原样还原");
         }
+    }
+
+    /// 免密助手的内容校验是这套方案唯一的防线：放行之后，本机上以该用户身份运行的
+    /// 任何程序都能免密调用它。所以「只接受 hosts 记录」必须在 CI 里真的跑一遍。
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn hosts_helper_accepts_real_hosts_files_and_rejects_anything_else() {
+        use std::io::Write;
+        use std::process::Stdio;
+
+        let script = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../scripts/hosts-helper.sh");
+        let check = |content: &str| {
+            let mut child = Command::new("/bin/sh")
+                .arg(&script)
+                .arg("--check")
+                .stdin(Stdio::piped())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .spawn()
+                .expect("助手脚本应该跑得起来");
+            // 超限时助手会提前停止读取，写端收到 BrokenPipe 是正常的拒绝路径。
+            if let Err(error) = child.stdin.take().unwrap().write_all(content.as_bytes()) {
+                assert_eq!(error.kind(), std::io::ErrorKind::BrokenPipe);
+            }
+            child.wait().unwrap().success()
+        };
+
+        // 真实的 /etc/hosts 长这样：制表符、多空格、IPv6、注释、以及托管段。
+        let real = "##\n# Host Database\n##\n127.0.0.1\tlocalhost\n255.255.255.255\tbroadcasthost\n::1             localhost\n\n";
+        let managed = core::render_hosts(real, &["live.bilibili.com".into()], true);
+        assert!(check(real), "系统原样的 hosts 必须放行");
+        assert!(check(&managed), "应用自己渲染出来的 hosts 必须放行");
+        assert!(check(&core::render_hosts(&managed, &[], false)), "解除屏蔽后的内容必须放行");
+
+        assert!(!check(""), "空内容要拒绝");
+        assert!(!check("127.0.0.1 localhost\nrm -rf /\n"), "夹带的命令行要拒绝");
+        assert!(!check("127.0.0.1\n"), "只有地址没有主机名要拒绝");
+        assert!(check("127.0.0.1 a"), "末尾没有换行的合法记录要放行");
+        assert!(check("127.0.0.1 localhost # 行尾注释\n::ffff:127.0.0.1 local\nfe80::1%lo0 local\n"));
+        assert!(!check("999.0.0.1 local\n"), "不能只凭地址字符形状放行");
+        assert!(!check("1:2 local\n"));
+        assert!(!check("127.0.0.1 local;command\n"));
+        assert!(!check("127.0.0.1 a\nrm -rf /"), "末尾没有换行也要逐行校验");
+        assert!(!check(&format!("127.0.0.1 a\n{}", "# x\n".repeat(30_000))), "超过大小上限要拒绝");
     }
 
     #[test]

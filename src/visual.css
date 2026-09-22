@@ -39,7 +39,7 @@
 .page-heading p { color: var(--ink-muted); line-height: 1.7; }
 .settings-heading { position: relative; isolation: isolate; overflow: hidden; background: var(--field); }
 .settings-heading .heading-copy { position: relative; z-index: 1; }
-.settings-heading .settings-ribbon { position: absolute; z-index: 0; width: 286px; height: 174px; right: -8px; top: -36px; opacity: .52; -webkit-mask-image: linear-gradient(90deg, transparent, #000 35%, #000 88%, transparent); mask-image: linear-gradient(90deg, transparent, #000 35%, #000 88%, transparent); }
+.settings-heading .settings-ribbon { position: absolute; z-index: 0; width: 286px; height: 174px; right: -8px; top: -36px; opacity: .8; -webkit-mask-image: linear-gradient(90deg, transparent, #000 35%, #000 88%, transparent); mask-image: linear-gradient(90deg, transparent, #000 35%, #000 88%, transparent); }
 .btn { min-height: 36px; border-radius: 7px; }
 .btn-primary { padding: 10px 18px; }
 .btn-plate { padding: 9px 14px; }
@@ -57,10 +57,11 @@
 .ribbon-frame { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: contain; opacity: 0; transform: translateX(12px) scale(.94); transition: opacity .45s ease-out, transform .55s cubic-bezier(.16, 1, .3, 1); }
 .ribbon-scene[data-phase="ready"] .ribbon-ready,
 .ribbon-scene[data-phase="flow"] .ribbon-flow,
+.ribbon-scene[data-phase="paused"] .ribbon-paused,
 .ribbon-scene[data-phase="rest"] .ribbon-rest,
 .ribbon-scene[data-phase="done"] .ribbon-rest { opacity: 1; transform: none; }
 .ribbon-scene[data-phase="done"] .ribbon-rest { transform: scale(.88); }
-.start-ribbon { position: absolute; z-index: 0; width: 540px; height: 300px; right: -32px; top: -60px; opacity: .55; -webkit-mask-image: linear-gradient(90deg, transparent, #000 35%, #000 85%, transparent); mask-image: linear-gradient(90deg, transparent, #000 35%, #000 85%, transparent); }
+.start-ribbon { position: absolute; z-index: 0; width: 540px; height: 300px; right: -32px; top: -60px; opacity: .8; -webkit-mask-image: linear-gradient(90deg, transparent, #000 35%, #000 85%, transparent); mask-image: linear-gradient(90deg, transparent, #000 35%, #000 85%, transparent); }
 
 .plan { position: relative; margin-top: 0; border: 1px solid var(--hair); border-radius: 14px; padding: 8px 28px 26px; overflow: hidden; background: #171715; color-scheme: dark; }
 .focus .inner { position: relative; z-index: 1; }
@@ -86,7 +87,7 @@
 .net.secondary .figure .val { font-size: 28px; color: var(--ink-muted); }
 .readings .divider { height: 42px; margin: 0 4px; }
 .net .figure .of { font-size: 15px; }
-.net .engraved { font-size: 12px; }
+.net .engraved { font-size: 14px; }
 .columns { grid-template-columns: minmax(0, 1fr) 286px; gap: 22px; }
 .columns > .rail { gap: 18px; }
 .focus { padding: 26px 28px; border-radius: 14px; overflow: hidden; min-height: 290px; background: #171715; isolation: isolate; color-scheme: dark; }
@@ -94,8 +95,10 @@
 .focus::after { inset: 0 0 auto auto; width: 30px; height: 30px; background: var(--brand-accent); border: 0; border-radius: 0; clip-path: polygon(0 0, 100% 0, 100% 100%); mask-image: none; -webkit-mask-image: none; transform: scale(.633333); transform-origin: top right; transition: transform .25s ease-out; }
 .focus[data-phase="flow"]::after { transform: scale(1); }
 .focus-ribbon { position: absolute; z-index: 0; right: -30px; top: 40px; width: 72%; height: 255px; opacity: .65; -webkit-mask-image: linear-gradient(90deg, transparent, #000 35%, #000 75%, transparent); mask-image: linear-gradient(90deg, transparent, #000 35%, #000 75%, transparent); }
-.focus[data-phase="flow"] .focus-ribbon { width: 50%; right: -34px; top: 30px; opacity: .5; }
-.focus[data-phase="rest"] .focus-ribbon, .focus[data-phase="done"] .focus-ribbon { width: 42%; right: 0; top: 44px; opacity: .55; }
+.focus[data-phase="flow"] .focus-ribbon { width: 50%; right: -34px; top: 30px; opacity: .75; }
+.focus[data-phase="rest"] .focus-ribbon, .focus[data-phase="done"] .focus-ribbon { width: 42%; right: 0; top: 44px; opacity: .8; }
+/* 纸鹤只作暂停时的轻量点缀，保留完整轮廓并给读数留出空间。 */
+.focus[data-phase="paused"] .focus-ribbon { width: 36%; max-width: 280px; height: 210px; right: 4px; top: 68px; opacity: .9; -webkit-mask-image: none; mask-image: none; }
 .focus .btn-primary { background: #ae422a; color: #fff5e7; }
 .focus .btn-plate { background: #292823; box-shadow: inset 0 0 0 1px #8a8172; }
 .focus .btn-plate:hover { background: #37342d; }
@@ -109,23 +112,14 @@
 .focus .bigreading-pad, .focus.is-running .bigreading-pad { padding: 0; min-width: 0; }
 .focus .big-reading { gap: 10px; flex-wrap: wrap; }
 .focus .big-reading .val, .focus.is-running .big-reading .val { font-size: 70px; font-weight: 450; letter-spacing: -3px; }
-.focus .big-reading .unit { font-size: 13px; font-weight: 500; letter-spacing: .2px; }
+.focus .big-reading .unit { font-size: 15px; font-weight: 500; letter-spacing: .2px; }
 .focus .strip { height: 23px; background: transparent; box-shadow: none; border-radius: 0; border-bottom: 1px solid #756e61; }
 .focus .strip::before { content: ""; position: absolute; left: 0; right: 0; bottom: 4px; height: 1px; background: var(--hair); }
 .focus .strip .fill { top: auto; bottom: 3px; height: 3px; background: var(--stroke); border-radius: 0; }
 .focus .strip .tick.passed { background: var(--stroke) !important; }
 .focus .strip .tick.ahead { background: #8b8171 !important; }
 .focus .strip .flag { width: 6px; top: 2px; bottom: -2px; background: var(--brand-accent); transform: skewY(-30deg); }
-.focus .strip-foot { font-size: 11px; padding-top: 9px; color: var(--ink-muted); }
-.focus .tasks { padding-top: 24px; gap: 3px; }
-.focus .task-row { padding: 7px 8px; min-height: 36px; }
-.focus .task-row:hover { background: rgba(231, 223, 208, .05); }
-.focus .task-row .box { position: relative; background: transparent; border: 1px solid #938775; box-shadow: none; transition: background .18s ease-out, transform .18s ease-out; }
-.focus .task-row .box::after { content: ""; position: absolute; right: -1px; top: -1px; width: 5px; height: 5px; background: var(--brand-accent); clip-path: polygon(0 0, 100% 0, 100% 100%); opacity: 0; }
-.focus .task-row.done .box { background: var(--stroke); border-color: var(--stroke); color: var(--bed); animation: fold-check .35s ease-out; }
-.focus .task-row.done .box::after { opacity: 1; }
-@keyframes fold-check { from { transform: rotate(-12deg) scale(.85); } to { transform: none; } }
-.focus .task-row .text { font-size: 14px; }
+.focus .strip-foot { font-size: 14px; padding-top: 9px; color: var(--ink-muted); }
 .focus .btn-row { padding-top: 12px; gap: 10px; flex-wrap: wrap; }
 .focus .btn-row .btn-primary { margin-left: auto; }
 .choice-heading { display: flex; align-items: center; min-height: 108px; padding: 6px 0; }
@@ -139,17 +133,15 @@
 .focus .cell:active { transform: translateY(0); }
 .focus .cell.on { background: var(--stroke); color: var(--bed); --brand-accent: #a4462d; box-shadow: none; }
 .focus .cell.on::after { opacity: 1; transform: none; }
-.focus .suggestion .text b { font-size: 15px; line-height: 1.5; }
-.focus .suggestion .text span { font-size: 13px; line-height: 1.7; }
+.focus .suggestion .text b { font-size: 16px; line-height: 1.5; }
+.focus .suggestion .text span { font-size: 15px; line-height: 1.7; }
 .focus .pause-strip { color: var(--ink-muted); }
-.focus .task-input { min-height: 86px; }
 .focus .controls-row { border-top: 1px solid var(--hair); padding-top: 18px; }
 .focus .select { background-color: #262520; color: var(--ink-high); box-shadow: inset 0 0 0 1px #8a8172; }
 .focus .select option { background: #262520; color: var(--ink-high); }
 .quotas { gap: 9px; }
 .quotas .lane { padding: 9px 0; }
 .quotas .lane .head { flex-wrap: wrap; }
-.body-panel { gap: 18px; }
 .wide .plate { background: transparent; padding: 20px 0 4px; }
 .wide .plate::before, .wide .plate::after { display: none; }
 .log { padding: 2px; }
@@ -181,7 +173,7 @@
 .more-icons .glyphs { padding-top: 12px; }
 .setting-row { padding: 20px 0; }
 .setting-row .titles b { font-size: 15px; }
-.setting-row .titles span { font-size: 13px; line-height: 1.7; }
+.setting-row .titles span { font-size: 15px; line-height: 1.7; }
 .blocking-group-heading > b { font-size: 15px; }
 .blocking-rule { border-radius: 8px; padding: 14px; }
 .dialog { border-radius: 14px; background: #28261f; }
@@ -213,7 +205,7 @@
 @media (max-width: 960px) {
   .columns { grid-template-columns: minmax(0, 1fr); }
   .columns > .focus, .columns > .rail, .columns > .wide { grid-column: 1; grid-row: auto; }
-  .columns > .rail { display: grid; grid-template-columns: minmax(0, 1fr) minmax(190px, .8fr); }
+  .columns > .rail { display: flex; }
   .start-ribbon { opacity: .4; right: -64px; }
   .start-hero .t-masthead { font-size: 30px; }
   .history-empty { flex-direction: column; text-align: center; gap: 20px; }

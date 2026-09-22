@@ -1,6 +1,7 @@
 // 覆盖层：提示条、确认对话框、两步确认的网站解除单。
 
-import { esc } from "../format";
+import { duration, esc } from "../format";
+import { MAX_COMPLETION_NOTE_CHARS } from "../types";
 import { icon } from "../icons";
 import { btn } from "../components";
 import { day, dialogIsBusy, prefs, topOverlay, ui } from "../state";
@@ -19,6 +20,8 @@ export function overlays(): string {
       return dialogView();
     case "removal":
       return removalSheet();
+    case "completion":
+      return completionSheet();
     default:
       return "";
   }
@@ -31,11 +34,30 @@ function dialogView(): string {
   const confirm = btn(d.confirmLabel, { kind: d.destructive ? "danger" : "primary", action: "dialog-confirm", disabled: busy });
   const cancel = btn(d.cancelLabel, { kind: d.destructive ? "primary" : "plate", action: "dialog-cancel", disabled: busy });
   const alt = d.alt ? btn(d.alt.label, { kind: "danger", action: "dialog-alt", disabled: busy }) : "";
-  return `<div class="backdrop" id="dialog" data-action="dialog-cancel"><div class="dialog" role="dialog" aria-modal="true" data-stop>
-      <h2>${esc(d.title)}</h2>
-      <p>${esc(d.message)}</p>
+  const extension = d.extension ? `<div class="extension-editor">
+    <label for="extension-minutes">增加分钟数</label>
+    <div class="extension-value"><input id="extension-minutes" class="field" type="number" inputmode="numeric" min="1" max="${d.extension.max}" step="1" value="${esc(d.extension.minutes)}" data-input="extend" ${busy ? "disabled" : ""} /><span>分钟</span></div>
+    <div class="extension-presets" aria-label="常用延长时间">${[5, 10, 15, 30].filter((n) => n <= d.extension!.max).map((n) => btn(`${n} 分钟`, { action: "extend-preset", kind: "plate", data: { minutes: n }, disabled: busy })).join("")}</div>
+  </div>` : "";
+  return `<div class="backdrop" id="dialog" data-action="dialog-cancel"><div class="dialog" role="dialog" aria-modal="true" aria-labelledby="dialog-title" aria-describedby="dialog-detail" data-stop>
+      <h2 id="dialog-title">${esc(d.title)}</h2>
+      <p id="dialog-detail">${esc(d.message)}</p>
+      ${extension}
       <div class="btns"><span class="spacer"></span>${cancel}${alt}${confirm}</div>
     </div></div>`;
+}
+
+function completionSheet(): string {
+  const entry = ui.completion!;
+  return `<div class="backdrop" id="completion"><div class="dialog completion-dialog" role="dialog" aria-modal="true" aria-labelledby="completion-title" aria-describedby="completion-detail" data-stop>
+    <h2 id="completion-title">这段时间完成了什么？</h2>
+    <p class="completion-meta">${esc(entry.title)} · 已专注 ${esc(duration(entry.seconds))}</p>
+    <p id="completion-detail">记下实际完成的内容，之后也可以在记录中补充。</p>
+    <label class="sr-only" for="completion-note">实际完成的内容</label>
+    <textarea id="completion-note" class="field" data-input="completion" rows="5" maxlength="${MAX_COMPLETION_NOTE_CHARS}" placeholder="例如：读完论文的方法部分，跑完两组对照实验。" ${entry.busy ? "disabled" : ""}>${esc(entry.draft)}</textarea>
+    <div class="completion-foot"><span class="completion-error" role="status">${esc(entry.error)}</span><span>${entry.draft.length} / ${MAX_COMPLETION_NOTE_CHARS}</span></div>
+    <div class="btns"><span class="spacer"></span>${btn(entry.automatic ? "先跳过" : "取消", { kind: "plate", action: "completion-cancel", disabled: entry.busy })}${btn(entry.busy ? "正在保存…" : "保存记录", { kind: "primary", action: "completion-save", disabled: entry.busy })}</div>
+  </div></div>`;
 }
 
 function removalSheet(): string {
@@ -54,15 +76,15 @@ function removalSheet(): string {
   else warning = `确认后，${r.value} 将从整站设置移除，下次学习日不再应用这条规则；其他精确网址规则仍然保留。${guardrail}`;
   let body: string;
   if (r.step === 1) {
-    body = `<h2>先停一下</h2>
+    body = `<h2 id="removal-title">先停一下</h2>
       <p>${esc(warning)}</p>
       <div class="btns">${btn("保留屏蔽", { kind: "primary", action: "removal-cancel" })}<span class="spacer"></span>${btn("我仍要解除", { kind: "danger", action: "removal-next" })}</div>`;
   } else {
     const matches = r.typed.trim() === r.value;
     const label = r.kind === "url" ? "完整网址" : "完整域名";
-    body = `<h2>手动确认${r.kind === "url" ? "网址" : "域名"}</h2>
+    body = `<h2 id="removal-title">手动确认${r.kind === "url" ? "网址" : "域名"}</h2>
       <div class="confirm-field"><label for="removal-input">输入${label} <span class="rule-value mono sel">${esc(r.value)}</span></label><input id="removal-input" class="field mono md" data-input="removal" value="${esc(r.typed)}" aria-label="输入${label}以确认解除" placeholder="${esc(r.value)}" autocomplete="off" spellcheck="false" ${busy ? "disabled" : ""} /></div>
       <div class="btns">${btn("返回", { kind: "plate", action: "removal-back", disabled: busy })}${btn("取消", { kind: "quiet", action: "removal-cancel", disabled: busy })}<span class="spacer"></span>${btn(busy ? "正在解除…" : "确认解除", { kind: "danger", action: "removal-confirm", disabled: !matches || busy })}</div>`;
   }
-  return `<div class="backdrop" id="removal"><div class="dialog sheet" role="dialog" aria-modal="true" data-stop>${body}</div></div>`;
+  return `<div class="backdrop" id="removal"><div class="dialog sheet" role="dialog" aria-modal="true" aria-labelledby="removal-title" data-stop>${body}</div></div>`;
 }

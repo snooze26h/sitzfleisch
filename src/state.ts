@@ -1,6 +1,6 @@
 // 界面自己的状态（不落盘）：当前页、草稿、展开项、菜单与对话框。
 
-import type { ArchivedDay, CategoryDef, CategoryState, Day, Preferences, Snapshot, TaskItem, View } from "./types";
+import type { ArchivedDay, CategoryDef, CategoryState, Day, Preferences, Snapshot, View } from "./types";
 import { nowUnix, shortNameFrom } from "./format";
 
 /** 处理完这一下之后要不要留着框：返回 `"keep"` 就留着（重试还没成功），否则关掉。 */
@@ -17,7 +17,8 @@ export interface Dialog {
   cancelLabel: string;
   destructive: boolean;
   /** 打开时把焦点放到哪个键；不填就维持现状。 */
-  focus?: "confirm" | "cancel";
+  focus?: "confirm" | "cancel" | "input";
+  extension?: { minutes: string; max: number };
   /** 收到的是自己这一个实例：await 之后要认它，别去动期间换上来的新框。 */
   onConfirm: (self: Dialog) => DialogOutcome | Promise<DialogOutcome>;
   /** 主按钮之外的第三个动作（红色）。只有退出前保存失败用到。 */
@@ -34,6 +35,18 @@ export interface Removal {
   typed: string;
 }
 
+export interface CompletionEditor {
+  dayStartedAt: number;
+  entryIndex: number;
+  endedAt: number;
+  title: string;
+  seconds: number;
+  draft: string;
+  automatic: boolean;
+  busy: boolean;
+  error: string;
+}
+
 export const ui = {
   view: "today" as View,
   snap: null as Snapshot | null,
@@ -43,10 +56,9 @@ export const ui = {
   // 今天
   selectedCategory: null as string | null,
   minutesDraft: null as number | null,
+  rejectedStartMinutes: false,
   breakDraft: null as number | null,
-  taskDraft: "",
-  addTaskDraft: "",
-  addingTask: false,
+  completion: null as CompletionEditor | null,
   creditPulse: null as string | null,
   // 历史
   expandedDays: new Set<number>(),
@@ -83,11 +95,12 @@ export function dialogIsBusy(): boolean {
  * 最上层的覆盖层是哪一个。渲染顺序与键盘处理共用它，
  * 否则会出现「Esc 关掉了看不见的那一个」。
  */
-export function topOverlay(): "dialog" | "removal" | null {
+export function topOverlay(): "dialog" | "removal" | "completion" | null {
   // 退出被拦是外壳推过来、用户正等着的答复，压过解除屏蔽的两步确认。
   if (ui.dialog?.id === QUIT_DIALOG_ID) return "dialog";
   if (ui.removal) return "removal";
   if (ui.dialog) return "dialog";
+  if (ui.completion) return "completion";
   return null;
 }
 
@@ -172,15 +185,6 @@ export function profileTotalMinutes(p: { quotas: { minutes: number }[] }): numbe
   return p.quotas.reduce((sum, q) => sum + Math.max(0, q.minutes), 0);
 }
 
-
-/** 一行一条，把输入框里的文字变成任务清单。 */
-export function parseTasks(text: string): TaskItem[] {
-  return text
-    .split("\n")
-    .map((line) => line.replace(/^\s*[-*·•]\s*/, "").trim())
-    .filter(Boolean)
-    .map((t) => ({ text: t, done: false }));
-}
 
 export const BLOCK_OPTIONS = [25, 30, 45, 60, 75, 90, 120];
 export const BREAK_OPTIONS = [0, 5, 10, 15, 20];
