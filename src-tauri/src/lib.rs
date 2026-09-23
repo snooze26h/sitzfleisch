@@ -17,6 +17,8 @@ use tauri_plugin_notification::NotificationExt;
 use tauri_plugin_window_state::{AppHandleExt, StateFlags};
 
 mod browser_blocking;
+#[cfg(target_os = "macos")]
+mod space_preview;
 
 #[derive(Clone, Default, Serialize)]
 struct BlockingStatus {
@@ -1533,6 +1535,12 @@ pub fn run() {
         .build(tauri::generate_context!())
         .expect("error while building tauri application")
         .run(|app, event| {
+            #[cfg(target_os = "macos")]
+            match &event {
+                tauri::RunEvent::Ready => space_preview::install(app),
+                tauri::RunEvent::Exit => space_preview::uninstall(),
+                _ => {}
+            }
             // Dock 右键「退出」、AppleScript `quit`、注销都不走 `app-quit` 菜单项，
             // 于是绕过了 `quit_saving()`。这一层拦不住它们（tao 没注册
             // `applicationShouldTerminate:`），但 `applicationWillTerminate:` 会转成

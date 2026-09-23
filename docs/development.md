@@ -55,6 +55,23 @@ cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings
 
 ## 界面预览
 
+### macOS 全屏桌面预览
+
+0.11.1 在 [space_preview.rs](../src-tauri/src/space_preview.rs) 中增加全屏 Space 的预览兼容层。用户报告调度中心的全屏缩略图只剩底色，当前代码没有启用内容保护，也没有在失焦时清空页面。WKWebView 使用远程绘制图层，普通视图截图不能可靠取得内容；这里用 Apple 的公开 [`takeSnapshot`](https://developer.apple.com/documentation/webkit/wkwebview/takesnapshot(with:completionhandler:)) API 生成原生位图预览。
+
+- 仅前台全屏窗口每 5 秒更新一次，长边最多 480 点；后台不持续截图，不关闭 WebKit 的节电机制。
+- 全屏窗口失焦或被遮挡时显示已有预览，恢复前台时隐藏；普通窗口、隐藏和最小化状态不显示预览层。
+- 预览层不参与鼠标命中和辅助功能树；尺寸变化、退出全屏后拒绝旧快照，截图失败时保留上次有效内容。
+- 位图只留在内存中，不写入存档、不上传，也不读取其他窗口。计时、提醒与存储逻辑未改动。
+
+相关依据：[WebKit 的远程视图截图问题与快照 API](https://bugs.webkit.org/show_bug.cgi?id=161450)、[同类 Tauri 应用的原生位图预览方案](https://menketechnologies.github.io/MenkeTechnologiesMeta/Audio-Haxor/#ux--desktop-integration)。这些资料支持兼容方式，不能单凭它们认定本机这一例的精确系统根因。
+
+回归检查包括前后台隔离、普通/隐藏/最小化窗口、尺寸变化后的异步回调和失败重试。另用不创建可见窗口的原生探针检查了预览视图的创建、鼠标穿透、辅助功能标记、图像设置与移除。
+
+调度中心仍需真机按以下流程验收：全屏后打开调度中心、切到其他 Space 再查看、切回立即点击操作、退出全屏、最小化后恢复。本次桌面操作工具连接失败，不能将单测、离屏探针或编译通过写成该视觉路径已经验收。
+
+### 浏览器模拟场景
+
 运行 `npm run dev` 后，在浏览器打开 `http://localhost:1420/`，通过 URL 片段选择内置场景，例如 `http://localhost:1420/#qa=running`。切换片段后刷新页面以重新加载场景。
 
 ```text
