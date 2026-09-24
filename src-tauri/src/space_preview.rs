@@ -1,5 +1,5 @@
 //! 全屏 Space 的预览兼容层：WindowServer 有时无法取得 WKWebView 的远程图层。
-//! 用 WebKit 的公开快照 API 缓存缩略图，只在全屏窗口失焦或被遮挡时显示。
+//! 用 WebKit 的公开快照 API 缓存缩略图，只在全屏窗口完全被遮挡时显示。
 //! 快照只留在内存，不截取其他窗口、不落盘，也不影响规则核心的后台计时。
 
 use std::cell::{Cell, RefCell};
@@ -87,7 +87,9 @@ impl WindowState {
         self.full_screen && self.visible && !self.minimized
     }
     fn show_preview(self, ready: bool) -> bool {
-        self.eligible() && ready && (!self.key || self.occluded)
+        // 多屏时只能有一个键盘焦点，但另一块屏幕上的窗口依然可见。
+        // 失焦不能用缩略图盖住实时 WebView，否则画面会模糊、倒计时看似停止。
+        self.eligible() && ready && self.occluded
     }
     fn can_capture(self) -> bool {
         self.eligible() && self.key && !self.occluded
@@ -322,7 +324,7 @@ mod tests {
     }
 
     #[test]
-    fn foreground_never_shows_snapshot_and_background_never_captures() {
+    fn only_fully_occluded_windows_show_snapshot() {
         let active = foreground();
         assert!(active.can_capture());
         assert!(!active.show_preview(true));
@@ -336,10 +338,40 @@ mod tests {
                 ..active
             },
         ] {
-            assert!(background.show_preview(true));
+            assert_eq!(background.show_preview(true), background.occluded);
             assert!(!background.show_preview(false));
             assert!(!background.can_capture());
         }
+    }
+
+    #[test]
+    fn unfocused_visible_window_keeps_live_page_on_other_display() {
+        let on_main_display = WindowState {
+            key: false,
+            ..foreground()
+        };
+        assert!(
+            !on_main_display.show_preview(true),
+            "另一块屏幕取得焦点，不能用静态缩略图覆盖仍可见的实时页面"
+        );
+    }
+
+    #[test]
+    fn returning_to_visible_screen_hides_snapshot_without_refocusing() {
+        let background_space = WindowState {
+            key: false,
+            occluded: true,
+            ..foreground()
+        };
+        assert!(background_space.show_preview(true));
+        let visible_again = WindowState {
+            occluded: false,
+            ..background_space
+        };
+        assert!(
+            !visible_again.show_preview(true),
+            "焦点仍在外接屏时，主屏重新可见也必须撤下快照"
+        );
     }
 
     #[test]

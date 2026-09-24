@@ -57,18 +57,20 @@ cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings
 
 ### macOS 全屏桌面预览
 
-0.11.1 在 [space_preview.rs](../src-tauri/src/space_preview.rs) 中增加全屏 Space 的预览兼容层。用户报告调度中心的全屏缩略图只剩底色，当前代码没有启用内容保护，也没有在失焦时清空页面。WKWebView 使用远程绘制图层，普通视图截图不能可靠取得内容；这里用 Apple 的公开 [`takeSnapshot`](https://developer.apple.com/documentation/webkit/wkwebview/takesnapshot(with:completionhandler:)) API 生成原生位图预览。
+0.11.1 在 [space_preview.rs](../src-tauri/src/space_preview.rs) 中增加全屏 Space 的预览兼容层，用户已确认重启后调度中心缩略图恢复。WKWebView 使用远程绘制图层，普通视图截图不能可靠取得内容；这里用 Apple 的公开 [`takeSnapshot`](https://developer.apple.com/documentation/webkit/wkwebview/takesnapshot(with:completionhandler:)) API 生成原生位图预览。
+
+0.11.2 修正了预览层的双屏回归：旧判断把失去键盘焦点也当成显示快照的条件，焦点移到外接屏后，主屏仍可见的窗口会被低分辨率静态图覆盖，倒计时看似停止。现在仅依据 [`occlusionState`](https://developer.apple.com/documentation/appkit/nswindow/occlusionstate-swift.property) 判断是否完全被遮挡；失焦但仍可见的窗口继续显示实时 WebView。
 
 - 仅前台全屏窗口每 5 秒更新一次，长边最多 480 点；后台不持续截图，不关闭 WebKit 的节电机制。
-- 全屏窗口失焦或被遮挡时显示已有预览，恢复前台时隐藏；普通窗口、隐藏和最小化状态不显示预览层。
+- 全屏窗口完全被遮挡时显示已有预览，重新可见时立即隐藏，即使焦点仍在另一块屏幕上；普通窗口、隐藏和最小化状态不显示预览层。
 - 预览层不参与鼠标命中和辅助功能树；尺寸变化、退出全屏后拒绝旧快照，截图失败时保留上次有效内容。
 - 位图只留在内存中，不写入存档、不上传，也不读取其他窗口。计时、提醒与存储逻辑未改动。
 
 相关依据：[WebKit 的远程视图截图问题与快照 API](https://bugs.webkit.org/show_bug.cgi?id=161450)、[同类 Tauri 应用的原生位图预览方案](https://menketechnologies.github.io/MenkeTechnologiesMeta/Audio-Haxor/#ux--desktop-integration)。这些资料支持兼容方式，不能单凭它们认定本机这一例的精确系统根因。
 
-回归检查包括前后台隔离、普通/隐藏/最小化窗口、尺寸变化后的异步回调和失败重试。另用不创建可见窗口的原生探针检查了预览视图的创建、鼠标穿透、辅助功能标记、图像设置与移除。
+回归检查包括另一块屏幕取得焦点、未重新聚焦但窗口恢复可见、普通/隐藏/最小化窗口、尺寸变化后的异步回调和失败重试。双屏新增用例在 0.11.1 上失败、修复后通过。此前的离屏原生探针还检查了预览视图的创建、鼠标穿透、辅助功能标记、图像设置与移除。
 
-调度中心仍需真机按以下流程验收：全屏后打开调度中心、切到其他 Space 再查看、切回立即点击操作、退出全屏、最小化后恢复。本次桌面操作工具连接失败，不能将单测、离屏探针或编译通过写成该视觉路径已经验收。
+真机回归需覆盖：坐功全屏时操作另一块屏幕、来回切换焦点、调度中心预览、切回立即点击操作、退出全屏、最小化后恢复。双屏修复前已实机观察到画面停留在旧倒计时、辅助功能树中的实时读数仍持续更新；修复后的验证结果按实际执行记录。
 
 ### 浏览器模拟场景
 
