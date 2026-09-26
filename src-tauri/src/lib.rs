@@ -633,6 +633,18 @@ fn sync_hosts_file(
     install: impl FnOnce(&Path) -> Result<(), String>,
 ) -> Result<bool, String> {
     let current = fs::read_to_string(path).map_err(|e| format!("读不到系统 hosts：{e}"))?;
+    // 丢失结束标记时直接剥离会吞掉后面的用户条目；先确认每段边界完整。
+    let mut inside = false;
+    for line in current.lines().map(str::trim) {
+        if line == core::HOSTS_BEGIN {
+            if inside { return Err("系统 hosts 的坐功托管标记异常，原文件已保留。".into()); }
+            inside = true;
+        } else if line == core::HOSTS_END {
+            if !inside { return Err("系统 hosts 的坐功托管标记异常，原文件已保留。".into()); }
+            inside = false;
+        }
+    }
+    if inside { return Err("系统 hosts 的坐功托管标记不完整，原文件已保留。".into()); }
     let desired = core::render_hosts(&current, hosts, enable);
     if desired == current {
         return Ok(core::hosts_section_present(&current));
@@ -1707,6 +1719,20 @@ mod tests {
         assert_eq!(fs::read_to_string(&path).unwrap(), blocked);
         assert!(!dir.join(format!("hosts.staged.{}", std::process::id())).exists());
         assert!(sync_hosts_file(&path, dir, &[], false, |_| Ok(())).is_err(), "必须核对真正解除，不能只信提权进程退出码");
+    }
+
+    #[test]
+    fn malformed_managed_markers_never_remove_unowned_hosts_entries() {
+        let fixture = TestShared::new(core::State::new(1_000));
+        let dir = &fixture.0.data_dir;
+        let path = dir.join("test.hosts");
+        for markers in [core::HOSTS_BEGIN.to_string(), core::HOSTS_END.to_string(),
+            format!("{}\n{}\n{}", core::HOSTS_BEGIN, core::HOSTS_BEGIN, core::HOSTS_END)] {
+            let content = format!("127.0.0.1 localhost\n{markers}\n192.0.2.10 custom.example\n");
+            fs::write(&path, &content).unwrap();
+            assert!(sync_hosts_file(&path, dir, &[], false, |_| panic!("标记异常时不能调用提权写入")).is_err());
+            assert_eq!(fs::read_to_string(&path).unwrap(), content);
+        }
     }
 
     #[test]
