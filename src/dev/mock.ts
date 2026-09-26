@@ -69,6 +69,7 @@ declare global {
   interface Window {
     /** QA：浏览器里没有「退出」这个动作，退出前保存失败的对话框从控制台叫出来。 */
     qaQuitBlocked?: () => void;
+    qaQuitBlockingFailed?: () => void;
   }
 }
 
@@ -661,6 +662,10 @@ export function mockSubscribe(callback: (snapshot: Snapshot) => void) {
  */
 export function mockQuitBlocked(callback: (reason: string) => void) {
   window.qaQuitBlocked = () => callback(saveError ?? "No such file or directory (os error 2)");
+}
+
+export function mockQuitBlockingFailed(callback: (reason: string) => void) {
+  window.qaQuitBlockingFailed = () => callback("（mock）系统授权被取消");
 }
 
 window.setInterval(() => {

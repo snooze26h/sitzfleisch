@@ -53,6 +53,14 @@ export async function onQuitBlocked(callback: (reason: string) => void): Promise
   (await mock()).mockQuitBlocked(callback);
 }
 
+export async function onQuitBlockingFailed(callback: (reason: string) => void): Promise<void> {
+  if (inTauri) {
+    await listen<string>("blocking://quit-blocked", (event) => callback(event.payload));
+    return;
+  }
+  (await mock()).mockQuitBlockingFailed(callback);
+}
+
 export async function setWindowTitle(title: string): Promise<void> {
   if (!inTauri) {
     document.title = title;

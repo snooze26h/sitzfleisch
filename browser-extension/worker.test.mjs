@@ -88,15 +88,78 @@ test("整站规则同步后替换已打开的直播房间，不依赖网页是�
 
 function originalForTest(url) { return blockedPageContext(url, "chrome-extension://test/blocked.html")?.original; }
 
-test("整站缓存跨重启离线生效，解除整站后恢复房间且精确规则仍在", async () => {
+test("完整退出后断开连接，解除两类规则并恢复屏蔽页；重新连接后恢复学习日屏蔽", async () => {
+  const room = "https://live.bilibili.com/234567";
+  const h = harness({ initial: wholeSite(), initialTabs: [{ id: 1, url: room }, { id: 2, url: recommend }] });
+  await h.boot();
+  assert.match(h.tabs.get(1).url, /blocked.html/);
+  h.state.fetch = async () => { throw new Error("app exited"); };
+  await h.blocker.sync();
+  assert.equal(h.blocker.status().connection, "disconnected");
+  assert.equal(h.blocker.status().active, false);
+  assert.equal(h.data[CACHE_KEY].rules.active, false);
+  assert.equal(h.data[CACHE_KEY].appliedRevision, null);
+  assert.equal(h.tabs.get(1).url, room);
+  assert.equal(h.tabs.get(2).url, recommend);
+  h.state.fetch = async () => response(wholeSite());
+  await h.blocker.sync();
+  assert.equal(h.requests.at(-1).options.headers["X-Sitzfleisch-Applied"], undefined);
+  assert.equal(h.blocker.status().active, true);
+  assert.match(h.tabs.get(1).url, /blocked.html/);
+});
+
+test("退出后的首次导航先检查连接，不用旧缓存把可访问网址弹回屏蔽页", async () => {
+  const h = harness({ initialTabs: [{ id: 1, url: favorite }] });
+  await h.boot();
+  h.state.fetch = async () => { throw new Error("app exited"); };
+  h.tabs.get(1).url = recommend;
+  h.chromeApi.webNavigation.onBeforeNavigate.emit({ tabId: 1, frameId: 0, url: recommend, timeStamp: 1 });
+  await h.blocker.sync(); await tick();
+  assert.equal(h.tabs.get(1).url, recommend);
+  assert.equal(h.updates.length, 0);
+});
+
+test("断开时存储失败也在内存解除，下次 worker 启动仍会清理旧缓存", async () => {
+  const first = harness();
+  await first.boot();
+  first.state.fetch = async () => { throw new Error("app exited"); };
+  first.state.set = async () => { throw new Error("storage unavailable"); };
+  await first.blocker.sync();
+  assert.equal(first.blocker.status(home).blocked, false);
+  assert.equal(first.blocker.status().connection, "disconnected");
+  assert.equal(first.blocker.status().error, "release-save-error");
+  const restarted = harness({ stored: first.data, initialTabs: [{ id: 1, url: home }] });
+  restarted.state.fetch = async () => { throw new Error("app exited"); };
+  await restarted.boot();
+  assert.equal(restarted.tabs.get(1).url, home);
+  assert.equal(restarted.data[CACHE_KEY].rules.active, false);
+});
+
+test("断开后旧屏蔽页恢复失败可以重试，不影响新导航放行", async () => {
+  const h = harness({ initialTabs: [{ id: 1, url: home }] });
+  await h.boot();
+  const update = h.state.update;
+  h.state.fetch = async () => { throw new Error("app exited"); };
+  h.state.update = async () => { throw new Error("tab temporarily unavailable"); };
+  await h.blocker.sync();
+  assert.equal(h.blocker.status(home).blocked, false);
+  assert.equal(h.blocker.status().connection, "disconnected");
+  assert.equal(h.blocker.status().error, "apply-error");
+  h.state.update = update;
+  await h.blocker.sync();
+  assert.equal(h.tabs.get(1).url, home);
+});
+
+test("旧整站缓存离线启动时解除，重新连接后按最新两类规则执行", async () => {
   const room = "https://live.bilibili.com/234567";
   const first = harness({ initial: wholeSite() });
   await first.boot();
   const h = harness({ stored: first.data, initialTabs: [{ id: 1, url: room }, { id: 2, url: recommend }] });
   h.state.fetch = async () => { throw new Error("offline"); };
   await h.boot();
-  assert.equal(h.blocker.status().connection, "cache");
-  assert.equal(originalForTest(h.tabs.get(1).url), room);
+  assert.equal(h.blocker.status().connection, "disconnected");
+  assert.equal(h.tabs.get(1).url, room);
+  assert.equal(h.tabs.get(2).url, recommend);
   h.state.fetch = async () => response(wholeSite(true, [], "aaaaaaaaaaaaaaaa"));
   await h.blocker.sync();
   assert.equal(h.tabs.get(1).url, room);
@@ -146,15 +209,15 @@ test("收工同步取消生效规则并恢复阻止页；下次开始重新拦�
   assert.match(h.tabs.get(1).url, /^chrome-extension:\/\/test\/blocked.html#/);
 });
 
-test("暂停或主程序离线继续拦，浏览器与 worker 重启从本地恢复", async () => {
+test("浏览器与 worker 重启后清理旧缓存，主程序离线时不再拦截", async () => {
   const first = harness();
   await first.boot();
   const h = harness({ stored: first.data, initialTabs: [{ id: 1, url: recommend }, { id: 2, url: favorite }] });
   h.state.fetch = async () => { throw new Error("offline"); };
   await h.boot();
-  assert.equal(h.blocker.status().connection, "cache");
-  assert.equal(h.blocker.status().active, true);
-  assert.match(h.tabs.get(1).url, /blocked.html/);
+  assert.equal(h.blocker.status().connection, "disconnected");
+  assert.equal(h.blocker.status().active, false);
+  assert.equal(h.tabs.get(1).url, recommend);
   assert.equal(h.tabs.get(2).url, favorite);
   assert.equal(h.blocker.status().lastSyncAt, 1_800_000_000_000);
   assert.equal(h.requests[0].options.headers["X-Sitzfleisch-Applied"], undefined);
@@ -193,12 +256,13 @@ test("旧导航异步查询不能把已切到收藏的标签拉回阻止页", as
   const h = harness({ initialTabs: [{ id: 1, url: favorite }] });
   await h.boot();
   const held = deferred();
+  const getStarted = deferred();
   const originalGet = h.state.get;
   let first = true;
-  h.state.get = async (id) => { if (first) { first = false; return held.promise; } return originalGet(id); };
+  h.state.get = async (id) => { if (first) { first = false; getStarted.resolve(); return held.promise; } return originalGet(id); };
   h.tabs.get(1).url = recommend;
   h.chromeApi.webNavigation.onBeforeNavigate.emit({ tabId: 1, frameId: 0, url: recommend, timeStamp: 10 });
-  await Promise.resolve();
+  await getStarted.promise;
   h.tabs.get(1).url = favorite;
   h.chromeApi.webNavigation.onHistoryStateUpdated.emit({ tabId: 1, frameId: 0, url: favorite, timeStamp: 20 });
   held.resolve({ id: 1, url: recommend });
@@ -257,16 +321,17 @@ test("错误 HTTP、JSON、过大响应或不合法规则保留缓存，不伪�
   }
 });
 
-test("首次连接超时保持等待，AbortController 结束网络等待", async () => {
+test("首次连接超时不阻止访问，AbortController 结束网络等待", async () => {
   const h = harness({ timeoutMs: 20 });
   h.state.fetch = async (_url, options) => new Promise((_resolve, reject) => {
     options.signal.addEventListener("abort", () => reject(new Error("aborted")), { once: true });
   });
   await h.boot();
   assert.equal(h.requests[0].options.signal.aborted, true);
-  assert.equal(h.blocker.status().connection, "waiting");
+  assert.equal(h.blocker.status().connection, "disconnected");
   assert.equal(h.blocker.status().lastSyncAt, null);
-  assert.equal(h.data[CACHE_KEY], undefined);
+  assert.equal(h.data[CACHE_KEY].rules.active, false);
+  assert.equal(h.data[CACHE_KEY].appliedRevision, null);
 });
 
 test("存储或标签应用失败撤销 ACK，下一次请求不声称已成功应用", async () => {
@@ -327,7 +392,7 @@ test("损坏缓存不作为有效屏蔽规则，闹钟和浏览器启动仍会�
   const h = harness({ stored: { [CACHE_KEY]: { rules: { ...snapshot(), revision: "bad" } } } });
   h.state.fetch = async () => { throw new Error("offline"); };
   await h.boot();
-  assert.equal(h.blocker.status().connection, "waiting");
+  assert.equal(h.blocker.status().connection, "disconnected");
   assert.equal(h.blocker.status().active, false);
   h.state.fetch = async () => response(snapshot());
   h.chromeApi.runtime.onStartup.emit();
@@ -335,7 +400,7 @@ test("损坏缓存不作为有效屏蔽规则，闹钟和浏览器启动仍会�
   assert.equal(h.blocker.status().connection, "connected");
 });
 
-test("规则未知不能视为已经收工，缓存读取失败或损坏且离线时保留已有阻止页", async () => {
+test("缓存读取失败或损坏且主程序离线时，也恢复已有阻止页", async () => {
   const blockedUrl = `chrome-extension://test/blocked.html#url=${encodeURIComponent(recommend)}`;
   for (const brokenStorage of [true, false]) {
     const h = harness({
@@ -345,9 +410,9 @@ test("规则未知不能视为已经收工，缓存读取失败或损坏且离�
     if (brokenStorage) h.state.storageGet = async () => { throw new Error("storage unavailable"); };
     h.state.fetch = async () => { throw new Error("offline"); };
     await h.boot();
-    assert.equal(h.updates.length, 0);
-    assert.equal(h.tabs.get(1).url, blockedUrl);
-    assert.equal(h.blocker.status(recommend).blocked, null);
+    assert.equal(h.tabs.get(1).url, recommend);
+    assert.equal(h.blocker.status(recommend).blocked, false);
+    assert.equal(h.blocker.status().connection, "disconnected");
   }
 });
 
@@ -387,12 +452,12 @@ for (const eventName of ["onCommitted", "onHistoryStateUpdated", "onReferenceFra
   });
 }
 
-test("返回目标跟随阻止页恢复，worker 重启和离线仍可返回", async () => {
+test("返回目标跟随阻止页恢复，worker 重启且主程序响应无效时仍可返回", async () => {
   const page = blockedPageUrl("chrome-extension://test/blocked.html", recommend, favorite);
   const first = harness();
   await first.boot();
   const h = harness({ stored: first.data, initialTabs: [{ id: 1, url: page }] });
-  h.state.fetch = async () => { throw new Error("offline"); };
+  h.state.fetch = async () => new Response("unavailable", { status: 503 });
   await h.boot();
   assert.deepEqual(await goBack(h), { ok: true });
   assert.equal(h.tabs.get(1).url, favorite);
@@ -412,7 +477,7 @@ test("返回目标后来被加入规则时不放行，规则未知也不放行",
   const page = blockedPageUrl("chrome-extension://test/blocked.html", recommend, favorite);
   for (const unknown of [false, true]) {
     const h = harness({ initial: snapshot(true, [recommend, favorite]), initialTabs: [{ id: 1, url: page }] });
-    if (unknown) h.state.fetch = async () => { throw new Error("offline"); };
+    if (unknown) h.state.fetch = async () => new Response("unavailable", { status: 503 });
     await h.boot();
     assert.deepEqual(await goBack(h), { ok: true });
     assert.equal(h.tabs.get(1).url, "about:blank");

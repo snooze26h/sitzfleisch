@@ -55,6 +55,14 @@ cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings
 
 ## 界面预览
 
+### 完整退出解除屏蔽（0.11.3 / 扩展 1.2.0）
+
+- 正常 `ExitRequested` 先阻止退出，在后台串行清理系统 hosts；成功后再允许退出，取消授权或清理失败时保留应用供重试。Dock / 注销等只有 `Exit` 的路径做兜底清理，强制终止进程不作保证。
+- 退出标记只在内存中，规则接口在退出过程中返回未启用；不结束或丢弃学习日、不删除用户屏蔽列表。排队的 hosts 启用任务看到退出标记后只能清理，避免退出末尾重新写回。再次启动按保存的状态恢复规则。
+- 扩展在连接不可达或超时时解除执行缓存，恢复屏蔽页；新导航先同步，避免先被旧缓存拦一次。无效响应和执行失败仍保留校验与错误状态，不伪报同步成功。
+- 隔离数据目录禁止执行系统 hosts 写入/清理，也不连接真实浏览器桥接端口。测试用临时 hosts 文件验证只清理托管段、授权失败和回读失败；扩展测试覆盖旧缓存、断开、重连、导航竞争和解除失败重试。
+- 退出保存失败转为系统屏蔽清理失败时，弹窗按新阶段替换按钮和回调；重试等待清理完成。浏览器预览可依次调用 `qaQuitBlocked()`、`qaQuitBlockingFailed()` 检查两个阶段。
+
 ### macOS 全屏桌面预览
 
 0.11.1 在 [space_preview.rs](../src-tauri/src/space_preview.rs) 中增加全屏 Space 的预览兼容层，用户已确认重启后调度中心缩略图恢复。WKWebView 使用远程绘制图层，普通视图截图不能可靠取得内容；这里用 Apple 的公开 [`takeSnapshot`](https://developer.apple.com/documentation/webkit/wkwebview/takesnapshot(with:completionhandler:)) API 生成原生位图预览。

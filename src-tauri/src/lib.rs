@@ -1,7 +1,7 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Mutex;
 use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -30,6 +30,11 @@ struct BlockingStatus {
 
 struct Shared {
     state: Mutex<core::State>,
+    /// 退出只改变运行时屏蔽状态，不结束学习日或清空用户配置。
+    exiting: AtomicBool,
+    blocking_released: AtomicBool,
+    /// 隔离测试不能写入或清理用户真实的系统 hosts。
+    isolated: bool,
     snapshot_revision: AtomicU64,
     /// 从取快照到原子替换必须串行，避免旧存档后写或共用暂存文件。
     save_lock: Mutex<()>,
@@ -235,7 +240,7 @@ fn snapshot(shared: &Shared, with_history: bool) -> Snapshot {
     let state = shared.state.lock().unwrap();
     let mut blocking = shared.blocking.lock().unwrap().clone();
     blocking.browser = shared.browser_bridge.lock().unwrap()
-        .status(&browser_blocking::Rules::from_state(&state));
+        .status(&browser_blocking::Rules::from_state(&state, shared.exiting.load(Ordering::SeqCst)));
     Snapshot {
         // 与状态捕获一起排序；同一秒里的命令也有先后，不依赖时间戳。
         revision: shared.snapshot_revision.fetch_add(1, Ordering::Relaxed) + 1,
@@ -603,6 +608,9 @@ fn mutate(
     op: impl FnOnce(&mut core::State) -> core::RuleResult,
 ) -> Result<Snapshot, String> {
     let shared = app.state::<Shared>();
+    if shared.exiting.load(Ordering::SeqCst) {
+        return Err("正在退出坐功，请等待网站屏蔽解除。".into());
+    }
     let outcome = {
         let mut state = shared.state.lock().unwrap();
         state.tick(now_unix());
@@ -615,6 +623,54 @@ fn mutate(
 }
 
 // ---------- 网站屏蔽（hosts；变换在 core，落盘与提权在这里） ----------
+
+/// 写入与退出清理共用同一条验证路径；只修改坐功托管段。
+fn sync_hosts_file(
+    path: &Path,
+    data_dir: &Path,
+    hosts: &[String],
+    enable: bool,
+    install: impl FnOnce(&Path) -> Result<(), String>,
+) -> Result<bool, String> {
+    let current = fs::read_to_string(path).map_err(|e| format!("读不到系统 hosts：{e}"))?;
+    let desired = core::render_hosts(&current, hosts, enable);
+    if desired == current {
+        return Ok(core::hosts_section_present(&current));
+    }
+    let staged = data_dir.join(format!("hosts.staged.{}", std::process::id()));
+    fs::write(&staged, &desired).map_err(|e| format!("暂存文件写入失败：{e}"))?;
+    let installed = install(&staged);
+    let _ = fs::remove_file(&staged);
+    installed?;
+    let after = fs::read_to_string(path).map_err(|e| format!("回读系统 hosts 失败：{e}"))?;
+    if after != desired {
+        return Err("回读核验不一致，规则可能没有生效。".into());
+    }
+    Ok(core::hosts_section_present(&after))
+}
+
+fn record_blocking_result(shared: &Shared, result: &Result<bool, String>) {
+    let mut blocking = shared.blocking.lock().unwrap();
+    blocking.busy = false;
+    match result {
+        Ok(present) => { blocking.active = *present; blocking.error = None; }
+        Err(message) => {
+            blocking.error = Some(message.clone());
+            blocking.active = fs::read_to_string(hosts_path())
+                .map(|c| core::hosts_section_present(&c)).unwrap_or(blocking.active);
+        }
+    }
+}
+
+fn release_system_blocking(shared: &Shared) -> Result<(), String> {
+    if shared.isolated { return Ok(()); }
+    // 必须等已在写 hosts 的线程完成；后续排队写入也会看到 exiting，只能清理。
+    let _serial = shared.blocking_lock.lock().unwrap_or_else(|e| e.into_inner());
+    shared.blocking.lock().unwrap().busy = true;
+    let result = sync_hosts_file(&hosts_path(), &shared.data_dir, &[], false, privileged_install);
+    record_blocking_result(shared, &result);
+    result.map(|_| ())
+}
 
 fn hosts_path() -> PathBuf {
     #[cfg(target_os = "windows")]
@@ -765,52 +821,15 @@ fn spawn_apply_blocking(app: &AppHandle) {
     let app = app.clone();
     thread::spawn(move || {
         let shared = app.state::<Shared>();
+        if shared.isolated { return; }
         // 暂存文件跟着状态文件走同一个目录：隔离测试时不能落回真实目录。
         let data_dir = shared.data_dir.clone();
         apply_latest_blocking(&shared, |hosts, enable| {
-            broadcast(&app);
-
-            let result = (|| -> Result<bool, String> {
-                let path = hosts_path();
-                let current =
-                    fs::read_to_string(&path).map_err(|e| format!("读不到系统 hosts：{e}"))?;
-                let desired = core::render_hosts(&current, hosts, enable);
-                if desired == current {
-                    return Ok(core::hosts_section_present(&current));
-                }
-                let staged = data_dir.join(format!("hosts.staged.{}", std::process::id()));
-                fs::write(&staged, &desired).map_err(|e| format!("暂存文件写入失败：{e}"))?;
-                // 取消授权也要清干净：早期版本在这里用 `?` 直接返回，取消一次就留下一个
-                // hosts.staged.<pid>，攒了一堆在数据目录里。先收尾，再决定成败。
-                let installed = privileged_install(&staged);
-                let _ = fs::remove_file(&staged);
-                installed?;
-                let after =
-                    fs::read_to_string(&path).map_err(|e| format!("回读系统 hosts 失败：{e}"))?;
-                if after != desired {
-                    return Err("回读核验不一致，规则可能没有生效。".into());
-                }
-                Ok(core::hosts_section_present(&after))
-            })();
-
-            {
-                let mut blocking = shared.blocking.lock().unwrap();
-                blocking.busy = false;
-                match result {
-                    Ok(present) => {
-                        blocking.active = present;
-                        blocking.error = None;
-                    }
-                    Err(message) => {
-                        blocking.error = Some(message);
-                        blocking.active = fs::read_to_string(hosts_path())
-                            .map(|c| core::hosts_section_present(&c))
-                            .unwrap_or(blocking.active);
-                    }
-                }
-            }
-            broadcast(&app);
+            let result = sync_hosts_file(&hosts_path(), &data_dir, hosts, enable, privileged_install);
+            record_blocking_result(&shared, &result);
         });
+        // 退出钩子可能在主线程等 blocking_lock；原生界面调用放到解锁之后。
+        broadcast(&app);
     });
 }
 
@@ -825,14 +844,14 @@ fn apply_latest_blocking(shared: &Shared, apply: impl FnOnce(&[String], bool)) {
     // 等待授权的间隙可能已经收工或重新开日；开关和域名必须一起从当前状态取。
     let (hosts, enable) = {
         let state = shared.state.lock().unwrap();
-        (state.preferences.blocked_hosts.clone(), state.day.is_some())
+        (state.preferences.blocked_hosts.clone(), state.day.is_some() && !shared.exiting.load(Ordering::SeqCst))
     };
     apply(&hosts, enable);
 }
 
 fn blocking_wanted(shared: &Shared) -> bool {
     let state = shared.state.lock().unwrap();
-    state.day.is_some() && !state.preferences.blocked_hosts.is_empty()
+    state.day.is_some() && !state.preferences.blocked_hosts.is_empty() && !shared.exiting.load(Ordering::SeqCst)
 }
 
 fn blocking_needs_sync(shared: &Shared) -> bool {
@@ -1232,6 +1251,30 @@ fn install_chinese_menu(app: &tauri::App) -> tauri::Result<()> {
 /// 只记 size 与 position——「关窗不退出」意味着窗口经常是隐藏的，记 visible 只会打架。
 const WINDOW_STATE: StateFlags = StateFlags::SIZE.union(StateFlags::POSITION);
 
+/// 正常退出先在后台清理，授权取消或写入失败时保留应用供用户重试。
+fn begin_exit_cleanup(app: &AppHandle) {
+    let shared = app.state::<Shared>();
+    if shared.exiting.swap(true, Ordering::SeqCst) { return; }
+    let app = app.clone();
+    thread::spawn(move || { let _ = complete_exit_cleanup(&app); });
+}
+
+fn complete_exit_cleanup(app: &AppHandle) -> Result<(), String> {
+    let shared = app.state::<Shared>();
+    if let Err(reason) = release_system_blocking(&shared) {
+        shared.exiting.store(false, Ordering::SeqCst);
+        // 清理取消后进程继续运行，之前的「不保存退出」不能影响以后的退出。
+        *shared.declined_final_save.lock().unwrap() = false;
+        broadcast(app);
+        show_main_window(app);
+        let _ = app.emit("blocking://quit-blocked", &reason);
+        return Err(reason);
+    }
+    shared.blocking_released.store(true, Ordering::SeqCst);
+    app.exit(0);
+    Ok(())
+}
+
 /// 退出前那次保存的结论。**纯函数**，好测；窗口与进程操作全留在调用方。
 enum QuitDecision {
     Exit,
@@ -1267,19 +1310,22 @@ fn quit_saving(app: &AppHandle) {
 
 /// 退出前保存失败后的「重试并退出」。成功就没有下文了；失败把最新原因端回对话框。
 #[tauri::command]
-fn quit_after_save(app: AppHandle) -> Result<(), String> {
-    let shared = app.state::<Shared>();
-    shared.state.lock().unwrap().tick(now_unix());
-    save(&shared);
-    let error = shared.save_error.lock().unwrap().clone();
-    match decide_quit(error) {
-        QuitDecision::Exit => {
-            let _ = app.save_window_state(WINDOW_STATE);
-            app.exit(0);
-            Ok(())
+async fn quit_after_save(app: AppHandle) -> Result<(), String> {
+    // 重试框必须等清理真正完成再恢复可点，避免授权仍在等待时出现“留在这里”按钮。
+    tauri::async_runtime::spawn_blocking(move || {
+        let shared = app.state::<Shared>();
+        if shared.exiting.swap(true, Ordering::SeqCst) {
+            return Err("正在退出坐功，请等待网站屏蔽解除。".into());
         }
-        QuitDecision::Stay(reason) => Err(reason),
-    }
+        shared.state.lock().unwrap().tick(now_unix());
+        save(&shared);
+        if let Some(reason) = shared.save_error.lock().unwrap().clone() {
+            shared.exiting.store(false, Ordering::SeqCst);
+            return Err(reason);
+        }
+        let _ = app.save_window_state(WINDOW_STATE);
+        complete_exit_cleanup(&app)
+    }).await.map_err(|error| format!("退出处理失败：{error}"))?
 }
 
 /// 「不保存退出」：磁盘上保持上一次成功写入的完整文件。
@@ -1371,7 +1417,7 @@ pub fn run() {
             let path = dir.join("state.json");
             let (state, protection) = load_initial(&path);
 
-            // 启动只做只读体检：残留的屏蔽段提示到设置页，绝不主动弹授权框。
+            // 建窗前先只读体检；Ready 后按保留的学习日恢复规则或清理残留。
             let mut blocking = BlockingStatus::default();
             match fs::read_to_string(hosts_path()) {
                 Ok(current) => refresh_hosts_status(&mut blocking, &current, &state.preferences.blocked_hosts, state.day.is_some()),
@@ -1381,6 +1427,9 @@ pub fn run() {
             let (qa_view, qa_scroll) = qa_launch_args();
             app.manage(Shared {
                 state: Mutex::new(state),
+                exiting: AtomicBool::new(false),
+                blocking_released: AtomicBool::new(false),
+                isolated,
                 snapshot_revision: AtomicU64::new(0),
                 save_lock: Mutex::new(()),
                 blocking_lock: Mutex::new(()),
@@ -1535,6 +1584,20 @@ pub fn run() {
         .build(tauri::generate_context!())
         .expect("error while building tauri application")
         .run(|app, event| {
+            if matches!(&event, tauri::RunEvent::Ready) {
+                let shared = app.state::<Shared>();
+                // 再次打开未结束的学习日时恢复规则；上次异常退出的残留也按当前状态核对。
+                if !shared.isolated && shared.write_protected.lock().unwrap().is_none()
+                    && blocking_needs_sync(&shared) {
+                    spawn_apply_blocking(app);
+                }
+            }
+            if let tauri::RunEvent::ExitRequested { api, .. } = &event {
+                if !app.state::<Shared>().blocking_released.load(Ordering::SeqCst) {
+                    api.prevent_exit();
+                    begin_exit_cleanup(app);
+                }
+            }
             #[cfg(target_os = "macos")]
             match &event {
                 tauri::RunEvent::Ready => space_preview::install(app),
@@ -1549,6 +1612,13 @@ pub fn run() {
             if matches!(event, tauri::RunEvent::Exit) {
                 if let Some(shared) = app.try_state::<Shared>() {
                     final_save_on_exit(&shared);
+                    // Dock 退出/注销可能绕过 ExitRequested；仍尝试清理自己的 hosts 段。
+                    shared.exiting.store(true, Ordering::SeqCst);
+                    if !shared.blocking_released.load(Ordering::SeqCst) {
+                        if let Err(error) = release_system_blocking(&shared) {
+                            eprintln!("sitzfleisch: 退出时未能解除系统屏蔽：{error}");
+                        }
+                    }
                 }
             }
         });
@@ -1576,6 +1646,9 @@ mod tests {
             fs::create_dir(&dir).unwrap();
             Self(Shared {
                 state: Mutex::new(state),
+                exiting: AtomicBool::new(false),
+                blocking_released: AtomicBool::new(false),
+                isolated: true,
                 snapshot_revision: AtomicU64::new(0),
                 save_lock: Mutex::new(()),
                 blocking_lock: Mutex::new(()),
@@ -1604,6 +1677,66 @@ mod tests {
         let mut state = core::State::new(1_000);
         state.start_day("standard", 1_000).unwrap();
         state
+    }
+
+    #[test]
+    fn exit_cleanup_only_removes_owned_hosts_and_cleans_the_staged_file() {
+        let fixture = TestShared::new(core::State::new(1_000));
+        let dir = &fixture.0.data_dir;
+        let path = dir.join("test.hosts");
+        let original = "127.0.0.1 localhost\n::1 localhost\n192.0.2.10 custom.example # keep\n";
+        let blocked = core::render_hosts(original, &["live.bilibili.com".into()], true);
+        fs::write(&path, &blocked).unwrap();
+        let result = sync_hosts_file(&path, dir, &[], false, |staged| {
+            fs::copy(staged, &path).map(|_| ()).map_err(|e| e.to_string())
+        });
+        assert_eq!(result, Ok(false));
+        assert_eq!(fs::read_to_string(&path).unwrap().trim(), original.trim());
+        assert!(!dir.join(format!("hosts.staged.{}", std::process::id())).exists());
+        assert_eq!(sync_hosts_file(&path, dir, &[], false, |_| panic!("没有托管段时不能提权")), Ok(false));
+    }
+
+    #[test]
+    fn exit_cleanup_reports_denied_or_unapplied_writes_without_losing_hosts() {
+        let fixture = TestShared::new(core::State::new(1_000));
+        let dir = &fixture.0.data_dir;
+        let path = dir.join("test.hosts");
+        let blocked = core::render_hosts("127.0.0.1 localhost\n", &["live.bilibili.com".into()], true);
+        fs::write(&path, &blocked).unwrap();
+        assert!(sync_hosts_file(&path, dir, &[], false, |_| Err("授权被取消".into())).is_err());
+        assert_eq!(fs::read_to_string(&path).unwrap(), blocked);
+        assert!(!dir.join(format!("hosts.staged.{}", std::process::id())).exists());
+        assert!(sync_hosts_file(&path, dir, &[], false, |_| Ok(())).is_err(), "必须核对真正解除，不能只信提权进程退出码");
+    }
+
+    #[test]
+    fn queued_enable_cannot_reinstate_hosts_after_exit_begins() {
+        let fixture = std::sync::Arc::new(TestShared::new(state_with_day()));
+        fixture.0.state.lock().unwrap().preferences.blocked_hosts = vec!["live.bilibili.com".into()];
+        let before = serde_json::to_string(&*fixture.0.state.lock().unwrap()).unwrap();
+        let held = fixture.0.blocking_lock.lock().unwrap();
+        let worker = fixture.clone();
+        let task = thread::spawn(move || {
+            apply_latest_blocking(&worker.0, |hosts, enable| {
+                assert_eq!(hosts, &["live.bilibili.com"]);
+                assert!(!enable, "退出开始后，排队的启用请求只能清理规则");
+            });
+        });
+        fixture.0.exiting.store(true, Ordering::SeqCst);
+        drop(held);
+        task.join().unwrap();
+        assert!(!blocking_wanted(&fixture.0));
+        assert_eq!(serde_json::to_string(&*fixture.0.state.lock().unwrap()).unwrap(), before);
+        fixture.0.exiting.store(false, Ordering::SeqCst);
+        assert!(blocking_wanted(&fixture.0), "取消退出或下次启动后，未结束的学习日仍可恢复屏蔽");
+    }
+
+    #[test]
+    fn isolated_exit_never_touches_real_system_hosts() {
+        let fixture = TestShared::new(state_with_day());
+        assert!(fixture.0.isolated);
+        assert!(release_system_blocking(&fixture.0).is_ok());
+        assert!(fixture.0.state.lock().unwrap().day.is_some());
     }
 
     fn advance_awake_seconds(state: &mut core::State, seconds: i64) {

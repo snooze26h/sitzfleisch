@@ -54,18 +54,25 @@ test("整站拦截页明确说明全站范围，不误称同站其他页面可�
   assert.match(h.elements.detail.textContent, /1 条整站规则、3 条精确网址规则/);
 });
 
-test("离线检查说明沿用规则，收工后自动恢复原网址", async () => {
+test("主程序返回坏响应时保留有效规则，收工后自动恢复原网址", async () => {
   const h = harness();
   await tick();
-  h.state.send = async () => ({ ...active, connection: "cache", error: "connection-error" });
+  h.state.send = async () => ({ ...active, connection: "cache", error: "response-error" });
   h.click("sync");
   await tick();
-  assert.match(h.elements.detail.textContent, /暂时无法连接主程序/);
-  assert.match(h.elements.detail.textContent, /继续屏蔽 4 个网址/);
+  assert.match(h.elements.detail.textContent, /主程序返回的规则无效/);
+  assert.match(h.elements.detail.textContent, /暂时屏蔽 4 个网址/);
   h.state.send = async () => ({ ...active, blocked: false, active: false });
   h.state.storageChanged();
   await tick();
   assert.deepEqual(h.replaced, [recommend]);
+});
+
+test("主程序断开后屏蔽页直接恢复原网址，不再要求先收工同步", async () => {
+  const h = harness({ send: async () => ({ ...active, connection: "disconnected", blocked: false, active: false, ruleCount: 0 }) });
+  await tick();
+  assert.deepEqual(h.replaced, [recommend]);
+  assert.match(h.elements.detail.textContent, /已解除屏蔽/);
 });
 
 test("返回通过 worker 核对，检查结果迟到不会把用户拉回原网址", async () => {

@@ -1,6 +1,6 @@
 [package]
 name = "sitzfleisch-x"
-version = "0.11.2"
+version = "0.11.3"
 description = "Sitzfleisch cross-platform (macOS + Windows)"
 authors = ["snooze26h"]
 edition = "2021"

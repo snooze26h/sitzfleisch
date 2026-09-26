@@ -1,7 +1,7 @@
 // 主循环：快照进来 → 拼 HTML → morphdom 打补丁 → 画运行图。所有交互走事件委托。
 
 import morphdom from "morphdom";
-import { invoke, onExtendRequested, onQuitBlocked, onReminder, onSnapshot, setWindowTitle } from "./api";
+import { invoke, onExtendRequested, onQuitBlocked, onQuitBlockingFailed, onReminder, onSnapshot, setWindowTitle } from "./api";
 import { conflictingHost, MAX_BLOCK_RULES, normalizeHost, normalizeUrl } from "./blocking";
 import type { Day, Preferences, Snapshot, View } from "./types";
 import { MAX_BLOCK_MINUTES, MIN_BLOCK_MINUTES, MAX_COMPLETION_NOTE_CHARS } from "./types";
@@ -202,8 +202,8 @@ function toast(message: string, ms = 6000) {
 function ask(dialog: Omit<Dialog, "token">) {
   ui.menu = null;
   const current = ui.dialog;
-  // 同一个 id 再来一次（比如又按了一次退出）：只换正文，不叠新框，也不打断正在进行的那一下。
-  if (current && dialog.id && current.id === dialog.id) {
+  // 同一阶段的重复通知只换正文；退出从“保存失败”进入“解除失败”时必须更新按钮与回调。
+  if (current && dialog.id && current.id === dialog.id && current.title === dialog.title) {
     current.message = dialog.message;
     render();
     return;
@@ -1156,6 +1156,21 @@ void onQuitBlocked((reason) => {
           toast(String(error));
         }
       },
+    },
+  });
+});
+void onQuitBlockingFailed((reason) => {
+  ask({
+    id: QUIT_DIALOG_ID,
+    title: "退出暂未完成",
+    message: `网站屏蔽还没有解除：${reason}。请重试并完成系统授权，解除后会自动退出。`,
+    confirmLabel: "重试并退出", cancelLabel: "留在这里", destructive: false, focus: "confirm",
+    onConfirm: async (self): Promise<"keep"> => {
+      try { await invoke("quit_after_save"); }
+      catch (error) {
+        if (ui.dialog?.token === self.token) ui.dialog.message = `退出暂未完成：${String(error)}`;
+      }
+      return "keep";
     },
   });
 });

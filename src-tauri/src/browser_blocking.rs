@@ -3,6 +3,7 @@
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::sync::Mutex;
+use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
 
 use serde::Serialize;
@@ -63,12 +64,17 @@ pub(crate) struct Rules {
 }
 
 impl Rules {
-    pub fn from_state(state: &core::State) -> Self {
-        Self::for_protocol(state, 2)
+    pub fn from_state(state: &core::State, exiting: bool) -> Self {
+        Self::for_runtime(state, 2, exiting)
     }
 
+    #[cfg(test)]
     fn for_protocol(state: &core::State, protocol: u8) -> Self {
-        let active = state.day.is_some();
+        Self::for_runtime(state, protocol, false)
+    }
+
+    fn for_runtime(state: &core::State, protocol: u8, exiting: bool) -> Self {
+        let active = state.day.is_some() && !exiting;
         // 收工后不传无效规则，也让扩展明确清空上次学习日的缓存。
         let urls = if active { state.preferences.blocked_urls.clone() } else { vec![] };
         let hosts = (protocol == 2).then(|| if active { state.preferences.blocked_hosts.clone() } else { vec![] });
@@ -187,14 +193,14 @@ fn serve(stream: &mut TcpStream, shared: &super::Shared) {
     let response = {
         let state = shared.state.lock().unwrap();
         // 保护模式不把临时空状态同步过去，否则读档失败反而会解除浏览器里仍有效的屏蔽。
-        if shared.write_protected.lock().unwrap().is_some()
+        let exiting = shared.exiting.load(Ordering::SeqCst);
+        if !exiting && (shared.write_protected.lock().unwrap().is_some()
             || state.preferences.blocked_urls.len() + state.preferences.blocked_hosts.len() > core::MAX_BLOCK_RULES
             || state.preferences.blocked_urls.iter().any(|url| core::validate_url(url).as_ref() != Ok(url))
-            || state.preferences.blocked_hosts.iter().any(|host| core::validate_host(host).as_ref() != Ok(host))
-        {
+            || state.preferences.blocked_hosts.iter().any(|host| core::validate_host(host).as_ref() != Ok(host))) {
             None
         } else {
-            let rules = Rules::for_protocol(&state, protocol);
+            let rules = Rules::for_runtime(&state, protocol, exiting);
             shared.browser_bridge.lock().unwrap().received(protocol, applied);
             Some(serde_json::to_vec(&rules).expect("网址规则可以序列化"))
         }
@@ -307,11 +313,11 @@ mod tests {
     fn acknowledgements_track_rule_changes_day_end_and_disconnection() {
         let mut state = core::State::new(1000);
         state.preferences.blocked_urls = vec!["https://www.douyin.com/?recommend=1".into()];
-        let idle = Rules::from_state(&state);
+        let idle = Rules::from_state(&state, false);
         assert!(!idle.active);
         assert!(idle.urls.is_empty());
         state.start_day("standard", 1000).unwrap();
-        let active = Rules::from_state(&state);
+        let active = Rules::from_state(&state, false);
         assert_ne!(active.revision, idle.revision);
         assert_eq!(active.urls, state.preferences.blocked_urls);
         let mut bridge = Bridge { available: true, ..Bridge::default() };
@@ -323,16 +329,36 @@ mod tests {
         assert!(bridge.status(&active).synced);
         // 暂停不会解除精确网址；只有收工或删除规则改变同步版本。
         state.tick(1001);
-        assert_eq!(Rules::from_state(&state).revision, active.revision);
+        assert_eq!(Rules::from_state(&state, false).revision, active.revision);
         state.preferences.blocked_urls.push("https://www.bilibili.com/".into());
-        assert!(!bridge.status(&Rules::from_state(&state)).synced);
+        assert!(!bridge.status(&Rules::from_state(&state, false)).synced);
         state.abandon_day().unwrap();
-        assert_eq!(Rules::from_state(&state).revision, idle.revision);
+        assert_eq!(Rules::from_state(&state, false).revision, idle.revision);
         bridge.received(2, Some(idle.revision.clone()));
         assert!(bridge.status(&idle).synced);
         bridge.last_seen = Some(Instant::now() - CONNECTED_FOR);
         assert!(!bridge.status(&idle).connected);
         assert!(!bridge.status(&idle).synced);
+    }
+
+    #[test]
+    fn quitting_releases_browser_rules_without_ending_the_saved_day() {
+        let mut state = core::State::new(1_000);
+        state.preferences.blocked_hosts = vec!["live.bilibili.com".into()];
+        state.preferences.blocked_urls = vec!["https://www.bilibili.com/".into()];
+        state.start_day("standard", 1_000).unwrap();
+        let before = serde_json::to_string(&state).unwrap();
+        for protocol in [1, 2] {
+            let active = Rules::for_runtime(&state, protocol, false);
+            let exiting = Rules::for_runtime(&state, protocol, true);
+            assert!(active.active);
+            assert!(!exiting.active);
+            assert!(exiting.urls.is_empty());
+            assert!(exiting.hosts.as_ref().is_none_or(Vec::is_empty));
+            assert_ne!(active.revision, exiting.revision);
+            assert_eq!(Rules::for_runtime(&state, protocol, false).revision, active.revision);
+        }
+        assert_eq!(serde_json::to_string(&state).unwrap(), before);
     }
 
     /// 一天里所有「没在跑格」的状态都必须继续屏蔽：手动按停、休息、
@@ -343,23 +369,23 @@ mod tests {
         let mut state = core::State::new(1_000);
         state.preferences.blocked_hosts = vec!["live.bilibili.com".into()];
         state.preferences.blocked_urls = vec!["https://www.bilibili.com/".into()];
-        let idle = Rules::from_state(&state);
+        let idle = Rules::from_state(&state, false);
         assert!(!idle.active, "没开学习日就不该屏蔽");
 
         state.start_day("standard", 1_000).unwrap();
         // 还没开格——0.8.0 之后这本身就算暂停。
-        let day = Rules::from_state(&state);
+        let day = Rules::from_state(&state, false);
         assert!(day.active && state.day.as_ref().unwrap().is_paused());
 
         state.start_block("main", 25, vec![]).unwrap();
         state.tick(1_060);
         assert!(!state.day.as_ref().unwrap().is_paused(), "格在跑");
-        assert_eq!(Rules::from_state(&state).revision, day.revision, "开格不改规则");
+        assert_eq!(Rules::from_state(&state, false).revision, day.revision, "开格不改规则");
 
         // 手动按停。
         state.toggle_pause(1_060).unwrap();
         assert!(state.day.as_ref().unwrap().is_paused());
-        let paused = Rules::from_state(&state);
+        let paused = Rules::from_state(&state, false);
         assert!(paused.active, "按停时必须还在屏蔽");
         assert_eq!(paused.revision, day.revision, "暂停不该让扩展重新同步");
         assert_eq!(paused.urls, state.preferences.blocked_urls);
@@ -369,16 +395,16 @@ mod tests {
         state.toggle_pause(1_120).unwrap();
         state.finish_block(1_200).unwrap();
         assert!(state.day.as_ref().unwrap().is_paused(), "结束一格就进暂停");
-        assert!(Rules::from_state(&state).active, "休息时必须还在屏蔽");
+        assert!(Rules::from_state(&state, false).active, "休息时必须还在屏蔽");
 
         // 合盖 / 休眠：心跳跨过 120 秒，自动暂停。
         state.tick(1_500);
         assert!(state.day.as_ref().unwrap().is_paused());
-        assert_eq!(Rules::from_state(&state).revision, day.revision, "自动暂停也不改规则");
+        assert_eq!(Rules::from_state(&state, false).revision, day.revision, "自动暂停也不改规则");
 
         // 只有收工才解除。
         state.end_day(1_600).unwrap();
-        let ended = Rules::from_state(&state);
+        let ended = Rules::from_state(&state, false);
         assert!(!ended.active);
         assert!(ended.urls.is_empty() && ended.hosts.as_ref().unwrap().is_empty());
         assert_eq!(ended.revision, idle.revision);
@@ -390,7 +416,7 @@ mod tests {
         state.preferences.blocked_hosts = vec!["live.bilibili.com".into()];
         state.preferences.blocked_urls = vec!["https://www.douyin.com/?recommend=1".into()];
         state.start_day("standard", 1000).unwrap();
-        let active = Rules::from_state(&state);
+        let active = Rules::from_state(&state, false);
         assert_eq!(active.hosts.as_ref().unwrap(), &state.preferences.blocked_hosts);
         let legacy = Rules::for_protocol(&state, 1);
         let encoded = serde_json::to_value(&legacy).unwrap();
@@ -401,12 +427,12 @@ mod tests {
         assert!(bridge.status(&active).synced);
         assert!(!bridge.status(&active).supports_hosts);
         bridge.received(2, Some(active.revision));
-        assert!(bridge.status(&Rules::from_state(&state)).supports_hosts);
-        assert!(bridge.status(&Rules::from_state(&state)).synced);
+        assert!(bridge.status(&Rules::from_state(&state, false)).supports_hosts);
+        assert!(bridge.status(&Rules::from_state(&state, false)).synced);
         state.preferences.blocked_hosts.clear();
-        assert!(!bridge.status(&Rules::from_state(&state)).synced);
+        assert!(!bridge.status(&Rules::from_state(&state, false)).synced);
         state.abandon_day().unwrap();
-        let idle = Rules::from_state(&state);
+        let idle = Rules::from_state(&state, false);
         assert!(idle.hosts.unwrap().is_empty());
         assert!(idle.urls.is_empty());
     }

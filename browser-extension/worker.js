@@ -45,6 +45,7 @@ export function createBlocker({ chromeApi, fetchImpl = fetch, now = Date.now, ti
   let connection = "waiting";
   let error = null;
   let syncFlight = null;
+  let rulesConfirmedInFlight = false;
   let ready = null;
   let started = false;
   let enforcementFailureGeneration = 0;
@@ -168,6 +169,7 @@ export function createBlocker({ chromeApi, fetchImpl = fetch, now = Date.now, ti
       // 先保存完整快照；只有持久化和已开标签检查完成后才报告已应用版本。
       await chromeApi.storage.local.set({ [CACHE_KEY]: { rules: next, lastSyncAt, appliedRevision: null } });
       rules = next;
+      rulesConfirmedInFlight = true;
       appliedRevision = null;
       const failureGeneration = enforcementFailureGeneration;
       await inspectAllTabs();
@@ -180,9 +182,17 @@ export function createBlocker({ chromeApi, fetchImpl = fetch, now = Date.now, ti
       connection = "connected";
       error = null;
     } catch {
-      connection = rules ? "cache" : "waiting";
+      connection = phase === "connection-error" ? "disconnected" : rules ? "cache" : "waiting";
       error = phase;
-      if (phase === "apply-error") {
+      if (phase === "connection-error") {
+        // 完整退出后本机服务不再响应：解除执行状态，不能无限期沿用旧学习日。
+        // 这是本地释放，不是主程序的成功同步，因此不产生 ACK，也不改 lastSyncAt。
+        rules = { protocol: 2, active: false, urls: [], hosts: [], revision: "0000000000000000" };
+        appliedRevision = null;
+        try {
+          await chromeApi.storage.local.set({ [CACHE_KEY]: { rules, lastSyncAt, appliedRevision: null } });
+        } catch { error = "release-save-error"; }
+      } else if (phase === "apply-error") {
         appliedRevision = null;
         if (rules !== null) {
           try {
@@ -190,9 +200,10 @@ export function createBlocker({ chromeApi, fetchImpl = fetch, now = Date.now, ti
           } catch { /* 存储不可用时仍在内存中撤销确认；新 worker 也不继承旧确认。 */ }
         }
       }
-      // 退出主程序不等于收工。连接失败继续使用上次有效规则，不能自动放行。
+      // 断开时恢复已有阻止页；主程序仍在线但返回坏数据时，保留原有效规则。
       try { await inspectAllTabs(); } catch { error = "apply-error"; }
     } finally {
+      rulesConfirmedInFlight = false;
       clearTimeout(timeout);
     }
     return status();
@@ -208,13 +219,16 @@ export function createBlocker({ chromeApi, fetchImpl = fetch, now = Date.now, ti
   function inspectEvent(tabId, url, timestamp, committed = false) {
     const version = nextNavigation(tabId, timestamp);
     if (version === null) return;
-    void inspectTab(tabId, version, url, committed).catch(() => {
+    // 新导航先确认主程序仍在线，避免退出后的旧缓存先拦截、再立即放行。
+    // 本轮已收到有效响应时可直接检查，保留应用过程中的并发导航错误追踪。
+    const flight = sync();
+    const inspect = () => inspectTab(tabId, version, url, committed);
+    void (rulesConfirmedInFlight ? inspect() : flight.then(inspect)).catch(() => {
       enforcementFailureGeneration += 1;
       appliedRevision = null;
-      connection = rules ? "cache" : "waiting";
+      if (connection !== "disconnected") connection = rules ? "cache" : "waiting";
       error = "apply-error";
     });
-    void sync();
   }
 
   async function leaveBlockedPage(sender) {
