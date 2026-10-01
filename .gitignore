@@ -49,3 +49,6 @@ design/visual-refresh-20260909/DESIGN.before.md
 
 # 月面原始数据（NASA SVS CGI Moon Kit）只在本地出图时用，见 design/yue/render_moon.py
 design/yue/source/
+
+# Android 迁移的本地进度、验证记录和截图不入库。
+/.android-work/
