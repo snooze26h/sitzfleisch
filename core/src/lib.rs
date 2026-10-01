@@ -15,6 +15,20 @@ pub const MAX_COMPLETION_NOTE_CHARS: usize = 2000;
 pub const HISTORY_LIMIT: usize = 60;
 pub const MAX_BLOCK_RULES: usize = 64;
 pub const MAX_BLOCK_URL_BYTES: usize = 4096;
+/// 两格之间停够这么久，就当起来活动过，起身提醒从头数。
+pub const RELIEF_PAUSE_SECONDS: i64 = 5 * 60;
+/// 界面传进来的计划与任务的上限。都比界面上实际能填的宽得多，只为挡住离谱的输入：
+/// 偏好每秒随心跳广播、每 30 秒落盘，不能让一份几兆的计划拖着走。
+const MAX_CATEGORIES: usize = 64;
+const MAX_PROFILES: usize = 16;
+const MAX_ID_CHARS: usize = 64;
+const MAX_NAME_CHARS: usize = 80;
+const MAX_SHORT_NAME_CHARS: usize = 32;
+const MAX_NOTE_CHARS: usize = 1000;
+const MAX_TASKS: usize = 50;
+const MAX_TASK_CHARS: usize = 500;
+/// 读档时累计秒数的上限（约 400 天），只为让手改或损坏的存档算不出溢出。
+const MAX_TRACKED_SECONDS: i64 = 400 * 24 * 3600;
 
 // ---------- 计划（用户可编辑） ----------
 
@@ -256,6 +270,9 @@ pub fn validate_preferences(prefs: &Preferences) -> RuleResult {
     if prefs.profiles.is_empty() {
         return Err("至少要有一份计划");
     }
+    if prefs.categories.len() > MAX_CATEGORIES || prefs.profiles.len() > MAX_PROFILES {
+        return Err("项目或计划太多");
+    }
     if !(0..=120).contains(&prefs.break_minutes) {
         return Err("休息时长要在 0–120 分钟之间");
     }
@@ -288,9 +305,19 @@ pub fn validate_preferences(prefs: &Preferences) -> RuleResult {
         }
     }
     let mut ids = Vec::new();
+    let too_long = |text: &str, limit: usize| text.chars().count() > limit;
     for category in &prefs.categories {
         if category.id.trim().is_empty() || category.name.trim().is_empty() {
             return Err("项目名不能为空");
+        }
+        if too_long(&category.id, MAX_ID_CHARS)
+            || too_long(&category.name, MAX_NAME_CHARS)
+            || too_long(&category.short_name, MAX_SHORT_NAME_CHARS)
+            || too_long(&category.icon, MAX_ID_CHARS)
+            || too_long(&category.role, MAX_ID_CHARS)
+            || too_long(&category.block_rationale, MAX_NOTE_CHARS)
+        {
+            return Err("项目信息过长");
         }
         if !(MIN_BLOCK_MINUTES..=MAX_BLOCK_MINUTES).contains(&category.default_block_minutes) {
             return Err("默认块时长要在 1–180 分钟之间");
@@ -304,11 +331,20 @@ pub fn validate_preferences(prefs: &Preferences) -> RuleResult {
         if profile.name.trim().is_empty() {
             return Err("计划名不能为空");
         }
+        if too_long(&profile.id, MAX_ID_CHARS) || too_long(&profile.name, MAX_NAME_CHARS) || too_long(&profile.subtitle, MAX_NOTE_CHARS) {
+            return Err("计划信息过长");
+        }
         let mut active = 0;
+        let mut seen: Vec<&str> = Vec::new();
         for q in &profile.quotas {
             if !ids.contains(&q.category) {
                 return Err("计划引用了不存在的项目");
             }
+            // 同一项目配两次，今天就会出现两条同名配额，记账只记得住其中一条。
+            if seen.contains(&q.category.as_str()) {
+                return Err("同一份计划里项目重复");
+            }
+            seen.push(&q.category);
             if !(0..=24 * 60).contains(&q.minutes) {
                 return Err("配额要在 0–24 小时之间");
             }
@@ -344,14 +380,24 @@ pub struct BlockTimer {
     /// 开格的墙钟时刻（运行图与走时条用）。
     #[serde(default)]
     pub started_at: i64,
-    /// 这一格之后的休息分钟数；0 表示沿用偏好里的休息时长。
-    #[serde(default)]
+    /// 这一格之后休息几分钟，开格时就定下来；0 就是不休息。
+    /// 早期存档没有这个字段，记作 -1，走完时再按偏好补上。
+    #[serde(default = "unspecified_break")]
     pub break_minutes: i64,
+}
+
+fn unspecified_break() -> i64 {
+    -1
 }
 
 impl BlockTimer {
     pub fn remaining_seconds(&self) -> i64 {
         (self.total_seconds - self.elapsed_seconds).max(0)
+    }
+
+    /// 走完这一格之后休息几秒。只有早期存档里没定下来的那种才回头看偏好。
+    fn rest_seconds(&self, fallback_minutes: i64) -> i64 {
+        if self.break_minutes >= 0 { self.break_minutes * 60 } else { fallback_minutes.max(0) * 60 }
     }
 }
 
@@ -376,14 +422,14 @@ fn legacy_completion_note() -> Option<String> {
     Some(String::new())
 }
 
-/// 一段暂停：手动按的，或休眠、锁屏自动判定的。运行图靠它把时间线连起来。
+/// 一段暂停：手动按的，或休眠时自动判定的（心跳中断超过 120 秒；单独锁屏不算）。运行图靠它把时间线连起来。
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct PauseSpan {
     pub started_at: i64,
     /// 还没继续时为 None。
     #[serde(default)]
     pub ended_at: Option<i64>,
-    /// true 表示是休眠/锁屏自动按停的，不是人点的。
+    /// true 表示是休眠（心跳中断）自动按停的，不是人点的。
     #[serde(default)]
     pub auto: bool,
 }
@@ -392,6 +438,15 @@ impl PauseSpan {
     pub fn seconds(&self, now: i64) -> i64 {
         (self.ended_at.unwrap_or(now) - self.started_at).max(0)
     }
+}
+
+/// 一段休息：结束一格后按设定休息的那段时间。休息照样落在暂停里，但起止要单独记下来——
+/// `break_until` 只是眼下这段暂停上的标签，休息一结束就摘掉，运行图事后就认不出哪段是休息了。
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RestSpan {
+    pub started_at: i64,
+    /// 开始时写计划到几点；提前结束（开下一格、不休息了、收工）就截到那一刻。
+    pub ended_at: i64,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -433,6 +488,9 @@ pub struct Day {
     /// 今天每一段暂停的起止；最后一段 ended_at 为 None 表示现在正暂停着。
     #[serde(default)]
     pub pauses: Vec<PauseSpan>,
+    /// 今天每一段休息的起止。旧存档没有这个字段，按没记过休息处理。
+    #[serde(default)]
+    pub rests: Vec<RestSpan>,
 }
 
 impl Day {
@@ -467,6 +525,7 @@ impl Day {
             paused_without_block: 0,
             break_until: None,
             pauses: Vec::new(),
+            rests: Vec::new(),
         }
     }
 
@@ -514,6 +573,29 @@ impl Day {
         }
     }
 
+    /// 结束一格后开始休息：休息标签和休息记录一起落下；0 秒就是不休息。
+    fn begin_rest(&mut self, from: i64, seconds: i64) {
+        if seconds > 0 {
+            self.break_until = Some(from + seconds);
+            self.rests.push(RestSpan { started_at: from, ended_at: from + seconds });
+        } else {
+            self.break_until = None;
+        }
+    }
+
+    /// 休息提前结束（开下一格、不休息了、收工）：摘掉标签，记录截到这一刻。
+    /// 已经自然到点的休息不动，它的终点本来就是计划的那一刻。
+    fn cut_rest(&mut self, now: i64) {
+        if self.break_until.take().is_none() {
+            return;
+        }
+        if let Some(last) = self.rests.last_mut() {
+            if last.ended_at > now {
+                last.ended_at = now.max(last.started_at);
+            }
+        }
+    }
+
     /// 把一格收进台账。accepted=false 表示主动放弃，时间不计进度。
     fn record(&mut self, timer: BlockTimer, accepted: bool, now: i64) {
         let seconds = timer.elapsed_seconds.max(0);
@@ -521,6 +603,8 @@ impl Day {
             return;
         }
         let started_at = if timer.started_at > 0 { timer.started_at } else { now - seconds };
+        // 时钟往回拨过时 now 可能早于开格时刻：终点至少落在起点上，台账不出现倒着走的一格。
+        let ended_at = now.max(started_at);
         if accepted {
             if let Some(category) = self.categories.iter_mut().find(|c| c.id == timer.category) {
                 category.accepted_seconds += seconds;
@@ -532,7 +616,7 @@ impl Day {
             accepted,
             tasks: timer.tasks,
             started_at,
-            ended_at: now,
+            ended_at,
             completion_note: if accepted { None } else { Some(String::new()) },
         });
     }
@@ -586,6 +670,8 @@ impl State {
         self.last_tick = now;
         let Some(day) = &mut self.day else { return };
         if gap <= 0 {
+            // 时钟往回拨过，空档算不出来；但「重启一律先暂停」这条照样要守。
+            day.begin_pause(now, true);
             return;
         }
         day.suspend_seconds += gap;
@@ -598,6 +684,11 @@ impl State {
         let now = self.last_tick;
         let previous = self.water_clock_checked_at.replace(now);
         let Some(previous) = previous else { return false };
+        // 时钟往前跳过又拨回来：上次提醒记在远超现在的「未来」钟点上，要等真实时间追上它才会再提醒。
+        // 只夹那种比现在晚出一整个提醒周期的；回拨几秒、几分钟仍认原来的记录，同一个钟点不提醒两遍。
+        if self.water_reminded_at.is_some_and(|last| last > now + WATER_REMINDER_MINUTES * 60) {
+            self.water_reminded_at = Some(now);
+        }
         if !self.preferences.water_reminder_enabled || local_seconds_in_hour >= 3600 {
             return false;
         }
@@ -649,18 +740,18 @@ impl State {
     }
 
     /// 一切时间只经由心跳计入。暂停时什么都不走；
-    /// 间隔超过 120 秒（休眠、锁屏）判为挂起：只记挂起账，并自动暂停。
+    /// 间隔超过 120 秒（休眠、进程被挂起）判为挂起：只记挂起账，并自动暂停。单独锁屏时心跳照走，不算。
     pub fn tick(&mut self, now: i64) {
         let delta = now - self.last_tick;
         self.last_tick = now;
         if delta <= 0 {
             return;
         }
-        let break_seconds = self.preferences.break_minutes * 60;
+        let fallback_break = self.preferences.break_minutes;
         let Some(day) = &mut self.day else { return };
 
         if delta > SUSPEND_GAP_SECONDS {
-            // 休眠 / 锁屏：一秒都不补，但这段空档要落在暂停段里，从空档开始那一刻算起。
+            // 休眠：一秒都不补，但这段空档要落在暂停段里，从空档开始那一刻算起。
             day.suspend_seconds += delta;
             day.paused_seconds += delta;
             day.begin_pause(now - delta, true);
@@ -669,7 +760,8 @@ impl State {
 
         if day.is_paused() {
             day.paused_seconds += delta;
-            if day.timer.is_none() {
+            // 闲置提醒只数休息以外的暂停：休息是排好的，休息中不催开格，休息结束另有提醒。
+            if day.timer.is_none() && !day.resting(now) {
                 day.paused_without_block += delta;
             }
             return;
@@ -700,13 +792,13 @@ impl State {
 
         let ended_at = now - overflow;
         let finished = day.timer.take().expect("guarded above");
-        let rest = if finished.break_minutes > 0 { finished.break_minutes * 60 } else { break_seconds };
+        let rest = finished.rest_seconds(fallback_break);
         // 走完直接计入，然后立刻进入暂停：不做任务的时间也要有个去处。
         day.record(finished, true, ended_at);
         day.begin_pause(ended_at, false);
         day.paused_seconds += overflow;
         day.paused_without_block = overflow;
-        day.break_until = if rest > 0 { Some(ended_at + rest) } else { None };
+        day.begin_rest(ended_at, rest);
     }
 
     // ---------- 计划 ----------
@@ -727,11 +819,11 @@ impl State {
             return Err("今天已经开始了");
         }
         let Some(profile) = self.preferences.profiles.iter().find(|p| p.id == profile_id) else {
-            return Err("没有这个档位");
+            return Err("没有这个计划");
         };
         let mut day = Day::from_profile(&self.preferences, profile, now);
         if day.categories.is_empty() {
-            return Err("这个档位没有任何配了时的项目");
+            return Err("这个计划没有任何配了时的项目");
         }
         // 还没开格，所以从暂停起步：这段挑项目的时间也要有个去处。
         day.begin_pause(now, false);
@@ -744,7 +836,7 @@ impl State {
     /// 原样保留；新档位没配时但今天已经记了账的项目留在册上，目标归零。
     pub fn switch_profile(&mut self, profile_id: &str) -> RuleResult {
         let Some(profile) = self.preferences.profiles.iter().find(|p| p.id == profile_id) else {
-            return Err("没有这个档位");
+            return Err("没有这个计划");
         };
         let Some(day) = &mut self.day else { return Err("今天还没开始") };
         let mut categories: Vec<CategoryState> = Vec::new();
@@ -770,7 +862,7 @@ impl State {
             }
         }
         if categories.is_empty() {
-            return Err("这个档位没有任何配了时的项目");
+            return Err("这个计划没有任何配了时的项目");
         }
         let order = &self.preferences.categories;
         categories.sort_by_key(|c| order.iter().position(|d| d.id == c.id).unwrap_or(usize::MAX));
@@ -795,7 +887,7 @@ impl State {
         if let Some(timer) = day.timer.take() {
             day.record(timer, true, now);
         }
-        day.break_until = None;
+        day.cut_rest(now);
         day.close_pause(now);
         let day = self.day.take().expect("guarded above");
         self.history.push(ArchivedDay { day, ended_at: now });
@@ -818,11 +910,13 @@ impl State {
 
     // ---------- 专注格 ----------
 
+    /// 开格，之后的休息沿用偏好里的时长。
     pub fn start_block(&mut self, category_id: &str, minutes: i64, tasks: Vec<TaskItem>) -> RuleResult {
-        self.start_block_with_break(category_id, minutes, tasks, 0)
+        let rest = self.preferences.break_minutes;
+        self.start_block_with_break(category_id, minutes, tasks, rest)
     }
 
-    /// 开格并指定这一格之后的休息分钟数（0 = 沿用偏好）。正暂停着就顺手继续。
+    /// 开格并指定这一格之后休息几分钟（0 = 不休息）。正暂停着就顺手继续。
     pub fn start_block_with_break(
         &mut self,
         category_id: &str,
@@ -841,9 +935,6 @@ impl State {
         if !day.categories.iter().any(|c| c.id == category_id) {
             return Err("今天没有这个项目");
         }
-        // 开格等于结束休息，也等于结束暂停。
-        day.break_until = None;
-        day.close_pause(now);
         let tasks: Vec<TaskItem> = tasks
             .into_iter()
             .filter_map(|t| {
@@ -851,6 +942,16 @@ impl State {
                 if text.is_empty() { None } else { Some(TaskItem { text, done: t.done }) }
             })
             .collect();
+        if tasks.len() > MAX_TASKS || tasks.iter().any(|t| t.text.chars().count() > MAX_TASK_CHARS) {
+            return Err("任务太多或太长");
+        }
+        // 两格之间停够了，就当起来活动过：起身提醒从头数。停不到几分钟就接着开格，还算连续在座。
+        if day.current_pause_seconds(now) >= RELIEF_PAUSE_SECONDS {
+            day.seated_since_relief = 0;
+        }
+        // 开格等于结束休息，也等于结束暂停。
+        day.cut_rest(now);
+        day.close_pause(now);
         day.timer = Some(BlockTimer {
             category: category_id.into(),
             total_seconds: minutes * 60,
@@ -871,7 +972,7 @@ impl State {
         }
         if day.is_paused() {
             day.close_pause(now);
-            day.break_until = None;
+            day.cut_rest(now);
             day.seated_since_relief = 0;
         } else {
             day.begin_pause(now, false);
@@ -896,14 +997,15 @@ impl State {
 
     /// 提前结束这一格：走过的时间直接计入，随后进入暂停（带上休息倒计时）。
     pub fn finish_block(&mut self, now: i64) -> RuleResult {
-        let break_seconds = self.preferences.break_minutes * 60;
+        let fallback_break = self.preferences.break_minutes;
         let Some(day) = &mut self.day else { return Err("今天还没开始") };
         let Some(timer) = day.timer.take() else { return Err("没有在走的计时") };
-        let rest = if timer.break_minutes > 0 { timer.break_minutes * 60 } else { break_seconds };
+        // 一秒都没走就点了结束：台账里什么也没记，也就没有休息可给。
+        let rest = if timer.elapsed_seconds > 0 { timer.rest_seconds(fallback_break) } else { 0 };
         day.record(timer, true, now);
         day.begin_pause(now, false);
         day.paused_without_block = 0;
-        day.break_until = if rest > 0 { Some(now + rest) } else { None };
+        day.begin_rest(now, rest);
         Ok(())
     }
 
@@ -933,16 +1035,18 @@ impl State {
         day.record(timer, false, now);
         day.begin_pause(now, false);
         day.paused_without_block = 0;
-        day.break_until = None;
+        day.cut_rest(now);
         Ok(())
     }
 
     /// 不休息了：把休息标签摘掉，人仍然停在暂停里，等着开下一格。
     pub fn end_break(&mut self) -> RuleResult {
+        let now = self.last_tick;
         let Some(day) = &mut self.day else { return Err("今天还没开始") };
-        if day.break_until.take().is_none() {
+        if day.break_until.is_none() {
             return Err("现在不在休息");
         }
+        day.cut_rest(now);
         Ok(())
     }
 
@@ -1088,53 +1192,75 @@ pub const HOSTS_BEGIN: &str = "# BEGIN sitzfleisch-managed";
 pub const HOSTS_END: &str = "# END sitzfleisch-managed";
 
 /// 把托管段从 hosts 内容里剥掉，其余行原样保留。
-fn strip_managed(current: &str) -> Vec<String> {
-    let mut kept = Vec::new();
+/// 去掉托管段（两行标记和中间的记录），连同我们加在 BEGIN 前面的那一个空行；其余字节原样保留，
+/// 行尾是 CRLF 还是 LF、文件末尾有没有空行，都照旧。
+fn strip_managed(current: &str) -> String {
+    let mut kept = String::with_capacity(current.len());
     let mut inside = false;
-    for line in current.lines() {
-        if line.trim() == HOSTS_BEGIN {
+    // 空行先押着：紧跟着的是 BEGIN，它就是当初加进去的分隔空行，一起拿掉。
+    let mut held_blank: Option<&str> = None;
+    for line in current.split_inclusive('\n') {
+        let bare = line.trim();
+        if inside {
+            if bare == HOSTS_END {
+                inside = false;
+            }
+            continue;
+        }
+        if bare == HOSTS_BEGIN {
             inside = true;
+            held_blank = None;
             continue;
         }
-        if line.trim() == HOSTS_END {
-            inside = false;
-            continue;
+        if let Some(blank) = held_blank.take() {
+            kept.push_str(blank);
         }
-        if !inside {
-            kept.push(line.to_string());
+        if bare.is_empty() && line.ends_with('\n') {
+            held_blank = Some(line);
+        } else {
+            kept.push_str(line);
         }
+    }
+    if let Some(blank) = held_blank {
+        kept.push_str(blank);
     }
     kept
 }
 
 /// 生成新的 hosts 内容：enable 且列表非空时在文件尾部维护一段托管区，
-/// 否则确保托管区不存在。除托管区外一个字节都不动。幂等。
+/// 否则确保托管区不存在。除托管区外一个字节都不动，新加的行沿用原文件的行尾。幂等。
 pub fn render_hosts(current: &str, hosts: &[String], enable: bool) -> String {
     // 落到系统文件前再守一道边界：即使调用方绕过设置校验，也不接收 URL 或注入行。
     let hosts: Vec<&String> = hosts.iter().filter(|host| {
         validate_host(host).as_deref() == Ok(host.as_str())
     }).collect();
-    let mut lines = strip_managed(current);
-    while lines.last().map(|l| l.trim().is_empty()).unwrap_or(false) {
-        lines.pop();
+    let mut output = strip_managed(current);
+    if !enable || hosts.is_empty() {
+        return output;
     }
-    if enable && !hosts.is_empty() {
-        lines.push(String::new());
-        lines.push(HOSTS_BEGIN.to_string());
-        for host in hosts {
-            // hosts 文件不支持通配，所以裸域与 www 各写一份——多数站点默认就在 www 上，
-            // 只写裸域等于没挡住。更深的子域挡不了，界面文案也照实说。
-            lines.push(format!("127.0.0.1 {host}"));
-            lines.push(format!("::1 {host}"));
-            if !host.starts_with("www.") {
-                lines.push(format!("127.0.0.1 www.{host}"));
-                lines.push(format!("::1 www.{host}"));
-            }
+    let newline = if current.contains("\r\n") { "\r\n" } else { "\n" };
+    if !output.is_empty() {
+        if !output.ends_with('\n') {
+            output.push_str(newline);
         }
-        lines.push(HOSTS_END.to_string());
+        output.push_str(newline);
     }
-    let mut output = lines.join("\n");
-    output.push('\n');
+    let mut push = |line: &str| {
+        output.push_str(line);
+        output.push_str(newline);
+    };
+    push(HOSTS_BEGIN);
+    for host in hosts {
+        // hosts 文件不支持通配，所以裸域与 www 各写一份——多数站点默认就在 www 上，
+        // 只写裸域等于没挡住。更深的子域挡不了，界面文案也照实说。
+        push(&format!("127.0.0.1 {host}"));
+        push(&format!("::1 {host}"));
+        if !host.starts_with("www.") {
+            push(&format!("127.0.0.1 www.{host}"));
+            push(&format!("::1 www.{host}"));
+        }
+    }
+    push(HOSTS_END);
     output
 }
 
@@ -1264,11 +1390,22 @@ fn migrate_v2(value: &mut serde_json::Value) {
             map.insert("paused_seconds".into(), away);
         }
         map.remove("away_reason");
+        // v2 的休息也是一个计时（phase = "break"）。新版里休息不是格，留着就会被当成一格专注计入。
+        if map.get("timer").and_then(|t| t.get("phase")).and_then(|v| v.as_str()) == Some("break") {
+            map.insert("timer".into(), serde_json::Value::Null);
+        }
         if let Some(timer) = map.get_mut("timer").filter(|v| !v.is_null()) {
             tasks_from_intention(timer);
         }
         if let Some(ledger) = map.get_mut("ledger").and_then(|v| v.as_array_mut()) {
             for entry in ledger.iter_mut() {
+                // 旧台账的备注就是那一格做了什么，接到完成记录上，别在迁移里丢掉。
+                let note = entry.get("note").and_then(|v| v.as_str()).map(str::trim).unwrap_or("").to_string();
+                if let Some(map) = entry.as_object_mut() {
+                    if !note.is_empty() && !map.contains_key("completion_note") {
+                        map.insert("completion_note".into(), serde_json::json!(note));
+                    }
+                }
                 tasks_from_intention(entry);
             }
         }
@@ -1303,10 +1440,22 @@ pub fn from_json(raw: &str) -> Result<State, String> {
         value["schema"] = serde_json::json!(SCHEMA_VERSION);
     }
     let mut state: State = serde_json::from_value(value).map_err(|e| format!("unreadable: {e}"))?;
+    clamp_loaded_numbers(&mut state);
     collapse_profiles(&mut state.preferences);
     // 读档也走写入时的校验，不能让手改/损坏的 JSON 绕过域名与时长边界。
     validate_preferences(&state.preferences).map_err(|reason| format!("invalid preferences: {reason}"))?;
     Ok(state)
+}
+
+/// 读档时把要参与乘法和求和的数值夹进合理范围：手改或损坏的存档不该让后面的计算溢出。
+fn clamp_loaded_numbers(state: &mut State) {
+    let days = state.day.iter_mut().chain(state.history.iter_mut().map(|archived| &mut archived.day));
+    for day in days {
+        for category in &mut day.categories {
+            category.quota_minutes = category.quota_minutes.clamp(0, 24 * 60);
+            category.accepted_seconds = category.accepted_seconds.clamp(0, MAX_TRACKED_SECONDS);
+        }
+    }
 }
 
 /// 三档取消之后，老存档里还留着两三份计划，而界面只认第一份——那多半不是用户
@@ -1418,11 +1567,148 @@ mod tests {
     fn ending_the_rest_early_keeps_the_day_paused() {
         let mut state = started();
         state.start_block("main", 25, vec![]).unwrap();
+        walk_to(&mut state, 1_100);
         state.finish_block(1_100).unwrap();
         state.end_break().unwrap();
         assert!(state.day.as_ref().unwrap().break_until.is_none());
         assert!(state.day.as_ref().unwrap().is_paused());
         assert!(state.end_break().is_err());
+    }
+
+    #[test]
+    fn a_finished_rest_stays_on_record() {
+        let mut state = started();
+        state.start_block("main", 25, vec![]).unwrap();
+        walk_to(&mut state, 1_600);
+        state.finish_block(1_600).unwrap();
+        walk_to(&mut state, 1_600 + 15 * 60);
+        assert!(state.take_due_break(state.last_tick));
+        let day = state.day.as_ref().unwrap();
+        assert!(day.break_until.is_none(), "到点后标签摘掉");
+        assert_eq!(day.rests, vec![RestSpan { started_at: 1_600, ended_at: 1_600 + 10 * 60 }], "休息的起止留在记录里");
+    }
+
+    #[test]
+    fn a_natural_block_end_records_its_rest_from_the_block_end() {
+        let mut state = started();
+        state.start_block("main", 25, vec![]).unwrap();
+        walk_to(&mut state, 1_000 + 30 * 60);
+        let ended = 1_000 + 25 * 60;
+        assert_eq!(state.day.as_ref().unwrap().rests, vec![RestSpan { started_at: ended, ended_at: ended + 10 * 60 }]);
+    }
+
+    #[test]
+    fn cutting_a_rest_short_trims_its_record() {
+        let mut state = started();
+        state.start_block("main", 25, vec![]).unwrap();
+        walk_to(&mut state, 1_600);
+        state.finish_block(1_600).unwrap();
+        walk_to(&mut state, 1_840);
+        state.end_break().unwrap();
+        assert_eq!(state.day.as_ref().unwrap().rests, vec![RestSpan { started_at: 1_600, ended_at: 1_840 }], "不休息了：截到这一刻");
+
+        walk_to(&mut state, 2_400);
+        state.start_block("main", 25, vec![]).unwrap();
+        walk_to(&mut state, 2_700);
+        state.finish_block(2_700).unwrap();
+        walk_to(&mut state, 2_760);
+        state.start_block("main", 25, vec![]).unwrap();
+        let day = state.day.as_ref().unwrap();
+        assert_eq!(day.rests[1], RestSpan { started_at: 2_700, ended_at: 2_760 }, "休息中开下一格：截到开格那一刻");
+        assert!(day.break_until.is_none());
+    }
+
+    #[test]
+    fn ending_the_day_mid_rest_trims_it_and_abandoning_gives_none() {
+        let mut state = started();
+        state.start_block("main", 25, vec![]).unwrap();
+        walk_to(&mut state, 1_300);
+        state.abandon_block(1_300).unwrap();
+        assert!(state.day.as_ref().unwrap().rests.is_empty(), "放弃不给休息，也不记休息");
+        state.start_block("main", 25, vec![]).unwrap();
+        walk_to(&mut state, 1_900);
+        state.finish_block(1_900).unwrap();
+        walk_to(&mut state, 2_020);
+        state.end_day(2_020).unwrap();
+        let day = &state.history.last().unwrap().day;
+        assert_eq!(day.rests, vec![RestSpan { started_at: 1_900, ended_at: 2_020 }]);
+        assert!(day.break_until.is_none());
+    }
+
+    #[test]
+    fn old_saves_without_rests_still_load() {
+        let mut state = started();
+        state.start_block("main", 25, vec![]).unwrap();
+        let mut value: serde_json::Value = serde_json::from_str(&to_json(&state)).unwrap();
+        value["day"].as_object_mut().unwrap().remove("rests");
+        let back = from_json(&value.to_string()).unwrap();
+        assert!(back.day.unwrap().rests.is_empty());
+    }
+
+    #[test]
+    fn a_rest_between_blocks_resets_the_stretch_count_but_a_quick_restart_does_not() {
+        let mut state = started();
+        state.start_block("main", 50, vec![]).unwrap();
+        walk_to(&mut state, 1_000 + 50 * 60);
+        assert_eq!(state.day.as_ref().unwrap().seated_since_relief, 3_000);
+        walk_to(&mut state, 1_000 + 60 * 60);
+        state.start_block("main", 50, vec![]).unwrap();
+        assert_eq!(state.day.as_ref().unwrap().seated_since_relief, 0, "休息 10 分钟回来，起身提醒从头数");
+        walk_to(&mut state, 1_000 + 70 * 60);
+        state.finish_block(state.last_tick).unwrap();
+        let t = state.last_tick + 60; walk_to(&mut state, t);
+        state.start_block("main", 50, vec![]).unwrap();
+        assert_eq!(state.day.as_ref().unwrap().seated_since_relief, 600, "只停了一分钟就接着开格，还算连续在座");
+    }
+
+    #[test]
+    fn the_idle_reminder_does_not_count_the_rest() {
+        let mut state = started();
+        state.preferences.idle_reminder_enabled = true;
+        state.preferences.idle_reminder_minutes = 15;
+        state.start_block_with_break("main", 25, vec![], 20).unwrap();
+        walk_to(&mut state, 1_000 + 25 * 60);
+        let t = state.last_tick + 16 * 60; walk_to(&mut state, t);
+        assert_eq!(state.take_due_reminders(), (false, false, false), "休息中不催开格");
+        let t = state.last_tick + 4 * 60; walk_to(&mut state, t);
+        assert!(state.take_due_break(state.last_tick));
+        let t = state.last_tick + 15 * 60; walk_to(&mut state, t);
+        assert_eq!(state.take_due_reminders(), (false, false, true), "休息结束后再停 15 分钟才催");
+    }
+
+    #[test]
+    fn a_block_ended_in_its_first_second_records_nothing_and_gives_no_rest() {
+        let mut state = started();
+        state.start_block("main", 25, vec![]).unwrap();
+        state.finish_block(state.last_tick).unwrap();
+        let day = state.day.as_ref().unwrap();
+        assert!(day.ledger.is_empty());
+        assert!(day.break_until.is_none() && day.rests.is_empty());
+        assert!(day.is_paused());
+    }
+
+    #[test]
+    fn zero_minutes_of_rest_for_one_block_means_no_rest_even_if_the_default_is_ten() {
+        let mut state = started();
+        assert_eq!(state.preferences.break_minutes, 10);
+        state.start_block_with_break("main", 25, vec![], 0).unwrap();
+        walk_to(&mut state, 1_000 + 25 * 60);
+        assert!(state.day.as_ref().unwrap().break_until.is_none(), "这一格选了不休息");
+        state.start_block("main", 25, vec![]).unwrap();
+        let t = state.last_tick + 25 * 60; walk_to(&mut state, t);
+        assert!(state.day.as_ref().unwrap().break_until.is_some(), "不指定就按偏好休息");
+    }
+
+    #[test]
+    fn old_timers_without_a_break_fall_back_to_the_preference() {
+        let mut state = started();
+        state.start_block("main", 25, vec![]).unwrap();
+        let mut value: serde_json::Value = serde_json::from_str(&to_json(&state)).unwrap();
+        value["day"]["timer"].as_object_mut().unwrap().remove("break_minutes");
+        let mut back = from_json(&value.to_string()).unwrap();
+        assert_eq!(back.day.as_ref().unwrap().timer.as_ref().unwrap().break_minutes, -1);
+        walk_to(&mut back, 1_000 + 25 * 60);
+        assert_eq!(back.day.as_ref().unwrap().break_until, Some(1_000 + 35 * 60));
     }
 
     #[test]
@@ -1435,6 +1721,7 @@ mod tests {
         let day = state.day.as_ref().unwrap();
         assert!(day.is_paused());
         assert!(day.break_until.is_none());
+        assert!(day.rests.is_empty(), "不休息就没有休息记录");
     }
 
     #[test]
@@ -1588,6 +1875,7 @@ mod tests {
     fn starting_a_block_ends_the_pause_and_the_rest() {
         let mut state = started();
         state.start_block("main", 25, vec![]).unwrap();
+        walk_to(&mut state, 1_100);
         state.finish_block(1_100).unwrap();
         assert!(state.day.as_ref().unwrap().resting(1_200));
         state.start_block("main", 25, vec![]).unwrap();
@@ -1996,6 +2284,33 @@ mod tests {
     }
 
     #[test]
+    fn hosts_render_leaves_every_byte_outside_the_section_alone() {
+        let hosts = vec!["weibo.com".to_string()];
+        for original in [
+            "127.0.0.1 localhost\r\n::1 localhost\r\n",
+            "127.0.0.1 localhost\n\n\n",
+            "127.0.0.1 localhost",
+            "",
+            "# 自己的注释\n\n10.0.0.1 nas.local\n",
+        ] {
+            assert_eq!(render_hosts(original, &hosts, false), original, "没有托管段时解除不改任何字节：{original:?}");
+            assert_eq!(render_hosts(original, &[], true), original);
+            let on = render_hosts(original, &hosts, true);
+            assert!(on.starts_with(original.trim_end_matches(['\r', '\n'])));
+            assert_eq!(render_hosts(&on, &hosts, true), on, "幂等：{original:?}");
+            let off = render_hosts(&on, &hosts, false);
+            if original.is_empty() || original.ends_with('\n') {
+                assert_eq!(off, original, "加上再拿掉，原样还原：{original:?}");
+            } else {
+                assert_eq!(off, format!("{original}\n"), "原文件末尾没有换行时，只多出那一个换行");
+            }
+        }
+        let crlf = render_hosts("127.0.0.1 localhost\r\n", &hosts, true);
+        assert!(crlf.lines().all(|line| !line.ends_with('\r') || crlf.contains(&format!("{line}\n"))));
+        assert!(crlf.contains("127.0.0.1 weibo.com\r\n"), "CRLF 的文件里新加的行也用 CRLF");
+    }
+
+    #[test]
     fn render_hosts_covers_www_variant() {
         let hosts = vec!["zhihu.com".to_string()];
         let out = render_hosts("", &hosts, true);
@@ -2069,6 +2384,67 @@ mod tests {
         let back = from_json(&to_json(&orphan)).unwrap();
         assert_eq!(back.preferences.profiles.len(), 1);
         assert_eq!(back.preferences.profiles[0].id, "standard");
+    }
+
+    #[test]
+    fn plans_with_a_project_listed_twice_or_oversized_fields_are_rejected() {
+        let mut prefs = builtin_preferences();
+        let first = prefs.profiles[0].quotas[0].clone();
+        prefs.profiles[0].quotas.push(first);
+        assert_eq!(validate_preferences(&prefs), Err("同一份计划里项目重复"));
+        let mut prefs = builtin_preferences();
+        prefs.categories[0].name = "长".repeat(81);
+        assert_eq!(validate_preferences(&prefs), Err("项目信息过长"));
+        let mut prefs = builtin_preferences();
+        prefs.categories[0].name = "长".repeat(80);
+        assert!(validate_preferences(&prefs).is_ok());
+        let mut state = started();
+        let tasks = (0..51).map(|i| task(&format!("任务{i}"))).collect();
+        assert_eq!(state.start_block("main", 25, tasks), Err("任务太多或太长"));
+    }
+
+    #[test]
+    fn clock_rollbacks_do_not_leave_negative_blocks_or_a_running_block_after_restart() {
+        let mut state = started();
+        state.start_block("main", 25, vec![]).unwrap();
+        walk_to(&mut state, 1_600);
+        state.finish_block(900).unwrap();
+        let entry = &state.day.as_ref().unwrap().ledger[0];
+        assert!(entry.ended_at >= entry.started_at, "终点不早于起点");
+
+        let mut state = started();
+        state.start_block("main", 25, vec![]).unwrap();
+        walk_to(&mut state, 1_300);
+        state.resume_after_restart(1_200);
+        assert!(state.day.as_ref().unwrap().is_paused(), "重启时钟往回拨了也先暂停");
+    }
+
+    #[test]
+    fn a_forward_clock_jump_does_not_silence_the_water_reminder_afterwards() {
+        let mut state = State::new(1_000);
+        state.preferences.water_reminder_enabled = true;
+        state.tick(1_000 + 86_400);
+        state.take_due_water_reminder(1_700);
+        state.tick(1_000 + 86_400 + 120);
+        assert!(state.take_due_water_reminder(20), "跳到「明天」后经过一个半点");
+        state.tick(1_000);
+        state.take_due_water_reminder(1_700);
+        state.tick(1_100);
+        assert!(state.take_due_water_reminder(0), "拨回来以后，下一个钟点照常提醒");
+    }
+
+    #[test]
+    fn loading_clamps_numbers_that_would_overflow() {
+        let mut state = started();
+        state.start_block("main", 25, vec![]).unwrap();
+        let mut value: serde_json::Value = serde_json::from_str(&to_json(&state)).unwrap();
+        value["day"]["categories"][0]["quota_minutes"] = serde_json::json!(i64::MAX);
+        value["day"]["categories"][0]["accepted_seconds"] = serde_json::json!(-5);
+        let back = from_json(&value.to_string()).unwrap();
+        let category = &back.day.as_ref().unwrap().categories[0];
+        assert_eq!(category.quota_minutes, 24 * 60);
+        assert_eq!(category.accepted_seconds, 0);
+        assert_eq!(remaining_seconds(category), 24 * 3600);
     }
 
     #[test]

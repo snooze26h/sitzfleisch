@@ -234,13 +234,9 @@ pub(crate) fn start(app: &tauri::AppHandle, isolated: bool) {
         for stream in listener.incoming() {
             match stream {
                 Ok(mut stream) => serve(&mut stream, &app.state::<super::Shared>()),
-                Err(_) => {
-                    let shared = app.state::<super::Shared>();
-                    let mut bridge = shared.browser_bridge.lock().unwrap();
-                    bridge.available = false;
-                    bridge.error = Some("浏览器连接已停止，请重启坐功。".into());
-                    break;
-                }
+                // 一次 accept 出错（对方中途放弃连接、文件句柄一时用光）不能让浏览器连接永久停摆：
+                // 扩展连不上就会当坐功已退出，把屏蔽全部解除。歇一下，接着等下一个连接。
+                Err(_) => std::thread::sleep(std::time::Duration::from_millis(200)),
             }
         }
     });

@@ -166,6 +166,8 @@ export function createBlocker({ chromeApi, fetchImpl = fetch, now = Date.now, ti
       phase = "apply-error";
       appliedRevision = null;
       const syncedAt = now();
+      // 解除（收工、退出）不能被写盘失败拦住：内存里的规则先换成不拦，再尽力持久化。
+      if (!next.active) rules = next;
       // 先保存完整快照；只有持久化和已开标签检查完成后才报告已应用版本。
       await chromeApi.storage.local.set({ [CACHE_KEY]: { rules: next, lastSyncAt, appliedRevision: null } });
       rules = next;

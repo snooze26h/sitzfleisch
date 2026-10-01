@@ -209,6 +209,16 @@ test("收工同步取消生效规则并恢复阻止页；下次开始重新拦�
   assert.match(h.tabs.get(1).url, /^chrome-extension:\/\/test\/blocked.html#/);
 });
 
+test("收工时存储写入失败也立即解除，不让阻止页一直挡着", async () => {
+  const h = harness({ initialTabs: [{ id: 1, url: recommend }] });
+  await h.boot();
+  assert.match(h.tabs.get(1).url, /^chrome-extension:\/\/test\/blocked.html#/);
+  h.state.set = async () => { throw new Error("quota"); };
+  h.state.fetch = async () => response(snapshot(false, [recommend], "1111111111111111"));
+  await h.blocker.sync().catch(() => {});
+  assert.equal(h.blocker.status().active, false, "主程序已说收工，内存里的规则必须先换成不拦");
+});
+
 test("浏览器与 worker 重启后清理旧缓存，主程序离线时不再拦截", async () => {
   const first = harness();
   await first.boot();

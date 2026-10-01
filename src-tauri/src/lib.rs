@@ -143,7 +143,9 @@ fn build_tray_menu(app: &AppHandle, state: &TrayMenuState) -> tauri::Result<Menu
         TrayMenuState::Idle { profile } => {
             items.push(Box::new(text(app, "info", "今天还没开始")?));
             if let Some((id, name)) = profile {
-                items.push(Box::new(action(app, &format!("start:{id}"), &format!("开始{name}日"))?));
+                // 计划只剩一份，按钮和开始页一样叫「开始今天」；拼计划名会拼出「开始今天日」。
+                let _ = name;
+                items.push(Box::new(action(app, &format!("start:{id}"), "开始今天")?));
             }
         }
     }
@@ -297,7 +299,16 @@ fn save(shared: &Shared) {
     }
     let json = core::to_json(&shared.state.lock().unwrap());
     let tmp = shared.path.with_extension("json.tmp");
-    let result = fs::write(&tmp, json).and_then(|_| fs::rename(&tmp, &shared.path));
+    // 先把临时文件真正写到盘上再改名：断电或系统崩溃时，宁可留下上一份完整的存档，
+    // 也不要一个改了名、内容却没落盘的空文件——那样下次启动只能进保护模式。
+    let result = (|| -> std::io::Result<()> {
+        use std::io::Write;
+        let mut file = fs::File::create(&tmp)?;
+        file.write_all(json.as_bytes())?;
+        file.sync_all()?;
+        drop(file);
+        fs::rename(&tmp, &shared.path)
+    })();
     // 结果发布在 save_lock 之内：两笔排队的保存，后写的那份结果才是最终结论。
     *shared.save_error.lock().unwrap() = result.err().map(|e| e.to_string());
 }
@@ -603,6 +614,19 @@ fn play_alert_sound(sound: AlertSound) {
         .spawn();
 }
 
+/// 推进一次时间，并报告这一下是不是把格自然走完了（台账多了一条，格也不在了）。
+/// 心跳和命令都会推进时间：格恰好在某个命令那一下走完时，通知也得发，不能只看心跳。
+fn tick_reporting_finish(state: &mut core::State, now: i64) -> bool {
+    let had_timer = state.day.as_ref().is_some_and(|d| d.timer.is_some());
+    let ledger_before = state.day.as_ref().map_or(0, |d| d.ledger.len());
+    state.tick(now);
+    had_timer && state.day.as_ref().is_some_and(|d| d.ledger.len() > ledger_before && d.timer.is_none())
+}
+
+fn notify_block_finished(app: &AppHandle) {
+    notify(app, "这一格走完了", "时间已计入。打开坐功，记录这段时间完成了什么。", AlertSound::Standard);
+}
+
 fn mutate(
     app: &AppHandle,
     op: impl FnOnce(&mut core::State) -> core::RuleResult,
@@ -611,11 +635,14 @@ fn mutate(
     if shared.exiting.load(Ordering::SeqCst) {
         return Err("正在退出坐功，请等待网站屏蔽解除。".into());
     }
-    let outcome = {
+    let (outcome, finished) = {
         let mut state = shared.state.lock().unwrap();
-        state.tick(now_unix());
-        op(&mut state)
+        let finished = tick_reporting_finish(&mut state, now_unix());
+        (op(&mut state), finished)
     };
+    if finished {
+        notify_block_finished(app);
+    }
     outcome.map_err(|e| e.to_string())?;
     save(&shared);
     broadcast(app);
@@ -694,12 +721,22 @@ fn hosts_path() -> PathBuf {
     PathBuf::from("/etc/hosts")
 }
 
-/// 路径要先过这里再进命令行。`SITZFLEISCH_DATA_DIR` 是用户给的，暂存文件的路径里
-/// 可以有单引号、`$`、反引号、分号——直接拼进命令就是一条以**管理员权限**执行的注入。
-/// 单引号里 shell 不做任何解释，唯一要处理的是单引号自己：闭合、转义一个、再开。
+/// 标准 Base64（带 = 补位）。只用来把 hosts 内容嵌进授权脚本，不值得为它引一个依赖。
 #[cfg(target_os = "macos")]
-fn shell_single_quote(raw: &str) -> String {
-    format!("'{}'", raw.replace('\'', r"'\''"))
+fn base64_encode(bytes: &[u8]) -> String {
+    const TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
+    for chunk in bytes.chunks(3) {
+        let n = chunk.iter().enumerate().fold(0u32, |n, (i, b)| n | u32::from(*b) << (16 - 8 * i));
+        for i in 0..4 {
+            if i <= chunk.len() {
+                out.push(char::from(TABLE[((n >> (18 - 6 * i)) & 63) as usize]));
+            } else {
+                out.push('=');
+            }
+        }
+    }
+    out
 }
 
 /// AppleScript 字符串字面量的转义。**反斜杠必须先换**：反过来的话 `"` → `\"` 里
@@ -709,10 +746,14 @@ fn applescript_string(raw: &str) -> String {
     raw.replace('\\', r"\\").replace('"', "\\\"")
 }
 
-/// 路径 → 完整的 AppleScript。抽出来是为了能测引用与转义而不真的去提权。
+/// hosts 内容 → 完整的 AppleScript。抽出来是为了能测转义而不真的去提权。
+///
+/// 内容以 Base64 嵌进脚本，由 root 解码到 /etc 里自己新建的临时文件，再原地覆盖 /etc/hosts。
+/// 以前是让 root 去 cp 应用数据目录里的暂存文件：授权框可以停留任意久，同一账号下的程序能趁机
+/// 把暂存文件换成指向 root 专属文件的符号链接，cp 照着读出来，就写进了所有人可读的 /etc/hosts。
+/// Base64 只有字母、数字和 + / =，放进单引号不需要任何转义，也就没有注入的余地。
 #[cfg(target_os = "macos")]
-fn install_script(staged: &Path) -> Result<String, String> {
-    let path = staged.to_str().ok_or("暂存文件路径不是有效的 UTF-8，无法安全地交给系统授权。")?;
+fn install_script(content: &str) -> String {
     // `killall mDNSResponder` 而不是 `-HUP`：SIGHUP 是苹果文档里的路子，但它**不保证**丢掉
     // 已经缓存下来的 hosts 派生记录。实测（macOS 26.6）解除屏蔽后 hosts 明明清干净了，
     // 被解除的域名仍然解析到 127.0.0.1 至少两分钟，手动再跑一次 flushcache 也没用，
@@ -722,19 +763,23 @@ fn install_script(staged: &Path) -> Result<String, String> {
     // （macOS 26 上是 com.apple.mDNSResponder.reloaded，不是通用的 com.apple.mDNSResponder），
     // 按**进程名**杀更耐得住系统升级。
     // 刷新是尽力而为，不能让它把「写成功了」报成失败：`do shell script` 拿最后一条命令的
-    // 退出码当整条脚本的结果，而 `killall` 在进程名对不上时返回非零。所以 `cp` 失败才 exit 1，
+    // 退出码当整条脚本的结果，而 `killall` 在进程名对不上时返回非零。所以写入失败才 exit 1，
     // 后面两条各自吞掉错误，最后显式 exit 0。
+    // cp 打开已有的 /etc/hosts 截断重写，属主和权限保持原样。
     let shell = [
-        format!("/bin/cp -f {} /etc/hosts || exit 1", shell_single_quote(path)),
+        "umask 022".to_string(),
+        "t=$(/usr/bin/mktemp /etc/.sitzfleisch-hosts.XXXXXX) || exit 1".into(),
+        format!("/usr/bin/printf '%s' '{}' | /usr/bin/base64 -D > \"$t\" || {{ /bin/rm -f \"$t\"; exit 1; }}", base64_encode(content.as_bytes())),
+        "/bin/cp -f \"$t\" /etc/hosts; s=$?; /bin/rm -f \"$t\"; [ $s -eq 0 ] || exit 1".into(),
         "/usr/bin/dscacheutil -flushcache >/dev/null 2>&1".into(),
         "/usr/bin/killall mDNSResponder >/dev/null 2>&1".into(),
         "exit 0".into(),
     ]
     .join("; ");
-    Ok(format!(
+    format!(
         r#"do shell script "{}" with administrator privileges with prompt "坐功需要管理员权限来更新学习日的网站屏蔽规则。""#,
         applescript_string(&shell)
-    ))
+    )
 }
 
 /// 免密助手的固定位置。装上它，开工与收工就不再弹授权框；没装则一切照旧。
@@ -743,12 +788,19 @@ fn install_script(staged: &Path) -> Result<String, String> {
 #[cfg(target_os = "macos")]
 const HOSTS_HELPER: &str = "/usr/local/libexec/sitzfleisch-hosts-install";
 
+/// 这一版的助手脚本原文。装在系统里的那份必须与它逐字相同才用：
+/// 安装脚本是原样拷过去的，对不上就说明是旧版（早期版本没有锁定 PATH，
+/// 借着 sudo 免密就能以 root 跑调用者 PATH 里的同名程序）。
+#[cfg(target_os = "macos")]
+const HOSTS_HELPER_SOURCE: &str = include_str!("../../scripts/hosts-helper.sh");
+
 /// 先试免密助手。`sudo -n` 在没有免密规则时**直接失败而不弹任何窗**，
 /// 所以这条路要么静默成功，要么无声让开，不会在授权框之前多出一次打扰。
 /// 任何失败都返回 None：调用方回到 osascript 授权，行为与没装助手时完全一致。
 #[cfg(target_os = "macos")]
 fn helper_install(staged: &Path) -> Option<()> {
-    if !Path::new(HOSTS_HELPER).exists() {
+    // 对不上就当没装：退回系统授权框，不替一个过时的免密入口背书。重新运行安装脚本即可换成新版。
+    if fs::read_to_string(HOSTS_HELPER).ok()? != HOSTS_HELPER_SOURCE {
         return None;
     }
     let file = fs::File::open(staged).ok()?;
@@ -767,7 +819,9 @@ fn privileged_install(staged: &Path) -> Result<(), String> {
     if helper_install(staged).is_some() {
         return Ok(());
     }
-    let script = install_script(staged)?;
+    // 授权框弹出之前就把内容读进来：框停着的那段时间里暂存文件再被动手脚，也碰不到要写进去的东西。
+    let content = fs::read_to_string(staged).map_err(|e| format!("暂存文件读取失败：{e}"))?;
+    let script = install_script(&content);
     let output = Command::new("osascript")
         .arg("-e")
         .arg(script)
@@ -910,8 +964,9 @@ fn start_block(
     break_minutes: Option<i64>,
     app: AppHandle,
 ) -> Result<Snapshot, String> {
-    mutate(&app, |s| {
-        s.start_block_with_break(&category_id, minutes, tasks.clone(), break_minutes.unwrap_or(0))
+    mutate(&app, |s| match break_minutes {
+        Some(rest) => s.start_block_with_break(&category_id, minutes, tasks.clone(), rest),
+        None => s.start_block(&category_id, minutes, tasks.clone()),
     })
 }
 
@@ -978,11 +1033,13 @@ fn abandon_day(app: AppHandle) -> Result<Snapshot, String> {
 
 #[tauri::command]
 fn update_preferences(prefs: core::Preferences, app: AppHandle) -> Result<Snapshot, String> {
+    let hosts_changed = app.state::<Shared>().state.lock().unwrap().preferences.blocked_hosts != prefs.blocked_hosts;
     let snap = mutate(&app, |s| s.update_preferences(prefs))?;
     let shared = app.state::<Shared>();
     let day_active = shared.state.lock().unwrap().day.is_some();
-    if day_active && blocking_needs_sync(&shared) {
-        // 学习日进行中改了屏蔽列表：立即同步系统规则。
+    // 只有学习日里整站列表真的变了才同步系统规则。之前取消过一次授权的话，
+    // 不能让之后每点一下配额、改一个提醒都再弹一次授权框；要重试有「核对整站规则」。
+    if day_active && hosts_changed && blocking_needs_sync(&shared) {
         spawn_apply_blocking(&app);
     }
     Ok(snap)
@@ -1340,6 +1397,23 @@ async fn quit_after_save(app: AppHandle) -> Result<(), String> {
     }).await.map_err(|error| format!("退出处理失败：{error}"))?
 }
 
+/// 「仍然退出」：系统 hosts 一直解除不了（授权一再被拒、托管标记损坏）时，不能把人困在应用里。
+/// 照常保存；系统 hosts 里坐功那一段先留着，下次打开坐功会核对并提示解除。
+#[tauri::command]
+fn quit_leaving_blocking(app: AppHandle) -> Result<(), String> {
+    let shared = app.state::<Shared>();
+    shared.state.lock().unwrap().tick(now_unix());
+    save(&shared);
+    if let Some(reason) = shared.save_error.lock().unwrap().clone() {
+        return Err(reason);
+    }
+    // 标成已处理：退出事件里不再尝试清理，免得刚说完「仍然退出」又弹一次授权框。
+    shared.blocking_released.store(true, Ordering::SeqCst);
+    let _ = app.save_window_state(WINDOW_STATE);
+    app.exit(0);
+    Ok(())
+}
+
 /// 「不保存退出」：磁盘上保持上一次成功写入的完整文件。
 #[tauri::command]
 fn quit_without_saving(app: AppHandle) {
@@ -1492,16 +1566,10 @@ pub fn run() {
                     let (focus_done, break_done, reminders) = {
                         let shared = handle.state::<Shared>();
                         let mut state = shared.state.lock().unwrap();
-                        let had_timer = state.day.as_ref().map(|d| d.timer.is_some()).unwrap_or(false);
-                        let ledger_before = state.day.as_ref().map(|d| d.ledger.len()).unwrap_or(0);
                         let now = now_unix();
-                        state.tick(now);
+                        let focus_done = tick_reporting_finish(&mut state, now);
                         let reminders = take_due_reminder_notifications(&mut state);
                         let break_done = state.take_due_break(now);
-                        let day = state.day.as_ref();
-                        // 一格自然走完：台账多了一条，格也不在了。
-                        let focus_done = had_timer
-                            && day.map(|d| d.ledger.len() > ledger_before && d.timer.is_none()).unwrap_or(false);
                         drop(state);
                         if ticks.is_multiple_of(30) {
                             save(&shared);
@@ -1509,7 +1577,7 @@ pub fn run() {
                         (focus_done, break_done, reminders)
                     };
                     if focus_done {
-                        notify(&handle, "这一格走完了", "时间已计入。打开坐功，记录这段时间完成了什么。", AlertSound::Standard);
+                        notify_block_finished(&handle);
                     }
                     if break_done {
                         notify(&handle, "休息结束", "开下一格吧。", AlertSound::Standard);
@@ -1581,6 +1649,7 @@ pub fn run() {
             retry_save,
             quit_after_save,
             quit_without_saving,
+            quit_leaving_blocking,
             reapply_blocking,
             check_blocking,
             notification_status,
@@ -1807,12 +1876,14 @@ mod tests {
         assert!(take_due_reminder_notifications(&mut state).is_empty());
         assert!(state.take_due_break(state.last_tick));
         advance_awake_seconds(&mut state, 300);
+        assert!(take_due_reminder_notifications(&mut state).is_empty(), "休息不算闲置：休息结束后才开始数");
+        advance_awake_seconds(&mut state, 300);
         assert_eq!(
             take_due_reminder_notifications(&mut state),
-            vec![("还没开格", "已经暂停 10 分钟了。".into(), AlertSound::Standard)],
-            "新暂停包含刚结束的 5 分钟休息，不累计上一段暂停",
+            vec![("还没开格", "已经暂停 15 分钟了。".into(), AlertSound::Standard)],
+            "休息后再停 10 分钟才催；文案里的暂停时长照实含休息，不累计上一段暂停",
         );
-        assert_eq!(state.day.as_ref().unwrap().paused_seconds, 2_400);
+        assert_eq!(state.day.as_ref().unwrap().paused_seconds, 2_700);
     }
 
     #[test]
@@ -1913,7 +1984,23 @@ mod tests {
     fn concurrent_saves_leave_complete_monotonic_snapshots() {
         let fixture = TestShared::new(core::State::new(1_000));
         let shared = &fixture.0;
-        shared.state.lock().unwrap().preferences.categories[0].name = "研究".repeat(4_096);
+        {
+            // 存档要够大，读者才有机会撞上写到一半的文件。计划字段有长度上限，用完成记录撑大。
+            let mut state = shared.state.lock().unwrap();
+            state.start_day("standard", 1_000).unwrap();
+            let day = state.day.as_mut().unwrap();
+            for _ in 0..12 {
+                day.ledger.push(core::LedgerEntry {
+                    category: "main".into(),
+                    seconds: 60,
+                    accepted: true,
+                    tasks: vec![],
+                    started_at: 1_000,
+                    ended_at: 1_060,
+                    completion_note: Some("研究".repeat(1_000)),
+                });
+            }
+        }
         save(shared);
         let start = Barrier::new(5);
         let done = AtomicBool::new(false);
@@ -2392,81 +2479,57 @@ mod tests {
     }
 
     /// 会把路径塞进命令行的那些恶心字符。`SITZFLEISCH_DATA_DIR` 是用户给的，
-    /// 这些全都是合法的 macOS 目录名。
+    /// 看起来像命令的 hosts 内容：嵌进脚本以后，一个字都不能被 shell 或 AppleScript 当真。
     #[cfg(target_os = "macos")]
-    const NASTY_PATHS: [&str; 9] = [
-        "/tmp/plain/hosts.staged.1",
-        "/tmp/with space/hosts.staged.1",
-        "/tmp/it's here/hosts.staged.1",
-        r#"/tmp/quote"inside/hosts.staged.1"#,
-        r"/tmp/back\slash/hosts.staged.1",
-        "/tmp/$(id)/hosts.staged.1",
-        "/tmp/`id`/hosts.staged.1",
-        "/tmp/semi;colon && echo nope/hosts.staged.1",
-        "/tmp/新建 文件夹/hosts.staged.1",
+    const NASTY_CONTENTS: [&str; 7] = [
+        "127.0.0.1 localhost\n",
+        "# it's here\n127.0.0.1 a.example\n",
+        "# quote\"inside\\ and back\\slash\n",
+        "# $(id) `id` ; echo nope && rm -rf /\n",
+        "# 新建 文件夹\r\n127.0.0.1 b.example\r\n",
+        "",
+        "no trailing newline",
     ];
 
-    /// 真的交给 `/bin/sh` 解析一遍：引用对了，`printf %s` 就该原样吐回来。
-    /// 用的是 printf 不是 cp，**不提权、不碰 /etc/hosts**；`$(...)`、反引号在单引号里是字面量，
-    /// 万一引用漏了，下面的相等断言会先失败。
     #[cfg(target_os = "macos")]
     #[test]
-    fn shell_quoting_survives_paths_that_look_like_commands() {
-        // 绊线走自己的唯一路径：写死一个 /tmp/xxx 的话，别的进程碰巧建了它，
-        // 这条测试就永远是红的，而且它自己还不清理。
-        let tripwire = std::env::temp_dir().join(format!(
-            "sitzfleisch-quote-tripwire-{}-{}",
-            std::process::id(),
-            SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos()
-        ));
-        let _ = fs::remove_file(&tripwire);
-        let armed = format!("/tmp/$(touch {})/hosts.staged.1", tripwire.display());
-        for raw in NASTY_PATHS.iter().copied().chain(std::iter::once(armed.as_str())) {
-            let quoted = shell_single_quote(raw);
+    fn base64_matches_the_system_decoder() {
+        for (raw, expected) in [("", ""), ("f", "Zg=="), ("fo", "Zm8="), ("foo", "Zm9v"), ("foobar", "Zm9vYmFy")] {
+            assert_eq!(base64_encode(raw.as_bytes()), expected);
+        }
+        for raw in NASTY_CONTENTS {
             let output = Command::new("/bin/sh")
                 .arg("-c")
-                .arg(format!("printf %s {quoted}"))
+                .arg(format!("/usr/bin/printf '%s' '{}' | /usr/bin/base64 -D", base64_encode(raw.as_bytes())))
                 .output()
                 .expect("sh 应该跑得起来");
-            assert!(output.status.success(), "「{raw}」引用后 sh 解析失败");
-            assert_eq!(String::from_utf8_lossy(&output.stdout), raw, "「{raw}」引用后必须原样还原");
+            assert_eq!(String::from_utf8_lossy(&output.stdout), raw, "系统解码后必须原样还原");
         }
-        assert!(!tripwire.exists(), "注入片段绝不能真的被执行");
-        let _ = fs::remove_file(&tripwire);
     }
 
     #[cfg(target_os = "macos")]
     #[test]
-    fn applescript_escaping_does_backslash_before_quote() {
-        assert_eq!(applescript_string(r#"a\b"c"#), r#"a\\b\"c"#);
-        // 顺序反过来的话，`"` → `\"` 里新加的反斜杠会被第二遍再转一次，字符串当场断掉。
-        let wrong = r#"a\b"c"#.replace('"', "\\\"").replace('\\', r"\\");
-        assert_ne!(wrong, applescript_string(r#"a\b"c"#), "先转引号再转反斜杠是错的");
-    }
-
-    #[cfg(target_os = "macos")]
-    #[test]
-    fn install_script_quotes_the_staged_path() {
-        for raw in NASTY_PATHS {
-            let script = install_script(Path::new(raw)).expect("UTF-8 路径应该能生成脚本");
+    fn install_script_embeds_the_content_instead_of_reading_a_user_writable_file() {
+        for raw in NASTY_CONTENTS {
+            let script = install_script(raw);
             assert!(script.starts_with("do shell script \""));
             assert!(script.contains("with administrator privileges"));
             // 解除屏蔽之后要能立刻恢复解析：SIGHUP 丢不掉已缓存的 hosts 派生记录，
             // 必须把 mDNSResponder 整个收掉让 launchd 重新拉起。别退回 -HUP。
             assert!(script.contains("killall mDNSResponder"), "刷新必须是整个重启");
             assert!(!script.contains("killall -HUP"), "-HUP 不足以丢掉 hosts 派生的缓存");
-            // 刷新失败不能把「写成功了」报成失败：`do shell script` 拿最后一条命令的退出码
-            // 当结果，而 killall 在进程名对不上时返回非零。cp 失败才 exit 1，末尾显式 exit 0。
-            assert!(script.contains("|| exit 1"), "cp 失败必须让整条脚本失败");
+            assert!(script.contains("|| exit 1"), "写入失败必须让整条脚本失败");
             assert!(
                 script.contains("; exit 0\" with administrator privileges"),
                 "刷新失败不能影响脚本的退出码：shell 部分必须以 exit 0 收尾"
             );
-            // 脚本里绝不能出现「裸着的」路径：它必须以引用后的形态出现。
-            let expected = applescript_string(&shell_single_quote(raw));
-            assert!(script.contains(&expected), "「{raw}」没有按引用后的形态进脚本");
-            // 复制目标固定是 /etc/hosts，路径不该有本事把它换成别的。
-            assert_eq!(script.matches("/etc/hosts").count(), 1, "「{raw}」改变了复制目标的数量");
+            assert!(script.contains(&base64_encode(raw.as_bytes())), "内容以 Base64 嵌入");
+            if raw.contains(['$', '`', '\'', '"']) {
+                assert!(!script.contains(raw.trim_end()), "原文不能直接出现在脚本里");
+            }
+            // 写入目标固定是 /etc/hosts，脚本里不再出现任何暂存文件路径。
+            assert_eq!(script.matches("/etc/hosts").count(), 1);
+            assert!(!script.contains("hosts.staged"));
         }
     }
 
