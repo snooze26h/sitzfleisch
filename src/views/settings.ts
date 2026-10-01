@@ -7,9 +7,8 @@ import { conflictingHost, MAX_BLOCK_RULES, normalizeHost, normalizeUrl } from ".
 import { ICON_NAMED } from "../types";
 import { esc, meter, shortNameFrom } from "../format";
 import { icon } from "../icons";
-import { ribbonScene } from "../brand";
 import { PROJECT_ICON_CHOICES } from "../project-icons";
-import { btn, hair, labelled, plate, select, stepper, toggle } from "../components";
+import { btn, labelled, select, stepper, toggle } from "../components";
 import { BLOCK_OPTIONS, BREAK_OPTIONS, IDLE_OPTIONS, day, prefs, profileTotalMinutes, ui, withValue } from "../state";
 
 /** 设置的分区：id → 标题 + 图标。侧栏在设置页直接列它们，一区一页。 */
@@ -39,8 +38,8 @@ export function settingsPage(): string {
   const current = SETTINGS_SECTIONS.find(([id]) => id === ui.settingsSection) ?? SETTINGS_SECTIONS[0];
   const [id, title] = current;
   // 一次只画一个分区：整页一根滚动条到底是上一版最难用的地方。
-  return `<header class="page-heading settings-heading"><div class="heading-copy"><h1>${esc(title)}</h1><p role="status">${ui.pendingPrefs > 0 ? "正在保存…" : "自动保存"}</p></div>${ribbonScene("ready", "settings-ribbon")}</header>`
-    + sectionBody(id).replace('<section class="plate"', `<section class="plate settings-section" id="panel-${esc(id)}" tabindex="-1" aria-label="${esc(title)}"`);
+  return `<header class="page-heading settings-heading"><div class="heading-copy"><h1>${esc(title)}</h1><p role="status">${ui.pendingPrefs > 0 ? "正在保存…" : ""}</p></div></header>`
+    + `<section class="settings-section" id="panel-${esc(id)}" tabindex="-1" aria-label="${esc(title)}">${sectionBody(id)}</section>`;
 }
 
 function settingRow(title: string, detail: string, control: string): string {
@@ -51,22 +50,21 @@ function settingRow(title: string, detail: string, control: string): string {
 
 function projectCatalog(): string {
   const p = prefs();
-  const rows = p.categories.map(projectRow).join(hair());
-  const inner = `<div class="settings-panel">
-    <div class="panel-meta">${btn("添加项目", { kind: "plate", action: "add-project" })}</div>
-    ${rows}
+  const rows = p.categories.map(projectRow).join("");
+  return `<div class="settings-panel">
+    <div class="panel-meta">${btn("添加项目", { kind: "plate", action: "add-project", icon: "plus" })}</div>
+    <div class="project-list">${rows}</div>
   </div>`;
-  return plate(inner);
 }
 
 function projectRow(c: CategoryDef): string {
   const open = ui.expandedProject === c.id;
   const header = `<button class="project-row" id="project-${esc(c.id)}" data-action="expand-project" data-id="${esc(c.id)}" aria-expanded="${open}" aria-label="${open ? "收起" : "编辑"}项目 ${esc(c.name)}">
-      ${icon(open ? "chevron-down" : "chevron-right", 11, "chev")}
-      <span class="glyph-badge">${icon(c.icon, 15)}</span>
+      ${icon(open ? "chevron-down" : "chevron-right", 14, "chev")}
+      <span class="glyph-badge">${icon(c.icon, 22)}</span>
       <span class="nm">${esc(c.name)}</span>
     </button>`;
-  return open ? header + projectEditor(c) : header;
+  return `<div class="project-item${open ? " open" : ""}">${open ? header + projectEditor(c) : header}</div>`;
 }
 
 function projectEditor(c: CategoryDef): string {
@@ -75,17 +73,17 @@ function projectEditor(c: CategoryDef): string {
   const glyphs = names
     .map(
       ([name, label]) =>
-        `<button class="glyph project-choice${c.icon === name ? " on" : ""}" data-action="set-icon" data-id="${esc(c.id)}" data-icon="${esc(name)}" title="${esc(label)}" aria-label="${esc(label)}" aria-pressed="${c.icon === name}">${icon(name, 25)}<span>${esc(label)}</span></button>`
+        `<button class="glyph project-choice${c.icon === name ? " on" : ""}" data-action="set-icon" data-id="${esc(c.id)}" data-icon="${esc(name)}" title="${esc(label)}" aria-label="${esc(label)}" aria-pressed="${c.icon === name}">${icon(name, 26)}<span>${esc(label)}</span></button>`
     )
     .join("");
   const otherGlyphs = ICON_NAMED.filter(([name]) => !names.some(([primary]) => primary === name))
-    .map(([name, label]) => `<button class="glyph" data-action="set-icon" data-id="${esc(c.id)}" data-icon="${esc(name)}" title="${esc(label)}" aria-label="${esc(label)}" aria-pressed="false">${icon(name, 18)}</button>`).join("");
+    .map(([name, label]) => `<button class="glyph" data-action="set-icon" data-id="${esc(c.id)}" data-icon="${esc(name)}" title="${esc(label)}" aria-label="${esc(label)}" aria-pressed="false">${icon(name, 19)}</button>`).join("");
   return `<div class="project-editor" id="editor-${esc(c.id)}">
     <div class="identity">
       ${labelled("名称", `<input class="field sm" style="width:150px" data-change="project-name" data-id="${esc(c.id)}" value="${esc(c.name)}" placeholder="项目名称" aria-label="编辑项目名称 ${esc(c.name)}" />`)}
       ${labelled("短名", `<input class="field sm" style="width:84px" data-change="project-short-name" data-id="${esc(c.id)}" value="${esc(c.short_name)}" placeholder="${esc(shortNameFrom(c.name))}" aria-label="${esc(c.name)}在侧栏与菜单栏上的短名，留空自动" />`)}
     </div>
-    <div class="s-field"><span class="engraved">图标</span><div class="glyphs project-glyphs" role="group" aria-label="折页图标">${glyphs}</div><details class="more-icons" id="more-icons-${esc(c.id)}" data-preserve-open><summary>更多图标</summary><div class="glyphs" role="group" aria-label="通用图标">${otherGlyphs}</div></details></div>
+    <div class="s-field"><span class="engraved">图标</span><div class="glyphs project-glyphs" role="group" aria-label="项目图标">${glyphs}</div><details class="more-icons" id="more-icons-${esc(c.id)}" data-preserve-open><summary>${icon("chevron-right", 14)}<span>更多图标</span></summary><div class="glyphs" role="group" aria-label="通用图标">${otherGlyphs}</div></details></div>
     <div class="foot">${btn("删除项目", { kind: "quiet-danger", action: "del-project", data: { id: c.id } })}</div>
   </div>`;
 }
@@ -97,9 +95,9 @@ function quotaRow(c: CategoryDef, profile: ProfileDef): string {
   const key = `${encodeURIComponent(profile.id)}:${encodeURIComponent(c.id)}`;
   const data = `data-profile="${esc(profile.id)}" data-category="${esc(c.id)}"`;
   const adjust = (delta: number, glyph: string, verb: string) =>
-    `<button id="quota-${glyph}-${esc(key)}" data-action="step" data-bind="quota" data-delta="${delta}" data-step="15" data-min="0" data-max="1440" ${data} ${delta < 0 ? minutes <= 0 ? "disabled" : "" : minutes >= 1440 ? "disabled" : ""} aria-label="${esc(c.name)}${verb} 15 分钟">${icon(glyph, 12)}</button>`;
+    `<button id="quota-${glyph}-${esc(key)}" data-action="step" data-bind="quota" data-delta="${delta}" data-step="15" data-min="0" data-max="1440" ${data} ${delta < 0 ? minutes <= 0 ? "disabled" : "" : minutes >= 1440 ? "disabled" : ""} aria-label="${esc(c.name)}${verb} 15 分钟">${icon(glyph, 13)}</button>`;
   return `<div class="plan-row${minutes === 0 ? " off" : ""}" id="quota-row-${esc(c.id)}">
-    <span class="who">${icon(c.icon, 15)}<span class="nm">${esc(c.name)}</span></span>
+    <span class="who">${icon(c.icon, 20)}<span class="nm">${esc(c.name)}</span></span>
     <span class="edit">${adjust(-1, "minus", "减少")}<input id="quota-field-${esc(key)}" class="field plan-input" type="number" inputmode="numeric" min="0" max="1440" step="1" value="${esc(minutes)}" data-change="quota-minutes" ${data} aria-label="${esc(c.name)}目标分钟数" />${adjust(1, "plus", "增加")}</span>
     <span class="hrs">${minutes === 0 ? "不排" : esc(meter(minutes * 60))}</span>
   </div>`;
@@ -108,16 +106,14 @@ function quotaRow(c: CategoryDef, profile: ProfileDef): string {
 function tierPlan(): string {
   const p = prefs();
   const plan = p.profiles[0];
-  if (!plan) return plate(`<div class="settings-panel"><p class="t-note">还没有项目。</p></div>`);
+  if (!plan) return `<div class="settings-panel"><p class="t-note">还没有项目。</p></div>`;
   const rows = p.categories.map((c) => quotaRow(c, plan)).join("");
   const total = profileTotalMinutes(plan);
-  const inner = `<div class="settings-panel">
+  return `<div class="settings-panel plan">
     <div class="panel-meta"><span class="t-note">单位：分钟</span></div>
     <div class="plan-rows">${rows}</div>
-    ${hair()}
-    <div class="plan-total"><span class="engraved">总目标</span><span class="mono num">${esc(meter(total * 60))}</span></div>
+    <div class="plan-total"><span class="engraved">总目标</span><span class="num">${esc(meter(total * 60))}</span></div>
   </div>`;
-  return plate(inner);
 }
 
 // ---------- 节奏 ----------
@@ -126,21 +122,17 @@ function rhythm(): string {
   const p = prefs();
   const idle = p.idle_reminder_enabled ? p.idle_reminder_minutes : 0;
   const uniform = p.uniform_block_minutes;
-  const inner = `<div class="settings-panel">
+  return `<div class="settings-panel rows">
     ${settingRow("每格之后休息", "", select({ change: "break-default", value: p.break_minutes, options: withValue(BREAK_OPTIONS, p.break_minutes).map((n) => ({ value: n, label: n === 0 ? "不休息" : `${n} 分` })), width: 104, label: "每格之后休息" }))}
-    ${hair()}
     ${settingRow(
-      "统一块长",
+      "统一时长",
       "设置默认时长；每次开始前仍可单独调整。",
-      `${uniform > 0 ? select({ change: "uniform-length", value: uniform, options: withValue(BLOCK_OPTIONS, uniform).map((n) => ({ value: n, label: `${n} 分` })), width: 104, label: "统一块长" }) : ""}${toggle({ change: "uniform-toggle", checked: uniform > 0, label: "统一块长" })}`
+      `${uniform > 0 ? select({ change: "uniform-length", value: uniform, options: withValue(BLOCK_OPTIONS, uniform).map((n) => ({ value: n, label: `${n} 分` })), width: 104, label: "统一时长" }) : ""}${toggle({ change: "uniform-toggle", checked: uniform > 0, label: "统一时长" })}`
     )}
-    ${uniform === 0 ? p.categories.map((c) => hair() + settingRow(c.name, "默认专注时长", select({ change: "block-length", value: c.default_block_minutes, options: withValue(BLOCK_OPTIONS, c.default_block_minutes).map((n) => ({ value: n, label: `${n} 分` })), width: 104, label: `${c.name}默认专注时长`, data: { id: c.id } }))).join("") : ""}
-    ${hair()}
+    ${uniform === 0 ? p.categories.map((c) => settingRow(c.name, "默认专注时长", select({ change: "block-length", value: c.default_block_minutes, options: withValue(BLOCK_OPTIONS, c.default_block_minutes).map((n) => ({ value: n, label: `${n} 分` })), width: 104, label: `${c.name}默认专注时长`, data: { id: c.id } }))).join("") : ""}
     ${settingRow("暂停提醒", "未开格时定时提醒。", select({ change: "idle", value: idle, options: withValue(IDLE_OPTIONS, idle).map((n) => ({ value: n, label: n === 0 ? "关闭" : `${n} 分` })), width: 104, label: "暂停提醒间隔" }))}
-    ${hair()}
     ${settingRow("登录时自动启动", ui.autostart === null ? "正在读取系统设置…" : "", toggle({ change: "autostart", checked: ui.autostart === true, disabled: ui.autostart === null, label: "登录时自动启动" }))}
   </div>`;
-  return plate(inner);
 }
 
 // ---------- 网站屏蔽 ----------
@@ -230,22 +222,20 @@ function websiteBlock(): string {
   const problem = hostState.problem
     ? `<div class="problem-block"><span class="titles"><b>${esc(hostState.title)}</b>${hostState.detail ? `<span>${esc(hostState.detail)}</span>` : ""}</span>${btn("重新应用整站规则", { kind: "plate", cls: "caution", action: "reapply-blocking" })}</div>`
     : "";
-  const inner = `<div class="settings-panel website-block">
+  return `<div class="settings-panel website-block">
     <div class="panel-meta"><span class="t-note">${p.blocked_hosts.length + p.blocked_urls.length} / ${MAX_BLOCK_RULES} 条</span></div>
     ${warning}
-    ${hair("mt13")}
     <div class="blocking-group-heading"><b>精确网址</b><span class="t-note">只拦这一个网址</span>${statusLabel(browserState)}</div>
     ${browserState.detail ? `<p class="blocking-note${browserState.problem ? " caution" : ""}">${esc(browserState.detail)}</p>` : ""}
     ${ruleEditor("url")}
     ${ruleRows("url", p.blocked_urls)}
-    <details id="blocking-help" class="blocking-help" data-preserve-open><summary>安装与用法</summary>
+    <details id="blocking-help" class="blocking-help" data-preserve-open><summary>${icon("chevron-right", 14)}<span>安装与用法</span></summary>
       <ol><li>打开 Chrome 的 <span class="mono sel">chrome://extensions</span> 或 Edge 的 <span class="mono sel">edge://extensions</span>，开启「开发者模式」。</li><li>点击下方按钮找到扩展目录，再在浏览器中选择「加载已解压的扩展程序」，选中该目录。</li><li>保持坐功运行；扩展约每 30 秒尝试同步规则。上方显示「已同步」后，在学习日期间生效。</li></ol>
       ${btn("打开扩展文件夹", { kind: "plate", action: "reveal-browser-extension" })}
       <p class="blocking-note">抖音推荐页：<span class="mono sel">https://www.douyin.com/?recommend=1</span>。收藏页路径不同，可以正常打开。</p>
       <p class="blocking-note">B 站首页：<span class="mono sel">https://www.bilibili.com/</span>。视频页 <span class="mono sel">/video/…</span> 可以正常打开。</p>
       <p class="blocking-note">精确匹配逐字比较：路径、参数、顺序或 # 后内容不同都会放行。拦截发生在页面导航之后，可能一闪。</p>
     </details>
-    ${hair("mt13")}
     <div class="blocking-group-heading"><b>整个网站</b><span class="t-note">这个域名下全都不开</span>${statusLabel(hostState)}</div>
     <p class="blocking-note${wholeSiteState.problem ? " caution" : ""}" role="status">${esc(wholeSiteState.title)}</p>
     ${ruleEditor("host")}
@@ -253,7 +243,6 @@ function websiteBlock(): string {
     ${problem}
     <div class="foot-note"><p>暂停和休息时规则保持生效，收工后解除。写入和解除系统 hosts 各需一次管理员授权。</p>${btn("核对整站规则", { kind: "quiet", action: "recheck-blocking", disabled: ui.snap!.blocking.busy })}</div>
   </div>`;
-  return plate(inner);
 }
 
 // ---------- 身体 ----------
@@ -262,12 +251,10 @@ function bodyPanel(): string {
   const p = prefs();
   const water = `${btn("试听", { kind: "quiet", action: "water-sound-test", disabled: !p.sound_enabled || !inTauri, title: inTauri ? "试听喝水提示音" : "请在桌面应用中试听" })}${toggle({ change: "water-on", checked: p.water_reminder_enabled, label: "喝水提醒" })}`;
   const stretch = `${p.stretch_reminder_enabled ? stepper({ bind: "stretch-min", value: p.stretch_reminder_minutes, label: `${p.stretch_reminder_minutes} 分`, min: 15, max: 180, step: 5, ariaLabel: "起身提醒间隔" }) : ""}${toggle({ change: "stretch-on", checked: p.stretch_reminder_enabled, label: "起身护眼提醒" })}`;
-  const inner = `<div class="settings-panel">
+  return `<div class="settings-panel rows">
     ${settingRow("喝水提醒", "按本地时钟，整点和半点提醒。暂停、休息时也提醒；休眠错过不补发。使用独立提示音。", water)}
-    ${hair()}
     ${settingRow("起身 / 护眼提醒", "", stretch)}
   </div>`;
-  return plate(inner);
 }
 
 // ---------- 提醒 ----------
@@ -291,21 +278,17 @@ function notificationPanel(): string {
   const grant = ui.notificationStatus === "granted" || ui.notificationStatus === "checking"
     ? ""
     : btn("申请权限", { kind: "plate", action: "notif-recheck" });
-  const inner = `<div class="settings-panel">
+  return `<div class="settings-panel rows">
     ${settingRow("提示音", "提醒时播放声音。", toggle({ change: "sound", checked: p.sound_enabled, label: "提示音" }))}
-    ${hair()}
     ${settingRow("系统通知", notificationStatusText(), `${grant}${btn("试一条", { kind: "plate", action: "notif-test" })}${btn("打开系统设置", { kind: "quiet", action: "notif-open" })}`)}
   </div>`;
-  return plate(inner);
 }
 
 // ---------- 关于 ----------
 
 function aboutPanel(): string {
-  const inner = `<div class="settings-panel">
-    ${settingRow("版本", "坐功 · Sitzfleisch", `<span class="mono t-note">${esc(ui.appVersion ?? "读取中…")}</span>`)}
-    ${hair()}
+  return `<div class="settings-panel rows">
+    ${settingRow("版本", "", `<span class="mono t-note">${esc(ui.appVersion ?? "读取中…")}</span>`)}
     ${settingRow("数据只存在本机", ui.snap!.state_path, btn("在 Finder 中显示", { kind: "quiet", action: "reveal-state" }))}
   </div>`;
-  return plate(inner);
 }

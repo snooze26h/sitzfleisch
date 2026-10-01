@@ -10,16 +10,19 @@ export const PROJECT_ICON_CHOICES: [string, string][] = [
   ["brain", "思考"],
 ];
 
-const cut = 'fill="var(--brand-accent, #cd6145)" stroke="none"';
+// 同一套笔法：1.6 描边、形体浅填充，每枚带一粒小方块。方块平时跟着描边色走；
+// 只有正在烧的那个项目（界面给它设了 --glyph-accent），这一粒才变成朱红——朱红只标此刻。
+const ember = 'fill="var(--glyph-accent, currentColor)" stroke="none"';
+const body = 'fill="currentColor" opacity=".16" stroke="none"';
 const shapes = new Map<string, string>([
-  ["flask-conical", `<path d="M6 14h12l3 5H3z" fill="currentColor" opacity=".2" stroke="none"/><path d="M8 3h8M9 3v6l-5.7 9.5A1.7 1.7 0 0 0 4.8 21h14.4a1.7 1.7 0 0 0 1.5-2.5L15 9V3M7 14h10"/><path d="m15 14 4 5h-4z" ${cut}/>`],
-  ["book-open", `<path d="M3 4c4-1 6 0 9 2v15c-3-2-5-3-9-2z" fill="currentColor" opacity=".18" stroke="none"/><path d="M3 4c4-1 6 0 9 2 3-2 5-3 9-2v15c-4-1-6 0-9 2-3-2-5-3-9-2zM12 6v15M6 8l3 1M6 12l3 1"/><path d="m17 4 4 1v5l-4-2z" ${cut}/>`],
-  ["languages", `<path d="M8 3h11v15H8z" fill="currentColor" opacity=".16" stroke="none"/><path d="M8 3h11v15M4 6h10l3 3v12H4zM14 6v3h3M7 17l3-7 3 7M8 14h4"/><path d="M14 6h3v3z" ${cut}/>`],
-  ["newspaper", `<path d="M3 6h18v14H3z" fill="currentColor" opacity=".16" stroke="none"/><path d="M3 6h18v14H3zM6 3h12M7 10h4v4H7zM14 10h3M14 14h3M7 17h10"/><path d="M17 6h4v4z" ${cut}/>`],
-  ["message-square", `<path d="M3 4h18v13H10l-5 4v-4H3z" fill="currentColor" opacity=".18" stroke="none"/><path d="M3 4h18v13H10l-5 4v-4H3zM7 9h10M7 13h6"/><path d="M17 4h4v4z" ${cut}/>`],
-  ["binary", `<path d="M3 4h14l4 4v13H3z" fill="currentColor" opacity=".13" stroke="none"/><path d="M3 4h14l4 4v13H3zM17 4v4h4M9 10l-3 3 3 3M15 10l3 3-3 3"/><path d="M17 4h4v4z" ${cut}/>`],
-  ["dumbbell", `<path d="M3 7h5v10H3zM16 7h5v10h-5z" fill="currentColor" opacity=".2" stroke="none"/><path d="M3 7h5v10H3zM16 7h5v10h-5zM8 10h8M8 14h8M1 10v4M23 10v4"/><path d="M18 7h3v10h-3z" ${cut}/>`],
-  ["brain", `<path d="M12 3a7 7 0 0 0-4 12.7V18h8v-2.3A7 7 0 0 0 12 3" fill="currentColor" opacity=".16" stroke="none"/><path d="M12 3a7 7 0 0 0-4 12.7V18h8v-2.3A7 7 0 0 0 12 3ZM9 21h6M9 8c0-2 5-2 5 .5 0 2-4 1.5-4 3.5 0 1.2 2 1.5 3 1"/><path d="M14 3a7 7 0 0 1 5 5h-4z" ${cut}/>`],
+  ["flask-conical", `<path d="M6.3 15h11.4l2 3.6a1.6 1.6 0 0 1-1.4 2.4H5.7a1.6 1.6 0 0 1-1.4-2.4z" ${body}/><path d="M7.5 3h9M9 3v6.5L4.3 18.6A1.6 1.6 0 0 0 5.7 21h12.6a1.6 1.6 0 0 0 1.4-2.4L15 9.5V3M6.3 15h11.4"/><path d="M10.4 16.9h3.2v3.2h-3.2z" ${ember}/>`],
+  ["book-open", `<path d="M12 7C9 5 6 4.5 2.5 5v14c3.5-.5 6.5 0 9.5 2z" ${body}/><path d="M12 7C9 5 6 4.5 2.5 5v14c3.5-.5 6.5 0 9.5 2 3-2 6-2.5 9.5-2V5c-3.5-.5-6.5 0-9.5 2zM12 7v14M5.5 9.5l3.5 1M5.5 13.5l3.5 1"/><path d="M15.6 5.4h3.2v4.8h-3.2z" ${ember}/>`],
+  ["languages", `<path d="M8 3h13v13H8z" ${body}/><path d="M8 8V3h13v13h-5M3 8h13v13H3zM6.4 18.5l3.1-7 3.1 7M7.6 16h3.8"/><path d="M15.8 5.2h3v3h-3z" ${ember}/>`],
+  ["newspaper", `<path d="M3 4h18v16H3z" ${body}/><path d="M3 4h18v16H3zM13.5 8.5H18M13.5 12H18M6 15.5h12"/><path d="M6 7.5h4.5V12H6z" ${ember}/>`],
+  ["message-square", `<path d="M3.5 4h17v12.5H11L6 20.5v-4H3.5z" ${body}/><path d="M3.5 4h17v12.5H11L6 20.5v-4H3.5zM7.5 8.5h9M7.5 12H12"/><path d="M14 10.5h3v3h-3z" ${ember}/>`],
+  ["binary", `<path d="M3 4h18v16H3z" ${body}/><path d="M3 4h18v16H3zM6.5 9.5l3 2.5-3 2.5"/><path d="M12 10.2h3.2v4.8H12z" ${ember}/>`],
+  ["dumbbell", `<path d="M4 7h4v10H4zM16 7h4v10h-4z" ${body}/><path d="M4 7h4v10H4zM16 7h4v10h-4zM8 12h8M2 9.5v5M22 9.5v5"/><path d="M10.4 10.4h3.2v3.2h-3.2z" ${ember}/>`],
+  ["brain", `<path d="M12 3a6.5 6.5 0 0 0-4 11.6V17h8v-2.4A6.5 6.5 0 0 0 12 3z" ${body}/><path d="M12 3a6.5 6.5 0 0 0-4 11.6V17h8v-2.4A6.5 6.5 0 0 0 12 3zM9.5 20.5h5"/><path d="M10.4 8.2h3.2v3.2h-3.2z" ${ember}/>`],
 ]);
 
 export function projectGlyph(name: string): string | undefined {

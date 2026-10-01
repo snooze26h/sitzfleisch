@@ -46,3 +46,6 @@ PRODUCT.md
 design/visual-refresh-20260909/originals/
 # DESIGN.md 的改版前快照：与 DESIGN.md 一样只留本地。
 design/visual-refresh-20260909/DESIGN.before.md
+
+# 月面原始数据（NASA SVS CGI Moon Kit）只在本地出图时用，见 design/yue/render_moon.py
+design/yue/source/

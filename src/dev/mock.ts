@@ -107,6 +107,7 @@ function dayFromProfile(prefs: Preferences, profile: ProfileDef, now: number): D
     paused_without_block: 0,
     break_until: null,
     pauses: [],
+    rests: [],
   };
 }
 
@@ -122,6 +123,24 @@ function beginPause(day: Day, now: number, auto: boolean) {
 function closePause(day: Day, now: number) {
   const last = day.pauses[day.pauses.length - 1];
   if (last && last.ended_at === null) last.ended_at = Math.max(last.started_at, now);
+}
+
+/** 与 core 的 begin_rest 同一条：休息标签和休息记录一起落下。 */
+function beginRest(day: Day, from: number, seconds: number) {
+  if (seconds > 0) {
+    day.break_until = from + seconds;
+    day.rests.push({ started_at: from, ended_at: from + seconds });
+  } else {
+    day.break_until = null;
+  }
+}
+
+/** 与 core 的 cut_rest 同一条：提前结束的休息截到这一刻，自然到点的不动。 */
+function cutRest(day: Day, now: number) {
+  if (day.break_until === null) return;
+  day.break_until = null;
+  const last = day.rests[day.rests.length - 1];
+  if (last && last.ended_at > now) last.ended_at = Math.max(last.started_at, now);
 }
 
 function record(day: Day, timer: NonNullable<Day["timer"]>, accepted: boolean, now: number) {
@@ -157,7 +176,8 @@ function tick(now: number) {
   }
   if (paused(day)) {
     day.paused_seconds += delta;
-    if (!day.timer) day.paused_without_block += delta;
+    // 与 core 同一条：闲置提醒只数休息以外的暂停。
+    if (!day.timer && !(day.break_until !== null && now < day.break_until)) day.paused_without_block += delta;
     return;
   }
   const timer = day.timer;
@@ -176,12 +196,17 @@ function tick(now: number) {
   if (timer.elapsed_seconds < timer.total_seconds) return;
   const endedAt = now - overflow;
   day.timer = null;
-  const rest = (timer.break_minutes > 0 ? timer.break_minutes : state.preferences.break_minutes) * 60;
+  const rest = restSeconds(timer);
   record(day, timer, true, endedAt);
   beginPause(day, endedAt, false);
   day.paused_seconds += overflow;
   day.paused_without_block = overflow;
-  day.break_until = rest > 0 ? endedAt + rest : null;
+  beginRest(day, endedAt, rest);
+}
+
+/** 与 core 的 rest_seconds 同一条：开格时定下的休息分钟数说了算，0 就是不休息；早期存档没定下来的（-1）才看偏好。 */
+function restSeconds(timer: NonNullable<Day["timer"]>): number {
+  return (timer.break_minutes >= 0 ? timer.break_minutes : state.preferences.break_minutes) * 60;
 }
 
 function needDay(): Day {
@@ -193,15 +218,15 @@ const ops = {
   start_day(profileId: string) {
     if (state.day) throw "今天已经开始了";
     const profile = state.preferences.profiles.find((p) => p.id === profileId);
-    if (!profile) throw "没有这个档位";
+    if (!profile) throw "没有这个计划";
     const day = dayFromProfile(state.preferences, profile, state.last_tick);
-    if (!day.categories.length) throw "这个档位没有任何配了时的项目";
+    if (!day.categories.length) throw "这个计划没有任何配了时的项目";
     beginPause(day, state.last_tick, false);
     state.day = day;
   },
   switch_profile(profileId: string) {
     const profile = state.preferences.profiles.find((p) => p.id === profileId);
-    if (!profile) throw "没有这个档位";
+    if (!profile) throw "没有这个计划";
     const day = needDay();
     const categories: CategoryState[] = [];
     for (const quota of profile.quotas) {
@@ -220,7 +245,7 @@ const ops = {
         day.timer?.category === existing.id;
       if (!categories.some((c) => c.id === existing.id) && touched) categories.push({ ...existing, quota_minutes: 0 });
     }
-    if (!categories.length) throw "这个档位没有任何配了时的项目";
+    if (!categories.length) throw "这个计划没有任何配了时的项目";
     const order = state.preferences.categories.map((c) => c.id);
     categories.sort((a, b) => order.indexOf(a.id) - order.indexOf(b.id));
     day.categories = categories;
@@ -236,7 +261,7 @@ const ops = {
     const timer = day.timer;
     day.timer = null;
     if (timer) record(day, timer, true, now);
-    day.break_until = null;
+    cutRest(day, now);
     closePause(day, now);
     state.history.push({ day, ended_at: now });
     state.day = null;
@@ -252,7 +277,10 @@ const ops = {
     const day = needDay();
     if (day.timer) throw "已经有一格在走";
     if (!day.categories.some((c) => c.id === categoryId)) throw "今天没有这个项目";
-    day.break_until = null;
+    // 与 core 同一条：两格之间停够 5 分钟，就当起来活动过。
+    const open = day.pauses[day.pauses.length - 1];
+    if (open && open.ended_at === null && state.last_tick - open.started_at >= 5 * 60) day.seated_since_relief = 0;
+    cutRest(day, state.last_tick);
     closePause(day, state.last_tick);
     day.timer = {
       category: categoryId,
@@ -269,7 +297,7 @@ const ops = {
     if (!day.timer) throw "没有在走的格";
     if (paused(day)) {
       closePause(day, now);
-      day.break_until = null;
+      cutRest(day, now);
       day.seated_since_relief = 0;
     } else {
       beginPause(day, now, false);
@@ -288,11 +316,12 @@ const ops = {
     const timer = day.timer;
     if (!timer) throw "没有在走的计时";
     day.timer = null;
-    const rest = (timer.break_minutes > 0 ? timer.break_minutes : state.preferences.break_minutes) * 60;
+    // 一秒都没走就点了结束：台账里什么也没记，也就没有休息可给。
+    const rest = timer.elapsed_seconds > 0 ? restSeconds(timer) : 0;
     record(day, timer, true, now);
     beginPause(day, now, false);
     day.paused_without_block = 0;
-    day.break_until = rest > 0 ? now + rest : null;
+    beginRest(day, now, rest);
   },
   abandon_block(now: number) {
     const day = needDay();
@@ -302,12 +331,12 @@ const ops = {
     record(day, timer, false, now);
     beginPause(day, now, false);
     day.paused_without_block = 0;
-    day.break_until = null;
+    cutRest(day, now);
   },
   end_break() {
     const day = needDay();
     if (day.break_until === null) throw "现在不在休息";
-    day.break_until = null;
+    cutRest(day, state.last_tick);
   },
   set_completion_note(dayStartedAt: number, entryIndex: number, endedAt: number, note: string) {
     if (typeof note !== "string" || [...note].length > MAX_COMPLETION_NOTE_CHARS) throw "完成记录最多 2000 字";
@@ -325,7 +354,7 @@ const ops = {
     prefs.blocked_hosts = [...new Set(prefs.blocked_hosts.map(validateHost))];
     prefs.blocked_urls = [...new Set(prefs.blocked_urls.map(validateUrl))];
     if (!prefs.categories.length) throw "至少要有一个项目";
-    if (!prefs.profiles.length) throw "至少要有一个档位";
+    if (!prefs.profiles.length) throw "至少要有一份计划";
     if (prefs.uniform_block_minutes !== 0 && (!Number.isInteger(prefs.uniform_block_minutes) || prefs.uniform_block_minutes < MIN_BLOCK_MINUTES || prefs.uniform_block_minutes > MAX_BLOCK_MINUTES)) throw "统一块长要在 1–180 分钟之间";
     if (prefs.break_minutes < 0 || prefs.break_minutes > 120) throw "休息时长要在 0–120 分钟之间";
     for (const m of [prefs.stretch_reminder_minutes, prefs.idle_reminder_minutes]) {
@@ -336,10 +365,10 @@ const ops = {
       if (!Number.isInteger(c.default_block_minutes) || c.default_block_minutes < MIN_BLOCK_MINUTES || c.default_block_minutes > MAX_BLOCK_MINUTES) throw "默认块时长要在 1–180 分钟之间";
     }
     for (const p of prefs.profiles) {
-      if (!p.name.trim()) throw "档位名不能为空";
-      if (!p.quotas.some((x) => x.minutes > 0)) throw "每个档位至少要给一个项目配时";
+      if (!p.name.trim()) throw "计划名不能为空";
+      if (!p.quotas.some((x) => x.minutes > 0)) throw "至少要给一个项目配时";
       for (const x of p.quotas) {
-        if (!prefs.categories.some((c) => c.id === x.category)) throw "档位引用了不存在的项目";
+        if (!prefs.categories.some((c) => c.id === x.category)) throw "计划引用了不存在的项目";
         if (x.minutes < 0 || x.minutes > 24 * 60) throw "配额要在 0–24 小时之间";
       }
     }
@@ -388,6 +417,13 @@ function midDay(now: number, prefs: Preferences): Day {
     { started_at: m(120), ended_at: m(100), auto: false },
     { started_at: m(60), ended_at: null, auto: false },
   ];
+  // 走完的格后面跟着休息（放弃的那格不给休息）；休息照样落在上面那几段暂停里。
+  day.rests = [
+    { started_at: m(336), ended_at: m(331) },
+    { started_at: m(300), ended_at: m(290) },
+    { started_at: m(155), ended_at: m(150) },
+    { started_at: m(60), ended_at: m(50) },
+  ];
   const done: Record<string, number> = { deep: 160 * 60, browse: 30 * 60, reading: 45 * 60 };
   for (const c of day.categories) c.accepted_seconds = done[c.id] ?? 0;
   day.seated_seconds = 265 * 60;
@@ -424,8 +460,15 @@ function attachTimer(day: Day, timer: NonNullable<Day["timer"]>, now: number, pa
 
 function historyFixture(now: number, prefs: Preferences): ArchivedDay[] {
   const days: ArchivedDay[] = [];
-  const ratios = [0.92, 0.78, 1.0, 0.85, 0.64, 0.95, 0.71, 0.83, 1.02, 0.6, 0.88, 0.97, 0.75, 0.9];
-  for (let i = 14; i >= 1; i--) {
+  // 下标 i-1 是 i 天前那一天完成了目标的几成；0 表示那天没有坐。最近两周天天都坐了，
+  // 更早的四周断断续续——历史页的月历墙上才看得到圆满、未满、没有记录和更早无记录四种格子。
+  const ratios = [
+    0.92, 0.78, 1.0, 0.85, 0.64, 0.95, 0.71, 0.83, 1.02, 0.6, 0.88, 0.97, 0.75, 0.9,
+    1.0, 0.7, 0, 0.86, 1.03, 0.52, 0.94, 0, 0, 1.0, 0.81, 0.66, 1.01, 0.9,
+    0, 0.73, 1.0, 0.58, 0.88, 0, 1.02, 0.79, 0.95, 0.6, 0, 0, 0.84, 1.0,
+  ];
+  for (let i = ratios.length; i >= 1; i--) {
+    if (ratios[i - 1] === 0) continue;
     const start = new Date(now * 1000);
     start.setDate(start.getDate() - i);
     start.setHours(9, 5, 0, 0);
@@ -442,6 +485,7 @@ function historyFixture(now: number, prefs: Preferences): ArchivedDay[] {
       while (remaining > 0) {
         const seconds = Math.min(remaining, def.default_block_minutes * 60);
         day.ledger.push({ category: c.id, seconds, accepted: true, completion_note: "", tasks: [], started_at: cursor, ended_at: cursor + seconds });
+        day.rests.push({ started_at: cursor + seconds, ended_at: cursor + seconds + 10 * 60 });
         cursor += seconds + 10 * 60;
         remaining -= seconds;
       }
@@ -449,11 +493,16 @@ function historyFixture(now: number, prefs: Preferences): ArchivedDay[] {
     if (i % 3 === 0) {
       day.ledger.push({ category: day.categories[0].id, seconds: 20 * 60, accepted: false, completion_note: "", tasks: [], started_at: cursor, ended_at: cursor + 20 * 60 });
     }
-    day.pauses = [
-      { started_at: startedAt + 3 * 3600 + 25 * 60, ended_at: startedAt + 4 * 3600 + 5 * 60, auto: false },
-      { started_at: startedAt + 9 * 3600 + 25 * 60, ended_at: startedAt + 10 * 3600 + 5 * 60, auto: false },
-    ];
-    day.seated_seconds = day.categories.reduce((sum, c) => sum + c.accepted_seconds, 0);
+    // 格与格之间的空档都是暂停（休息也落在暂停里），收工前最后一段也是：一天没有缝，
+    // 预览里复制某天的 Markdown，暂停合计和列出来的暂停才对得上。
+    day.pauses = [];
+    let edge = startedAt;
+    for (const e of [...day.ledger].sort((a, b) => a.started_at - b.started_at)) {
+      if (e.started_at > edge) day.pauses.push({ started_at: edge, ended_at: e.started_at, auto: false });
+      edge = Math.max(edge, e.ended_at);
+    }
+    if (endedAt > edge) day.pauses.push({ started_at: edge, ended_at: endedAt, auto: false });
+    day.seated_seconds = day.ledger.reduce((sum, e) => sum + e.seconds, 0);
     day.paused_seconds = endedAt - startedAt - day.seated_seconds;
     day.cups = 6 + (i % 3);
     days.push({ day, ended_at: endedAt });
@@ -503,10 +552,23 @@ function buildScenario(name: string): MockState {
       base.day.suspend_seconds = 20 * 60;
       return base;
     }
-    case "resting":
+    case "resting": {
+      // 刚走完一格阅读、正在休息：休息从这一格结束那一刻算起，还剩 7 分钟。
       base.day = midDay(now, prefs);
-      base.day.break_until = now + 7 * 60;
+      const day = base.day;
+      const startedAt = minutesAgo(now, 48);
+      const endedAt = minutesAgo(now, 3);
+      day.pauses[day.pauses.length - 1].ended_at = startedAt;
+      day.ledger.push({ category: "reading", seconds: 45 * 60, accepted: true, completion_note: "", tasks: [], started_at: startedAt, ended_at: endedAt });
+      day.categories.find((c) => c.id === "reading")!.accepted_seconds += 45 * 60;
+      day.seated_seconds += 45 * 60;
+      day.paused_seconds -= 45 * 60;
+      day.paused_without_block = 3 * 60;
+      day.pauses.push({ started_at: endedAt, ended_at: null, auto: false });
+      day.rests.push({ started_at: endedAt, ended_at: endedAt + 10 * 60 });
+      day.break_until = endedAt + 10 * 60;
       return base;
+    }
     case "done":
       base.day = midDay(now, prefs);
       for (const c of base.day.categories) c.accepted_seconds = c.quota_minutes * 60;

@@ -1,0 +1,9 @@
+{
+  "source": "NASA Scientific Visualization Studio, CGI Moon Kit (https://svs.gsfc.nasa.gov/4720): lroc_color_poles_4k.tif, ldem_16_uint.tif",
+  "credit": "NASA's Scientific Visualization Studio",
+  "tool": "design/yue/render_moon.py（正射投影 + 高程坡度 → 法线偏移 + 反照率轻度锐化，程序处理，无生成模型）",
+  "command": "python3 design/yue/render_moon.py",
+  "config": "design/yue/moon.json",
+  "file": "browser-extension/assets/moon-half.webp",
+  "use": "浏览器拦截页：学习日还没结束，月亮亮了一半"
+}

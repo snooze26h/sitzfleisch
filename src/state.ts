@@ -56,7 +56,8 @@ export const ui = {
   // 今天
   selectedCategory: null as string | null,
   minutesDraft: null as number | null,
-  rejectedStartMinutes: false,
+  /** 非法时长被拒的时刻（毫秒）：紧跟着的那一下「开始」要中止。 */
+  rejectedStartAt: 0,
   breakDraft: null as number | null,
   completion: null as CompletionEditor | null,
   creditPulse: null as string | null,
@@ -166,6 +167,17 @@ export function pauseNowSeconds(d: Day): number {
   return last && last.ended_at === null ? Math.max(0, ui.now - last.started_at) : 0;
 }
 
+/**
+ * 正停着的这一段里，扣掉休息之后停了多久。选格页顶上那行「已暂停」用它，
+ * 和右边分开写的「已暂停」「已休息」同一个口径：休息完再停，从休息结束那一刻数起。
+ */
+export function idleNowSeconds(d: Day): number {
+  const last = d.pauses[d.pauses.length - 1];
+  if (!last || last.ended_at !== null) return 0;
+  const rested = d.rests.reduce((sum, r) => sum + Math.max(0, Math.min(r.ended_at, ui.now) - Math.max(r.started_at, last.started_at)), 0);
+  return Math.max(0, ui.now - last.started_at - rested);
+}
+
 /** 正在休息：休息只是一段带截止时刻的暂停。 */
 export function resting(d: Day): boolean {
   return d.break_until !== null && ui.now < d.break_until;
@@ -173,6 +185,14 @@ export function resting(d: Day): boolean {
 
 export function breakRemaining(d: Day): number {
   return d.break_until === null ? 0 : Math.max(0, d.break_until - ui.now);
+}
+
+/**
+ * 到 until 为止一共休息了多久；还在休息的那段只算到 until。
+ * 核心的 paused_seconds 含休息在内（休息也是暂停），界面上要把两者分开写时用它扣掉。
+ */
+export function restSeconds(d: Day, until = ui.now): number {
+  return d.rests.reduce((sum, r) => sum + Math.max(0, Math.min(r.ended_at, until) - r.started_at), 0);
 }
 
 /** 最后一段暂停是不是休眠/锁屏自动按的。 */

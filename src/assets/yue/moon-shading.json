@@ -1,0 +1,15 @@
+{
+ "size": 1024,
+ "radius": 440,
+ "relief_range": 0.35,
+ "lommel": 0.62,
+ "gamma": 0.92,
+ "albedo_floor": 0.28,
+ "earthshine": 0.07,
+ "light": [
+  226,
+  216,
+  198
+ ],
+ "exposure": 1.35
+}

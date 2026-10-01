@@ -1,9 +1,9 @@
-// 侧栏：字标、三个入口，以及学习日进行中时导航下方的一行实时状态。
+// 侧栏：字标、三个入口，以及学习日进行中时压在底部的一轮小月与一行实时状态。
 
 import { clock, esc, meter } from "../format";
 import { icon } from "../icons";
 import { brandIcon, brandMark } from "../brand";
-import { hair, tickedTrack } from "../components";
+import { dayMoon } from "../moon";
 import { suggest } from "../scheduler";
 import type { View } from "../types";
 import { SETTINGS_SECTIONS } from "./settings";
@@ -19,11 +19,11 @@ export function sidebar(): string {
   // 进了设置，侧栏整个换成设置的分区：一区一页，不再一根滚动条到底。
   const inSettings = ui.view === "settings";
   const nav = inSettings
-    ? `<button class="nav-item back" data-action="tab" data-view="today" aria-label="离开设置，回到今天">${icon("chevron-left", 14)}<span>返回</span></button>`
-      + hair()
+    ? `<button class="nav-item back" data-action="tab" data-view="today" aria-label="离开设置，回到今天">${icon("chevron-left", 16)}<span>返回</span></button>`
+      + `<div class="nav-sep"></div>`
       + SETTINGS_SECTIONS.map(
           ([id, label, ic]) =>
-            `<button class="nav-item${ui.settingsSection === id ? " on" : ""}" data-action="jump-settings" data-id="${id}" aria-current="${ui.settingsSection === id ? "page" : "false"}"><i class="rail"></i>${icon(ic, 14)}<span>${label}</span></button>`
+            `<button class="nav-item${ui.settingsSection === id ? " on" : ""}" data-action="jump-settings" data-id="${id}" aria-current="${ui.settingsSection === id ? "page" : "false"}"><i class="rail"></i>${icon(ic, 16)}<span>${label}</span></button>`
         ).join("")
     : NAV.map(
         ([view, label]) =>
@@ -31,13 +31,12 @@ export function sidebar(): string {
       ).join("");
   return `<aside class="sidebar" id="sidebar">
     <div class="wordmark"><span class="wordmark-symbol">${brandMark()}</span><span class="wordmark-type"><span class="wordmark-cn">坐功</span><span class="wordmark-en">SITZFLEISCH</span></span></div>
-    ${hair()}
     <nav class="nav" aria-label="${inSettings ? "设置分区" : "主导航"}">${nav}</nav>
     ${inSettings ? "" : nowBlock()}
   </aside>`;
 }
 
-/** 导航下方的一行：正在做什么、还剩多久，以及今天学了多久。没开始学习日时不出现。 */
+/** 侧栏底部：今天这一轮月的缩影、正在做什么、还剩多久，以及今天学了多久。没开始学习日时不出现。 */
 function nowBlock(): string {
   const d = day();
   if (!d) return "";
@@ -45,17 +44,18 @@ function nowBlock(): string {
   let tint = "muted";
   let title: string;
   let value: string;
-  let track = "";
   // 「已暂停」这类刻字标签；只有格被按停时才有。
   let tag = "";
   // 大读数平时是骨白，只有暂停秒表走赭石——它是「时间在流走但没算数」的那个。
   let valueTint = "";
   const t = d.timer;
+  const held = !!t && isPaused(d);
   if (resting(d)) {
     ic = "coffee";
+    tint = "caution";
     title = "休息";
     value = clock(breakRemaining(d));
-  } else if (t && isPaused(d)) {
+  } else if (t && held) {
     // 只有**真的有一格被按停**才是「已暂停」。没有格在走时整天也算暂停中
     // （0.8.0 的规矩），那种时候该报「下一格」，不是把暂停秒表挂在这儿。
     ic = "pause";
@@ -66,12 +66,9 @@ function nowBlock(): string {
     valueTint = " caution";
   } else if (t) {
     ic = iconOf(t.category);
-    // 侧栏字形走骨白；正在计时由倒计时和下面那条轨承担。
     tint = "high";
     title = nameOf(t.category, d);
     value = clock(Math.max(0, t.total_seconds - t.elapsed_seconds));
-    // 进度条走骨白，朱红留给当前格的图标和运行图上的此刻。
-    track = tickedTrack(t.total_seconds > 0 ? t.elapsed_seconds / t.total_seconds : 0, Math.max(1, Math.round(t.total_seconds / 900)), { mini: true });
   } else {
     const s = suggest(d, prefs(), ui.now);
     ic = s ? iconOf(s.category) : "check";
@@ -79,10 +76,15 @@ function nowBlock(): string {
     title = s ? "下一格" : "今日达成";
     value = s ? shortName(s.category, d) : "";
   }
-  return `<div class="now" id="now">
-    ${hair()}
-    <div class="now-line">${icon(ic, 13, tint)}<span class="nm">${esc(title)}</span>${tag}<span class="val${valueTint}">${esc(value)}</span></div>
-    ${track}
+  const burning = !!t && !held && !resting(d);
+  return `<div class="now${burning ? " burning" : ""}" id="now">
+    <div class="now-main">
+      <span class="now-moon">${dayMoon(d, "mini")}</span>
+      <span class="now-text">
+        <span class="now-line">${icon(ic, 14, tint)}<span class="nm">${esc(title)}</span>${tag}</span>
+        <span class="val${valueTint}">${esc(value)}</span>
+      </span>
+    </div>
     <div class="now-net"><span class="engraved">已学</span><span class="val">${esc(meter(netSeconds(d)))} <i>/ ${esc(meter(quotaSeconds(d)))}</i></span></div>
   </div>`;
 }

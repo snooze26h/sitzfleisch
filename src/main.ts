@@ -31,6 +31,7 @@ import { historyEmpty, historyPage } from "./views/history";
 import { blockState, settingsPage } from "./views/settings";
 import { overlays, toastView } from "./views/overlays";
 import { drawDiagram } from "./views/diagram";
+import { loadMoon, paintMoons } from "./moon";
 
 const app = document.getElementById("app")!;
 const TITLES: Record<View, string> = { today: "今天", history: "历史", settings: "设置" };
@@ -96,6 +97,17 @@ function render() {
       if (from instanceof HTMLDetailsElement && to instanceof HTMLDetailsElement && from.hasAttribute("data-preserve-open") && to.hasAttribute("data-preserve-open")) {
         to.open = from.open;
       }
+      // 月亮的画布由 paintMoons 按显示尺寸定像素宽高；这里只同步亮度与样式，不让 morphdom 抹掉宽高、清空画面。
+      if (from instanceof HTMLCanvasElement && to instanceof HTMLCanvasElement && from.dataset.moon !== undefined) {
+        if (from.dataset.moon !== to.dataset.moon) from.dataset.moon = to.dataset.moon;
+        // 换了日子，同一格可能从新月换成亮过的月亮：地照倍数也得跟着换。
+        if (from.dataset.earth !== to.dataset.earth) {
+          if (to.dataset.earth === undefined) delete from.dataset.earth;
+          else from.dataset.earth = to.dataset.earth;
+        }
+        if (from.className !== to.className) from.className = to.className;
+        return false;
+      }
       if (from.isEqualNode(to) && !from.querySelector("input, textarea, select")) return false;
       return true;
     },
@@ -107,6 +119,7 @@ function render() {
   }
   if (!hadCompletion && topOverlay() === "completion") app.querySelector<HTMLTextAreaElement>("#completion-note")?.focus({ preventScroll: true });
   drawDiagrams();
+  paintMoons(app);
   void setWindowTitle(TITLES[ui.view]);
 }
 
@@ -118,7 +131,12 @@ function drawDiagrams() {
   }
 }
 
-new ResizeObserver(() => requestAnimationFrame(drawDiagrams)).observe(app);
+new ResizeObserver(() => requestAnimationFrame(() => {
+  drawDiagrams();
+  paintMoons(app);
+})).observe(app);
+// 月面资料图读好之前，页面上的月亮是空的；读好后立刻补画一次。
+loadMoon(() => paintMoons(app));
 // 字体装载完成前 canvas 会用回退字体画刻度，装好后重画一次。
 void document.fonts.ready.then(() => drawDiagrams());
 
@@ -129,8 +147,8 @@ function detectTransitions(prev: Snapshot | null, next: Snapshot) {
   const beforeDay = prev.state.day;
   const after = next.state.day;
   if (!beforeDay || !after) return;
-  // 心跳空档让计时按停了：说清楚空档没有计入，不推断系统原因。
-  if (after.suspend_seconds > beforeDay.suspend_seconds && isPaused(after)) {
+  // 心跳空档让走着的格按停了：说清楚空档没有计入，不推断系统原因。本来就没在计时就不用说。
+  if (after.suspend_seconds > beforeDay.suspend_seconds && isPaused(after) && beforeDay.timer && !isPaused(beforeDay)) {
     toast("检测到计时中断，已自动暂停，空档没有计入。");
   }
   const before = beforeDay.timer;
@@ -435,7 +453,7 @@ async function handleAction(action: string, el: HTMLElement) {
       if (!d || d.timer || !d.categories.some((c) => c.id === id)) break;
       ui.selectedCategory = id;
       ui.minutesDraft = null;
-      ui.rejectedStartMinutes = false;
+      ui.rejectedStartAt = 0;
       render();
       break;
     case "start-block":
@@ -477,7 +495,7 @@ async function handleAction(action: string, el: HTMLElement) {
     case "abandon-block": {
       ask({
         title: "放弃这一格？",
-        message: "已经过去的时间会记在台账上，但不计入今天的进度。",
+        message: "已经过去的时间会留在记录里，但不计入今天的进度。",
         confirmLabel: "确认",
         cancelLabel: "返回",
         destructive: true,
@@ -672,12 +690,15 @@ async function handleAction(action: string, el: HTMLElement) {
 }
 
 async function startBlock() {
-  // 非法输入失焦后会恢复旧值，但这次启动必须中止，避免悄悄按旧时长开格。
-  if (ui.rejectedStartMinutes) { ui.rejectedStartMinutes = false; return; }
+  // 非法输入失焦后会恢复旧值，紧跟着的这一下「开始」必须中止，避免悄悄按旧时长开格；
+  // 只拦紧跟着的那一下，过后再点照常开始。
+  if (Date.now() - ui.rejectedStartAt < 800) { ui.rejectedStartAt = 0; return; }
   const d = day();
   if (!d || d.timer) return;
   const p = prefs();
   const s = suggest(d, p, ui.now);
+  // 今天的安排全部走完了：完成页上没有开始键，⌘↩ 也不该悄悄再开一格。
+  if (!s) return;
   const selected = ui.selectedCategory ?? s?.category ?? null;
   const cat = d.categories.find((c) => c.id === selected);
   if (!cat) {
@@ -688,9 +709,12 @@ async function startBlock() {
   const breakMinutes = ui.breakDraft ?? p.break_minutes;
   const snap = await act("start_block", { categoryId: cat.id, minutes, tasks: [], breakMinutes });
   if (!snap) return;
+  // 这一格的选择用完就清掉：下一次回到选格页，从新的建议和设置里的默认休息重新起步，
+  // 不能还停在上一格的项目上（满了的项目也会被再开一格）。
+  ui.selectedCategory = null;
   ui.minutesDraft = null;
+  ui.breakDraft = null;
   toast(`开始${cat.name}，${minutes} 分钟。`);
-  if (breakMinutes !== p.break_minutes) await savePrefs((x) => { x.break_minutes = breakMinutes; });
 }
 
 /** 先结算实际时间，完成记录由新台账项统一触发，填写期间不再计时。 */
@@ -698,9 +722,15 @@ async function finishBlock() {
   const d = day();
   const t = d?.timer;
   if (!d || !t) return;
+  const before = d.ledger.length;
   const snap = await act("finish_block");
   const after = snap?.state.day;
   if (!after) return;
+  // 一秒都没走就结束时台账不会多出一条：不能把上一格当成这一格来报。
+  if (after.ledger.length <= before) {
+    toast("这一格还没走就结束了，没有计入。");
+    return;
+  }
   const entry = after.ledger[after.ledger.length - 1];
   if (entry?.accepted) {
     pulseQuota(entry.category);
@@ -783,12 +813,25 @@ async function saveCompletion(skip: boolean) {
 
 async function cancelCompletion() {
   if (!ui.completion || ui.completion.busy) return;
-  if (ui.completion.automatic) await saveCompletion(true);
+  if (ui.completion.automatic) {
+    // 自动弹出的框按 Esc 等于「先跳过」；已经写了字的话不能就这么丢掉。
+    if (ui.completion.draft.trim()) {
+      toast("按 ⌘↩ 保存这段记录，或点「先跳过」。");
+      return;
+    }
+    await saveCompletion(true);
+  }
   else {
     ui.completion = null;
     render();
     if (!topOverlay()) app.querySelector<HTMLElement>("#content")?.focus({ preventScroll: true });
   }
+}
+
+/** 改计划里的配额。学习日进行中的话今天也跟着改（进度与记录保留），不然设置里改了、今天页纹丝不动。 */
+async function saveQuota(profileId: string, categoryId: string, update: (minutes: number) => number) {
+  const saved = await savePrefs((x) => updateQuota(x, profileId, categoryId, update));
+  if (saved && day()) await act("switch_profile", { profileId });
 }
 
 function updateQuota(p: Preferences, profileId: string, categoryId: string, update: (minutes: number) => number): void | string {
@@ -811,11 +854,11 @@ async function stepValue(el: HTMLElement) {
     case "quota": {
       const profileId = el.dataset.profile ?? "";
       const categoryId = el.dataset.category ?? "";
-      await savePrefs((x) => updateQuota(x, profileId, categoryId, adjust));
+      await saveQuota(profileId, categoryId, adjust);
       break;
     }
     case "minutes":
-      ui.rejectedStartMinutes = false;
+      ui.rejectedStartAt = 0;
       ui.minutesDraft = adjust(ui.minutesDraft ?? Number(el.dataset.value));
       render();
       break;
@@ -899,7 +942,7 @@ async function handleChange(key: string, el: HTMLInputElement | HTMLSelectElemen
         toast("配额请输入 0 到 1440 的整数分钟，已恢复原值。");
         break;
       }
-      await savePrefs((x) => updateQuota(x, profileId, categoryId, () => minutes));
+      await saveQuota(profileId, categoryId, () => minutes);
       break;
     }
     case "minutes":
@@ -907,12 +950,12 @@ async function handleChange(key: string, el: HTMLInputElement | HTMLSelectElemen
     case "uniform-length": {
       const minutes = Number(value);
       if (!/^\d{1,3}$/.test(value) || !Number.isInteger(minutes) || minutes < MIN_BLOCK_MINUTES || minutes > MAX_BLOCK_MINUTES) {
-        if (key === "minutes") ui.rejectedStartMinutes = true;
+        if (key === "minutes") ui.rejectedStartAt = Date.now();
         el.value = savedMinutes(el);
         toast("时长请输入 1 到 180 的整数分钟，已恢复原值。");
         return;
       }
-      if (key === "minutes") { ui.minutesDraft = minutes; ui.rejectedStartMinutes = false; }
+      if (key === "minutes") { ui.minutesDraft = minutes; ui.rejectedStartAt = 0; }
       else if (key === "uniform-length") await savePrefs((x) => { x.uniform_block_minutes = minutes; });
       else await savePrefs((x) => { const c = x.categories.find((c) => c.id === id); if (c) c.default_block_minutes = minutes; });
       render();
@@ -1160,10 +1203,11 @@ void onQuitBlocked((reason) => {
   });
 });
 void onQuitBlockingFailed((reason) => {
+  const why = reason.replace(/[。.]\s*$/, "");
   ask({
     id: QUIT_DIALOG_ID,
     title: "退出暂未完成",
-    message: `网站屏蔽还没有解除：${reason}。请重试并完成系统授权，解除后会自动退出。`,
+    message: `网站屏蔽还没有解除：${why}。重试并完成系统授权后会自动退出；也可以仍然退出，系统里的整站规则会留到下次打开坐功再解除。`,
     confirmLabel: "重试并退出", cancelLabel: "留在这里", destructive: false, focus: "confirm",
     onConfirm: async (self): Promise<"keep"> => {
       try { await invoke("quit_after_save"); }
@@ -1171,6 +1215,14 @@ void onQuitBlockingFailed((reason) => {
         if (ui.dialog?.token === self.token) ui.dialog.message = `退出暂未完成：${String(error)}`;
       }
       return "keep";
+    },
+    // 授权一再被拒或托管标记损坏时，重试永远不会成功，不能把人困在应用里。
+    alt: {
+      label: "仍然退出",
+      onAlt: async () => {
+        try { await invoke("quit_leaving_blocking"); }
+        catch (error) { toast(String(error)); }
+      },
     },
   });
 });

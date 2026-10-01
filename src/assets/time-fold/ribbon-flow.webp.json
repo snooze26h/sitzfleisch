@@ -1,9 +1,0 @@
-{
-  "tool": "image_gen built-in",
-  "intent": "precise-object-edit",
-  "prompt": "Use case: precise-object-edit. Edit target: the attached ribbon-flow.webp image, a decorative folded ribbon for a desktop focus timer. Change only the ribbon material colors: broad matte warm-white front surfaces and rich vermilion red (#c54435) reverse surfaces, alternating red and white visibly through its folds. The current near-black ribbon body must become clearly bright red-and-white, not black with a red tip. Keep the exact existing ribbon silhouette, folds, position, width, composition, camera angle, and generous empty space unchanged. Keep backdrop pure solid black #000000 (the app uses screen compositing), no floor, shadows only on the ribbon itself, soft studio lighting, refined paper-like material, no glow. Render landscape 3:2, a single isolated ribbon, no text, no logos, no border, no checkerboard.",
-  "output": "src/assets/time-fold/ribbon-flow.webp",
-  "background": "opaque black; screen compositing",
-  "date": "2026-09-18",
-  "sourceArtifact": "exec-d2dde714-b739-4c0e-8f04-1e4368d12184.png"
-}

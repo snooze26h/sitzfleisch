@@ -22,9 +22,12 @@ export function duration(seconds: number): string {
   return `${h} 小时 ${m} 分`;
 }
 
-/** 仪表记法：45m / 8h / 4h30。数字等宽对齐，读的是刻度不是句子。 */
+/**
+ * 仪表记法：45m / 8h / 4h30。数字等宽对齐，读的是刻度不是句子。
+ * 向下取整，和计时器一样只报走满的分钟：差 20 秒也还没满，不能显示成「45m / 45m」却没有「已满」。
+ */
 export function meter(seconds: number): string {
-  const minutes = Math.round(Math.max(0, seconds) / 60);
+  const minutes = Math.floor(Math.max(0, seconds) / 60);
   const h = Math.floor(minutes / 60);
   const m = minutes % 60;
   if (h === 0) return `${m}m`;
@@ -45,10 +48,6 @@ const WEEKDAYS = ["周日", "周一", "周二", "周三", "周四", "周五", "�
 export function dayLabel(unix: number): string {
   const d = new Date(unix * 1000);
   return `${d.getMonth() + 1}月${d.getDate()}日 ${WEEKDAYS[d.getDay()]}`;
-}
-
-export function dayOfMonth(unix: number): string {
-  return `${new Date(unix * 1000).getDate()}日`;
 }
 
 /**

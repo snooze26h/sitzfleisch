@@ -101,7 +101,13 @@ cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings
 | `focus.webp` | `#qa=running` | 1240 × 920 |
 | `history.webp` | `#qa=start`，点击「历史」 | 1240 × 840 |
 
-截图于 2026-09-22 更新，设备像素比为 2，WebP 质量为 88。为固定演示日期与倒计时，页面加载前将 `Date.now()` 固定为 `2026-09-22T14:20:00-07:00`。截图使用内置模拟数据，没有读取个人记录。
+截图于 2026-09-30 随「一轮月」界面更新（今天页的月相与历史页月历），设备像素比为 2，WebP 质量为 88。为固定演示日期与倒计时，页面加载前将 `Date.now()` 固定为 `2026-09-22T14:20:00-07:00`。截图使用内置模拟数据，没有读取个人记录。
+
+### 月面资料
+
+今天页、历史月历和侧栏里的月亮都是运行时按进度现算光照（[moon.ts](../src/moon.ts)），用的是 [moon-maps.webp](../src/assets/yue/moon-maps.webp)（R 为月面反照率，G/B 为环形山起伏的法线偏移）和 [moon-shading.json](../src/assets/yue/moon-shading.json) 里的光照参数；浏览器扩展拦截页的半月是同一套公式预先渲染的。
+
+月面数据来自 NASA Scientific Visualization Studio 的 [CGI Moon Kit](https://svs.gsfc.nasa.gov/4720)（`lroc_color_poles_4k.tif` 与 `ldem_16_uint.tif`），署名：NASA's Scientific Visualization Studio。原始数据不进仓库；需要重新生成时，把这两个文件下载到 `design/yue/source/`，再在仓库根目录运行 `python3 design/yue/render_moon.py`。光照参数改在 [moon.json](../design/yue/moon.json)。
 
 ## 隔离原生测试数据
 

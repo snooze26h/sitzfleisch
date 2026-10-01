@@ -1,11 +1,19 @@
+/* 扩展页面沿用坐功主程序的色板：暖石墨底、骨白字与线、朱红只给主要动作，赭石是按停与休息。 */
 :root {
   color-scheme: dark;
-  font: 14px/1.6 -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+  font: 15px/1.6 -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
   color: #e0d7c8;
   background: #1d1c19;
   --high: #f4edde;
   --muted: #b6ac9b;
-  --line: rgba(231, 223, 208, 0.17);
+  --faint: #a79d8b;
+  --line: rgba(231, 223, 208, 0.12);
+  --line-strong: rgba(231, 223, 208, 0.2);
+  --control: #8a8172;
+  --action: #ae422a;
+  --action-hover: #b94a30;
+  --action-ink: #fff5e7;
+  --display: "Songti SC", "STSong", "Source Han Serif SC", "Noto Serif CJK SC", "Noto Serif SC", -apple-system, BlinkMacSystemFont, "PingFang SC", "Microsoft YaHei", sans-serif;
 }
 * { box-sizing: border-box; }
 body { margin: 0; }
@@ -13,54 +21,42 @@ main { width: min(100%, 660px); margin: 0 auto; padding: 32px; }
 /* 工具栏弹窗由 Chrome 按内容自动定尺寸；依赖 vw 会让尺寸与滚动条互相影响。
    固定外框、只在内部滚动，避免同步状态换行时窗口反复伸缩。 */
 html.popup-root { width: 360px; height: 480px; overflow: hidden; }
-body.popup { width: 100%; height: 100%; overflow-x: hidden; overflow-y: auto; }
+body.popup { width: 100%; height: 100%; overflow-x: hidden; overflow-y: auto; background: #141411; }
 .popup main { padding: 24px; }
 body.blocked main { width: min(100%, 1180px); padding-top: clamp(48px, 11vh, 120px); }
 h1, h2, p { margin: 0; }
-h1 { color: var(--high); font-size: 24px; line-height: 1.3; font-weight: 600; }
-.popup h1 { font-size: 20px; }
-h2 { color: var(--high); font-size: 15px; font-weight: 600; margin: 24px 0 8px; }
+h1 { color: var(--high); font-family: var(--display); font-size: 26px; line-height: 1.35; font-weight: 700; letter-spacing: 1px; }
+.popup h1 { font-size: 22px; }
+h2 { color: var(--high); font-size: 15px; font-weight: 600; letter-spacing: 0.6px; margin: 26px 0 8px; padding-bottom: 8px; border-bottom: 1px solid var(--line); }
 p + p { margin-top: 12px; }
-.brand { color: var(--muted); margin-bottom: 24px; display: flex; align-items: center; gap: 12px; }
-.brand-mark { color: #e7dfd0; font-size: 29px; line-height: 1; font-weight: 600; position: relative; }
-.brand-mark::after { content: ""; position: absolute; width: 7px; height: 4px; background: #cd6145; top: 2px; right: 0; }
-.intro { margin-top: 16px; }
-.state { padding: 20px 0; margin: 20px 0; border-top: 1px solid var(--line); border-bottom: 1px solid var(--line); }
+.brand { color: var(--muted); margin-bottom: 28px; display: flex; align-items: center; gap: 12px; font-size: 14px; letter-spacing: 0.6px; }
+.brand-mark { flex: none; display: block; object-fit: contain; }
+.intro { margin-top: 14px; color: var(--muted); }
+.state { padding: 18px 0; margin: 22px 0; border-top: 1px solid var(--line-strong); border-bottom: 1px solid var(--line); }
 .state-title { color: var(--high); font-size: 16px; font-weight: 600; }
 .muted, .detail { color: var(--muted); }
 .detail { margin-top: 8px; }
-.url { overflow-wrap: anywhere; white-space: pre-wrap; font: 14px/1.7 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; color: var(--high); }
-button, .button-link { min-height: 44px; padding: 8px 16px; border: 1px solid var(--line); border-radius: 7px; color: var(--high); background: #252420; font: inherit; cursor: pointer; }
-button:hover, .button-link:hover { background: #302e28; }
+.url { overflow-wrap: anywhere; white-space: pre-wrap; font: 15px/1.7 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; color: var(--high); }
+button, .button-link { min-height: 44px; padding: 8px 18px; border: 0; border-radius: 8px; box-shadow: inset 0 0 0 1px var(--control); color: var(--high); background: transparent; font: inherit; font-weight: 500; cursor: pointer; }
+button:hover, .button-link:hover { background: rgba(231, 223, 208, 0.07); }
 .button-link { display: inline-flex; align-items: center; text-decoration: none; }
-button:disabled { color: var(--muted); cursor: default; }
-button:focus-visible, a:focus-visible { outline: 2px solid #dad5ca; outline-offset: 3px; }
-.actions { display: flex; flex-wrap: wrap; gap: 12px; margin-top: 24px; }
-.primary { background: #e7dfd0; color: #282820; border-color: #e7dfd0; }
-.primary:hover { background: #f4edde; }
-.small { font-size: 14px; }
+button:disabled { color: var(--muted); cursor: default; opacity: 0.6; }
+button:focus-visible, a:focus-visible { outline: 2px solid #e7dfd0; outline-offset: 3px; }
+.actions { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 26px; }
+.primary, .popup #sync { background: var(--action); color: var(--action-ink); box-shadow: none; font-weight: 600; }
+.primary:hover, .popup #sync:hover { background: var(--action-hover); }
 ol { padding-left: 22px; margin: 8px 0; }
 li + li { margin-top: 8px; }
-code { font-size: 13px; overflow-wrap: anywhere; }
+code { font-size: 13px; overflow-wrap: anywhere; color: var(--high); }
 [hidden] { display: none !important; }
-.blocked-layout { display: grid; grid-template-columns: minmax(0, 1fr) 290px; gap: 34px; align-items: center; }
-.blocked-copy { position: relative; padding: 40px; border-radius: 14px; background: #e8e1d5; color: #444139; overflow: hidden; }
-.blocked-copy::after { content: ""; position: absolute; top: 0; right: 0; width: 28px; height: 28px; background: #be4c31; clip-path: polygon(0 0,100% 0,100% 100%); }
-.blocked-copy h1 { font-size: 32px; color: #282820; line-height: 1.45; }
-.blocked-copy .detail, .blocked-copy .intro { color: #665f52; }
-.blocked-copy .state { border-color: rgba(50,44,31,.2); }
-.blocked-copy .url { color: #282820; font-size: 15px; }
-.blocked-copy .actions { gap: 9px; }
-.blocked-copy button, .blocked-copy .button-link { border-color: rgba(50,44,31,.22); color: #444139; background: transparent; }
-.blocked-copy button:hover, .blocked-copy .button-link:hover { background: #d8cfbf; }
-.blocked-copy .primary { color: #fff5e7; background: #ae422a; border-color: #ae422a; }
-.blocked-copy .primary:hover { background: #923b28; }
-.blocked-copy button:focus-visible, .blocked-copy a:focus-visible { outline-color: #923b28; }
-.blocked-copy button:disabled { color: #696052; }
-.blocked-art { margin: 0; aspect-ratio: 1; background: transparent; border-radius: 0; overflow: hidden; mix-blend-mode: lighten; }
-.blocked-art img { display: block; width: 100%; height: 100%; object-fit: contain; }
-.popup .brand { margin-bottom: 22px; }
-.popup .state { padding: 18px; border: 1px solid var(--line); border-radius: 10px; background: #252420; }
-.popup #sync { width: 100%; background: #e7dfd0; color: #282820; font-weight: 600; }
-@media (max-width: 900px) { .blocked-layout { grid-template-columns: minmax(0, 1fr); } .blocked-art { width: 180px; justify-self: center; grid-row: 1; } .blocked-copy { padding: 30px; } }
+.blocked-layout { display: grid; grid-template-columns: minmax(0, 1fr) 320px; gap: 72px; align-items: center; }
+.blocked-copy h1 { font-size: 40px; line-height: 1.35; letter-spacing: 2px; }
+.blocked-copy .intro { font-size: 16px; }
+/* 右边是学习日里的这一轮月，亮了一半：学习日还没结束，这个页面等收工。图透明，不加框。 */
+.blocked-art { margin: 0; }
+.blocked-art img { display: block; width: 100%; height: auto; user-select: none; -webkit-user-drag: none; }
+.popup .brand { margin-bottom: 20px; }
+.popup .state { padding: 16px 18px; border: 0; border-radius: 10px; background: #1d1c19; box-shadow: inset 0 0 0 1px var(--line); }
+.popup #sync { width: 100%; }
+@media (max-width: 900px) { .blocked-layout { grid-template-columns: minmax(0, 1fr); gap: 24px; } .blocked-art { width: 220px; grid-row: 1; } .blocked-copy h1 { font-size: 32px; } }
 @media (max-width: 420px) { .blocked main { padding-left: 24px; padding-right: 24px; } }

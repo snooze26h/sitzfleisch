@@ -10,20 +10,21 @@
 import type { Day } from "../types";
 import { activeSpans } from "../timeline";
 
-const INK_FAINT = "#9d978d";
-const INK_HIGH = "#f4f2ee";
-const STROKE = "#dad5ca";
-const SIGNAL = "#c7452f";
-const CAUTION = "#b08843";
-const BED = "#0e0e10";
+// 与 styles.css 的令牌同值：canvas 读不到 CSS 变量，只能在这里再写一遍。
+const INK_FAINT = "#a79d8b";
+const INK_HIGH = "#f4edde";
+const EMBER = "#cd6145";
+const EMBER_INK = "#fff5e7";
+const CAUTION = "#c6a367";
+const BED = "#141411";
 
 /** 轨高、轴高、总高：界面那边要拿总高定容器，别两处各写一套。 */
 const TRACK_H = 46;
 const AXIS_H = 22;
-const TOP_PAD = 8;
+const TOP_PAD = 12;
 export const DIAGRAM_H = TOP_PAD + TRACK_H + AXIS_H;
 
-type Kind = "counted" | "dropped" | "live" | "rest";
+type Kind = "counted" | "dropped" | "live" | "held" | "rest";
 
 interface Block {
   start: number;
@@ -35,8 +36,9 @@ interface Block {
 
 const pad2 = (n: number) => String(n).padStart(2, "0");
 
+/** 和 format.ts 的 meter 同一写法、同样向下取整（canvas 这边不引界面模块）。 */
 function meterText(seconds: number): string {
-  const minutes = Math.round(Math.max(0, seconds) / 60);
+  const minutes = Math.floor(Math.max(0, seconds) / 60);
   const h = Math.floor(minutes / 60);
   const m = minutes % 60;
   if (h === 0) return `${m}m`;
@@ -74,9 +76,17 @@ export function drawDiagram(
   const trackTop = TOP_PAD;
   const trackBottom = TOP_PAD + TRACK_H;
 
-  // 1. 轨槽：整条轨先铺一层底，空隙自然就是「没在跑」。
-  ctx.fillStyle = "rgba(255,255,255,0.035)";
+  // 1. 轨槽：整条轨先铺一层底，正中一道虚线是「香没点着」的那些时候；块画上去就把它盖住了。
+  ctx.fillStyle = "rgba(231,223,208,0.03)";
   ctx.fillRect(0, trackTop, usable, TRACK_H);
+  ctx.strokeStyle = "rgba(231,223,208,0.22)";
+  ctx.lineWidth = 1;
+  ctx.setLineDash([2, 4]);
+  ctx.beginPath();
+  ctx.moveTo(0, crisp(trackTop + TRACK_H / 2));
+  ctx.lineTo(usable, crisp(trackTop + TRACK_H / 2));
+  ctx.stroke();
+  ctx.setLineDash([]);
 
   // 2. 刻度：每 30 分钟一根，整点写字。上一版只标整点，中间一大片没有参照。
   const mark = new Date(day.started_at * 1000);
@@ -94,7 +104,7 @@ export function drawDiagram(
     const onHour = mark.getMinutes() === 0;
     const px = crisp(x(t));
     if (onHour ? mark.getHours() % hourStride === 0 : halfHours) {
-      ctx.strokeStyle = onHour ? "rgba(255,255,255,0.10)" : "rgba(255,255,255,0.05)";
+      ctx.strokeStyle = onHour ? "rgba(231,223,208,0.12)" : "rgba(231,223,208,0.06)";
       ctx.lineWidth = 1;
       ctx.beginPath();
       ctx.moveTo(px, trackTop);
@@ -126,9 +136,18 @@ export function drawDiagram(
     const stop = pausedNow ? Math.min(now, lastPause.started_at) : now;
     const start = t.started_at > 0 ? t.started_at : stop - t.elapsed_seconds;
     const spans = t.started_at > 0 ? activeSpans(start, stop, day.pauses) : [{ start, end: stop }];
-    for (const span of spans) if (span.end > span.start) blocks.push({ ...span, kind: pausedNow ? "counted" : "live", name: nameOfCategory(t.category), seconds: span.end - span.start });
+    // 按停着的这一格还没计入（点「放弃」还会变成空心），和配额行、横香一样画成赭石，不冒充骨白的「计入」。
+    for (const span of spans) if (span.end > span.start) blocks.push({ ...span, kind: pausedNow ? "held" : "live", name: nameOfCategory(t.category), seconds: span.end - span.start });
   }
-  if (restingNow && lastPause) {
+  // 休息按记下的起止画，还在休息的那段画到此刻；休息结束后它照样是一块「休息」，不会退成空隙。
+  let restOnRecord = false;
+  for (const r of day.rests) {
+    const stop = Math.min(r.ended_at, end);
+    if (stop > r.started_at) blocks.push({ start: r.started_at, end: stop, kind: "rest", name: "休息", seconds: stop - r.started_at });
+    if (r.started_at <= now && now < r.ended_at) restOnRecord = true;
+  }
+  // 升级前就开始的那段休息没有记录，只能照旧从这段暂停的起点画到此刻。
+  if (restingNow && lastPause && !restOnRecord) {
     blocks.push({ start: lastPause.started_at, end: now, kind: "rest", name: "休息", seconds: now - lastPause.started_at });
   }
   blocks.sort((a, b) => a.start - b.start);
@@ -140,49 +159,50 @@ export function drawDiagram(
     const x1 = x(b.start);
     const x2 = x(b.end);
     const w = Math.max(2, x2 - x1);
+    // 已计入是骨白的灰，正在烧的是朱红，按停着的是赭石，放弃的只留轮廓，休息是赭石的淡底。
     const fill =
-      b.kind === "live" ? SIGNAL
-      : b.kind === "rest" ? "rgba(176,136,67,0.30)"
-      : b.kind === "dropped" ? "rgba(218,213,202,0.16)"
-      : "rgba(218,213,202,0.72)";
+      b.kind === "live" ? EMBER
+      : b.kind === "held" ? CAUTION
+      : b.kind === "rest" ? "rgba(198,163,103,0.28)"
+      : b.kind === "dropped" ? BED
+      : "rgba(231,223,208,0.8)";
     ctx.fillStyle = fill;
     ctx.beginPath();
-    ctx.roundRect(x1, barTop, w, barH, 3);
+    ctx.roundRect(x1, barTop, w, barH, 2);
     ctx.fill();
     if (b.kind === "dropped") {
-      ctx.strokeStyle = "rgba(218,213,202,0.35)";
+      ctx.strokeStyle = "rgba(231,223,208,0.42)";
       ctx.lineWidth = 1;
       ctx.beginPath();
-      ctx.roundRect(crisp(x1), crisp(barTop), Math.round(w) - 1, Math.round(barH) - 1, 3);
+      ctx.roundRect(crisp(x1), crisp(barTop), Math.round(w) - 1, Math.round(barH) - 1, 2);
       ctx.stroke();
     }
     // 块窄到写不下就不写，绝不画半个字。
     const label = `${b.name} ${meterText(b.seconds)}`;
     ctx.font = `500 14px -apple-system, "PingFang SC", sans-serif`;
     if (ctx.measureText(label).width + 14 <= w) {
-      ctx.fillStyle = b.kind === "live" ? "#fff" : b.kind === "counted" ? BED : INK_HIGH;
+      ctx.fillStyle = b.kind === "live" ? EMBER_INK : b.kind === "counted" || b.kind === "held" ? BED : INK_HIGH;
       ctx.textAlign = "left";
       ctx.fillText(label, x1 + 7, barTop + barH / 2);
     } else if (ctx.measureText(b.name).width + 14 <= w) {
-      ctx.fillStyle = b.kind === "live" ? "#fff" : b.kind === "counted" ? BED : INK_HIGH;
+      ctx.fillStyle = b.kind === "live" ? EMBER_INK : b.kind === "counted" || b.kind === "held" ? BED : INK_HIGH;
       ctx.textAlign = "left";
       ctx.fillText(b.name, x1 + 7, barTop + barH / 2);
     }
   }
 
-  // 5. 此刻：一根竖线加一个点，落在轨的右端。
+  // 5. 此刻：轨的右端一根竖线。在烧是朱红；格被按停或在休息是赭石；两格之间是淡墨。
+  //    上一版线头还顶着一个小方块，和别处那些要人去猜的方块一起去掉了。
+  //    此刻就在轨的最右边，线收进画布里一点，不然有一半画在外面。
   if (endedAt === null) {
-    const px = crisp(x(now));
-    ctx.strokeStyle = pausedNow || restingNow ? CAUTION : SIGNAL;
+    const px = Math.min(cssW - 1, crisp(x(now)));
+    const held = pausedNow || restingNow;
+    ctx.strokeStyle = !held ? EMBER : restingNow || day.timer ? CAUTION : INK_FAINT;
     ctx.lineWidth = 1.5;
     ctx.beginPath();
-    ctx.moveTo(px, trackTop - 4);
+    ctx.moveTo(px, trackTop - 6);
     ctx.lineTo(px, trackBottom + 4);
     ctx.stroke();
-    ctx.fillStyle = pausedNow || restingNow ? CAUTION : SIGNAL;
-    ctx.beginPath();
-    ctx.arc(px, trackTop - 4, 2.5, 0, Math.PI * 2);
-    ctx.fill();
   }
 
   // 6. 两端的钟点，写在轨下面，省得靠中间的刻度倒推一天从几点开始。
@@ -194,5 +214,4 @@ export function drawDiagram(
   ctx.textAlign = "right";
   const to = new Date(end * 1000);
   ctx.fillText(`${pad2(to.getHours())}:${pad2(to.getMinutes())}`, cssW, trackBottom + 13);
-  void STROKE;
 }

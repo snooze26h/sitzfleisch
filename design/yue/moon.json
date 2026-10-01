@@ -1,0 +1,27 @@
+{
+ "size": 1024,
+ "radius": 440,
+ "supersample": 2,
+ "color_map": "lroc_color_poles_4k.tif",
+ "elev_map": "ldem_16_uint.tif",
+ "elev_offset": 20000,
+ "elev_km_per_unit": 0.0005,
+ "black_pct": 1.0,
+ "white_pct": 99.6,
+ "elev_presmooth": 1.0,
+ "relief": 4.0,
+ "relief_range": 0.35,
+ "sharpen_sigma": 1.4,
+ "sharpen_amount": 0.7,
+ "lommel": 0.62,
+ "gamma": 0.92,
+ "albedo_floor": 0.28,
+ "earthshine": 0.07,
+ "light": [
+  226,
+  216,
+  198
+ ],
+ "exposure": 1.35,
+ "ext_size": 640
+}

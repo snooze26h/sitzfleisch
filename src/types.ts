@@ -78,6 +78,12 @@ export interface PauseSpan {
   auto: boolean;
 }
 
+/** 一段休息：结束一格后按设定休息的那段时间；提前结束就截到那一刻。休息本身也落在暂停里。 */
+export interface RestSpan {
+  started_at: number;
+  ended_at: number;
+}
+
 export interface Day {
   profile_name: string;
   profile_id: string;
@@ -95,6 +101,8 @@ export interface Day {
   /** 休息到几点。休息只是一段带截止时刻的暂停。 */
   break_until: number | null;
   pauses: PauseSpan[];
+  /** 今天每一段休息的起止：休息结束后，时间轴和读数还认得出这段是休息。 */
+  rests: RestSpan[];
 }
 
 export interface ArchivedDay {
