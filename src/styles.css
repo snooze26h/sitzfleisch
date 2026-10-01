@@ -688,7 +688,6 @@ button.day-cell:hover { background: rgba(231, 223, 208, 0.06); }
 button.day-cell:active { background: rgba(231, 223, 208, 0.1); }
 /* 选中的那一天：月亮外面套一圈骨白的细环（骨白表示选中，朱红从不表示选中）。 */
 .day-cell.on, .day-cell.on:hover, .day-cell.on:active { box-shadow: inset 0 0 0 1.5px var(--stroke); }
-/* 最早一条记录以来、没有记录的那天：淡墨空心，和「未点」同一个记号。更早的只留一个点。 */
 
 /* 右栏是这面墙的图例，同时数出每一种各有几天。 */
 /* 第一行和墙上第一排月亮齐平（让过月份那一行）。 */
@@ -806,7 +805,8 @@ button.day-cell:active { background: rgba(231, 223, 208, 0.1); }
 
 .status-dot { display: inline-flex; align-items: center; gap: 8px; font-size: 14px; font-weight: 500; color: var(--ink-muted); }
 .status-dot i { width: 8px; height: 8px; background: var(--stroke); display: inline-block; }
-.status-dot.problem i { background: transparent; box-shadow: inset 0 0 0 1.5px var(--caution); }
+/* 有问题时换成实心赭石，不用空心框：空心小方块读起来像一个说不清的记号。 */
+.status-dot.problem i { background: var(--caution); }
 
 /* ---------- 保护模式 / 保存失败 ---------- */
 
