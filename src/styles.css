@@ -447,7 +447,6 @@ textarea.field { resize: none; height: 96px; font-size: 15px; line-height: 1.5; 
 /* 开始页与空历史上的一弯新月：四周就是页面底色，不加框。 */
 .moon-art { margin: 0; flex: none; }
 .moon-art .moon { width: 100%; height: auto; aspect-ratio: 1; }
-.start-art { width: 100%; max-width: 300px; align-self: center; }
 
 /* ---------- 今日配额：每个项目一行，一炷横放的香 ---------- */
 
@@ -546,10 +545,28 @@ textarea.field { resize: none; height: 96px; font-size: 15px; line-height: 1.5; 
 .t-masthead { font-family: var(--font-display); font-size: 50px; font-weight: 700; letter-spacing: 2px; line-height: 1.25; color: var(--ink-high); }
 .masthead .sub { font-size: 16px; line-height: 1.7; color: var(--ink-muted); }
 
-.start-board { display: grid; grid-template-columns: minmax(0, 1fr) 300px; gap: 72px; align-items: start; }
-.start-main { display: flex; flex-direction: column; gap: 40px; min-width: 0; }
-.start-side { display: flex; flex-direction: column; gap: 22px; padding-top: 8px; }
-
+/* 开始页是一张封面：整组内容限宽、在窗口里上下左右居中，窗口再高再宽也不会挤在左上角、底下空一大片。
+   左栏从上到下就是一遍流程：大标题、今天的安排、总目标和「开始今天」；右栏只放这一弯新月，
+   和左栏上下居中。计划有几行都行，月亮的大小不用去凑计划表的高度。 */
+.start-board {
+  --start-art: 300px;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) var(--start-art);
+  grid-template-areas: "head art" "plan art" "foot art";
+  grid-template-rows: auto auto auto;
+  column-gap: 72px;
+  align-items: start;
+  width: 100%;
+  max-width: 1120px;
+  align-self: center;
+}
+.start-board > .masthead { grid-area: head; margin-bottom: 40px; }
+.start-board > .plan { grid-area: plan; min-width: 0; }
+.start-board > .start-art { grid-area: art; align-self: center; width: 100%; }
+/* 计划表收尾的一行：左边总目标，右边开始键，和计划的最后一行隔一段留白。 */
+.plan-foot { grid-area: foot; display: flex; align-items: center; justify-content: space-between; gap: 24px; padding-top: 32px; }
+.plan-foot .plan-total { justify-content: flex-start; gap: 18px; }
+.plan-foot .plan-go .btn { width: auto; min-width: 240px; }
 .plan-head { display: flex; align-items: baseline; justify-content: space-between; padding-bottom: 12px; border-bottom: 1px solid var(--hair-strong); }
 .plan-rows { display: flex; flex-direction: column; }
 .plan-row { display: grid; grid-template-columns: minmax(0, 1fr) auto 72px; align-items: center; gap: 18px; min-height: 60px; padding: 8px 0; border-bottom: 1px solid var(--hair); }
@@ -571,7 +588,6 @@ textarea.field { resize: none; height: 96px; font-size: 15px; line-height: 1.5; 
 
 .plan-total { display: flex; align-items: baseline; justify-content: space-between; gap: 16px; }
 .plan-total .num { font-family: var(--font-mono); font-variant-numeric: tabular-nums; font-size: 40px; font-weight: 500; line-height: 1.1; color: var(--ink-high); }
-.plan-go .btn { width: 100%; }
 
 /* ---------- 运行台 ---------- */
 
@@ -906,9 +922,16 @@ button.day-cell:active { background: rgba(231, 223, 208, 0.1); }
 
 @media (min-width: 1400px) {
   :root { --page-x: 48px; --page-y: 40px; }
-  .today-top, .start-board { grid-template-columns: minmax(0, 1fr) 340px; }
+  .today-top { grid-template-columns: minmax(0, 1fr) 340px; }
+  .start-board { --start-art: 340px; }
   .big-reading .val { font-size: 96px; }
   .t-masthead { font-size: 56px; }
+}
+
+/* 又宽又高的窗口：开始页的新月再放大一些，计划行也松一点，整张封面撑得住这么大的窗。 */
+@media (min-width: 1400px) and (min-height: 880px) {
+  .start-board { --start-art: 400px; }
+  .start-board .plan-row { min-height: 68px; }
 }
 
 @media (max-width: 1120px) {
@@ -916,7 +939,8 @@ button.day-cell:active { background: rgba(231, 223, 208, 0.1); }
   .shell { grid-template-columns: 188px minmax(0, 1fr); }
   .toast { left: calc(50% + 94px); }
   .page { gap: 40px; }
-  .today-top, .start-board { grid-template-columns: minmax(0, 1fr) 248px; column-gap: 40px; }
+  .today-top { grid-template-columns: minmax(0, 1fr) 248px; column-gap: 40px; }
+  .start-board { --start-art: 248px; column-gap: 40px; }
   .big-reading .val { font-size: 68px; letter-spacing: -2px; }
   .t-masthead { font-size: 40px; }
   .suggestion .text b { font-size: 22px; }
@@ -932,11 +956,9 @@ button.day-cell:active { background: rgba(231, 223, 208, 0.1); }
 
 /* 低于最小窗宽（系统缩放等）时改为上下堆叠，绝不重叠。 */
 @media (max-width: 960px) {
-  .start-board { grid-template-columns: minmax(0, 1fr); }
+  /* 窄到放不下两栏：新月缩小，挨着大标题放，计划和开始键在下面占满整宽。 */
+  .start-board { --start-art: 140px; grid-template-areas: "head art" "plan plan" "foot foot"; column-gap: 24px; }
   .today-top { grid-template-columns: 200px minmax(0, 1fr); grid-template-areas: "focus focus" "moon day" "quota quota"; gap: 36px 32px; }
-  .start-side { display: grid; grid-template-columns: 200px minmax(0, 1fr); align-items: center; gap: 12px 28px; }
-  /* 并排时新月占左边 200px 那一列、跨两行，右边是总目标。 */
-  .start-side .moon-art { grid-row: span 2; width: auto; }
   .focus { min-height: 0; }
   .archive-row { grid-template-columns: 16px 32px minmax(0, 1fr) 84px; }
   .wall-body { grid-template-columns: minmax(0, 1fr); }
@@ -959,7 +981,8 @@ button.day-cell:active { background: rgba(231, 223, 208, 0.1); }
   .nav-item { flex-direction: column; padding: 9px 3px; gap: 5px; font-size: 12.5px; }
   .page { gap: 32px; }
   .today-top { grid-template-columns: 140px minmax(0, 1fr); column-gap: 18px; }
-  .start-side { grid-template-columns: 140px minmax(0, 1fr); gap: 18px; }
+  .plan-foot { flex-direction: column; align-items: stretch; }
+  .plan-foot .plan-go .btn { width: 100%; }
   .big-reading .val { font-size: 56px; }
   .t-masthead { font-size: 32px; }
   .plan-row { grid-template-columns: minmax(0, 1fr) auto; }

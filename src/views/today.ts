@@ -1,4 +1,4 @@
-// 「今天」：没开始时是开始页（左栏当天的安排，右栏一弯新月），开始后是运行台。
+// 「今天」：没开始时是开始页（左栏大标题、当天的安排、总目标和开始键，右栏一弯新月），开始后是运行台。
 // 运行台前两行是两列：这一格（倒计时、横卧的这炷香、操作）| 今天这一轮月，
 // 今日配额（每个项目一行横香）| 今天的总读数；下面是今天的走向和最近记录。不套板子，靠细线和留白分区。
 
@@ -72,20 +72,18 @@ function startBoard(): string {
     .join("");
   const total = profileTotalMinutes(plan);
   return `<section class="start-board" id="start">
-      <div class="start-main">
-        <header class="masthead">
-          <h1 class="t-masthead">落座，便是今天</h1>
-        </header>
-        <div class="plan">
-          <div class="plan-head"><span class="engraved">今天的安排</span><span class="engraved">分钟</span></div>
-          <div class="plan-rows">${rows}</div>
-        </div>
+      <header class="masthead">
+        <h1 class="t-masthead">落座，便是今天</h1>
+      </header>
+      <div class="plan">
+        <div class="plan-head"><span class="engraved">今天的安排</span><span class="engraved">分钟</span></div>
+        <div class="plan-rows">${rows}</div>
       </div>
-      <aside class="start-side">
-        ${crescentArt("start-art")}
+      <div class="plan-foot">
         <div class="plan-total"><span class="engraved">总目标</span><span class="num">${esc(meter(total * 60))}</span></div>
         <div class="plan-go">${btn("开始今天", { kind: "primary", cls: "lg", action: "start-day", data: { id: plan.id } })}</div>
-      </aside>
+      </div>
+      ${crescentArt("start-art")}
     </section>`;
 }
 

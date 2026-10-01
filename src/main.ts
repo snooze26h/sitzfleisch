@@ -51,7 +51,8 @@ function pageHtml(): string {
   // id 让 morphdom 按键匹配：提示条、对话框出现或消失时，页面本体绝不会被整棵重建。
   switch (ui.view) {
     case "today":
-      return `<div class="page" id="page-today">${todayPage()}</div>`;
+      // 开始页是一张封面，整组内容在窗口里居中（见 styles.css 的 .start-board）。
+      return `<div class="page${day() ? "" : " fill"}" id="page-today">${todayPage()}</div>`;
     case "history":
       return `<div class="page${historyEmpty() ? " fill" : ""}" id="page-history">${historyPage()}</div>`;
     case "settings":
