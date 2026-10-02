@@ -18,6 +18,27 @@ export interface PlatformInfo {
   };
 }
 
+export const NOTIFICATION_CHANNELS = ["timer", "body", "water", "status"] as const;
+export const SYSTEM_SETTINGS_TARGETS = ["app_notifications", "channel", "exact_alarm", "battery", "app_details"] as const;
+export type SystemSettingsTarget = typeof SYSTEM_SETTINGS_TARGETS[number];
+
+/** 与外壳 platform::SystemStatus 的 camelCase 输出对应，独立于计时快照。 */
+export interface SystemStatus {
+  sdkInt: number;
+  manufacturer: string;
+  notificationsEnabled: boolean;
+  channels: {
+    id: typeof NOTIFICATION_CHANNELS[number];
+    name: string;
+    enabled: boolean;
+    importance: number;
+    vibration: boolean;
+    sound: string | null;
+  }[];
+  canScheduleExactAlarms: boolean;
+  ignoringBatteryOptimizations: boolean;
+}
+
 export interface CategoryDef {
   id: string;
   name: string;

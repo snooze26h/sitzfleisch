@@ -1,10 +1,10 @@
 // 主循环：快照进来 → 拼 HTML → morphdom 打补丁 → 画运行图。所有交互走事件委托。
 
 import morphdom from "morphdom";
-import { invoke, onBackRequested, onExtendRequested, onQuitBlocked, onQuitBlockingFailed, onReminder, onSnapshot, platformInfo, setWindowTitle } from "./api";
+import { invoke, onBackRequested, onExtendRequested, onQuitBlocked, onQuitBlockingFailed, onReminder, onSnapshot, openSystemSettings, platformInfo, setWindowTitle, systemStatus } from "./api";
 import { conflictingHost, MAX_BLOCK_RULES, normalizeHost, normalizeUrl } from "./blocking";
 import type { Day, Preferences, Snapshot, View } from "./types";
-import { MAX_BLOCK_MINUTES, MIN_BLOCK_MINUTES, MAX_COMPLETION_NOTE_CHARS } from "./types";
+import { MAX_BLOCK_MINUTES, MIN_BLOCK_MINUTES, MAX_COMPLETION_NOTE_CHARS, SYSTEM_SETTINGS_TARGETS, type SystemSettingsTarget } from "./types";
 import { SHORT_NAME_WIDTH, dayLabel, displayWidth, duration, esc, nowUnix } from "./format";
 import {
   MAX_PROJECTS,
@@ -47,6 +47,8 @@ let lastView: View | null = null;
 let lastWindowTitle: string | null = null;
 let preferencesQueue: Promise<void> = Promise.resolve();
 let dialogToken = 0;
+let systemRequest = 0;
+let permissionChoiceMade = false;
 /** 把框叫出来的那个元素；关框之后焦点还给它。 */
 let dialogOpener: HTMLElement | null = null;
 
@@ -158,7 +160,10 @@ function drawDiagrams() {
 
 document.addEventListener("visibilitychange", () => {
   // 后台仍接纳快照；回来时立刻按最新状态补画，不必等下一次心跳。
-  if (ui.platform?.mobile && !document.hidden) render();
+  if (ui.platform?.mobile && !document.hidden) {
+    render();
+    if (hasFeature("system_settings")) void refreshSystemStatus();
+  }
 });
 compactQuery.addEventListener("change", render);
 
@@ -398,6 +403,7 @@ async function copyText(text: string): Promise<boolean> {
 }
 
 async function loadSettingsExtras() {
+  if (ui.platform?.mobile && hasFeature("system_settings")) await refreshSystemStatus();
   try {
     ui.notificationStatus = await invoke<string>("notification_status");
   } catch {
@@ -418,6 +424,73 @@ async function loadSettingsExtras() {
   render();
 }
 
+async function refreshSystemStatus() {
+  const request = ++systemRequest;
+  ui.systemStatusLoading = true;
+  render();
+  try {
+    const status = await systemStatus();
+    if (request === systemRequest) {
+      ui.systemStatus = status;
+      ui.systemStatusError = "";
+      ui.notificationStatus = status.notificationsEnabled ? "granted" : "denied";
+    }
+    return status;
+  } catch (error) {
+    if (request === systemRequest) {
+      ui.systemStatus = null;
+      ui.systemStatusError = String(error).slice(0, 240);
+    }
+    return null;
+  } finally {
+    // 系统设置快速进出时，迟到的查询不能覆盖较新的结果。
+    if (request === systemRequest) {
+      ui.systemStatusLoading = false;
+      render();
+    }
+  }
+}
+
+async function beginDay(profileId: string) {
+  ui.startingDay = true;
+  render();
+  try {
+    const snap = await act("start_day", { profileId });
+    if (snap) toast("开始了。这一天从现在算起，不看几点钟。");
+    return !!snap;
+  } finally { ui.startingDay = false; render(); }
+}
+
+async function startDay(profileId: string) {
+  if (ui.startingDay || day() || !prefs().profiles.some((profile) => profile.id === profileId)) return;
+  if (!ui.platform?.mobile) {
+    if (await act("start_day", { profileId })) toast("开始了。这一天从现在算起，不看几点钟。");
+    return;
+  }
+  if (permissionChoiceMade) { await beginDay(profileId); return; }
+  ui.startingDay = true;
+  render();
+  const status = await refreshSystemStatus();
+  ui.startingDay = false;
+  const granted = status?.notificationsEnabled ?? await invoke<string>("notification_status").then((value) => value === "granted").catch(() => false);
+  if (granted) { await beginDay(profileId); return; }
+  ask({
+    id: "notification-start", title: "开启到点提醒", destructive: false,
+    message: "允许坐功发送通知，锁屏后才能看到计时、休息和身体提醒。暂不开启也可以正常计时，之后可在「设置 → 提醒」中开启。",
+    confirmLabel: "开启通知并开始", cancelLabel: "先开始",
+    onConfirm: async () => {
+      permissionChoiceMade = true;
+      await invoke("request_notification_permission").catch((error) => toast(String(error)));
+      await refreshSystemStatus();
+      if (!await beginDay(profileId)) return "keep";
+    },
+    onCancel: async () => {
+      permissionChoiceMade = true;
+      if (!await beginDay(profileId)) return "keep";
+    },
+  });
+}
+
 function uid(prefix: string): string {
   return `${prefix}${Date.now().toString(36)}${Math.floor(Math.random() * 1e4).toString(36)}`;
 }
@@ -431,7 +504,7 @@ async function handleAction(action: string, el: HTMLElement) {
     case "tab": {
       const view = el.dataset.view as View;
       if (view !== "today" && view !== "history" && view !== "settings") break;
-      if (view === "settings" && ui.view !== "settings") ui.settingsIndex = true;
+      if (view === "settings" && (ui.compact || ui.view !== "settings")) ui.settingsIndex = true;
       ui.view = view;
       ui.menu = null;
       render();
@@ -450,7 +523,8 @@ async function handleAction(action: string, el: HTMLElement) {
     case "dialog-cancel":
       // 正在跑的那一下没结束前，取消、Esc、点背景都不算数。
       if (dialogIsBusy()) break;
-      closeDialog();
+      if (ui.dialog?.onCancel && el instanceof HTMLButtonElement) await runDialogAction(ui.dialog, ui.dialog.onCancel);
+      else closeDialog();
       break;
     case "dialog-confirm":
     case "dialog-alt": {
@@ -466,7 +540,7 @@ async function handleAction(action: string, el: HTMLElement) {
 
     // ----- 今天 -----
     case "start-day":
-      if (await act("start_day", { profileId: id })) toast("开始了。这一天从现在算起，不看几点钟。");
+      await startDay(id);
       break;
     case "discard-day":
       ask({
@@ -741,6 +815,22 @@ async function handleAction(action: string, el: HTMLElement) {
       break;
 
     // ----- 设置：提醒 / 关于 -----
+    case "system-recheck":
+      await refreshSystemStatus();
+      break;
+    case "system-settings": {
+      const target = el.dataset.target;
+      if (!SYSTEM_SETTINGS_TARGETS.includes(target as SystemSettingsTarget)) break;
+      await openSystemSettings(target as SystemSettingsTarget, el.dataset.channel).catch((error) => toast(String(error)));
+      break;
+    }
+    case "mobile-notif-test":
+    case "mobile-water-test":
+      try {
+        await invoke(action === "mobile-water-test" ? "test_water_sound" : "test_notification");
+        toast("已发送测试通知；是否显示和响铃由系统设置决定。", 8000);
+      } catch (error) { toast(String(error)); }
+      break;
     case "water-sound-test":
       await invoke("test_water_sound").catch((error) => toast(String(error)));
       break;
@@ -1321,6 +1411,7 @@ async function start() {
   const qaView = snap.initial_view;
   if (!initialView && (qaView === "today" || qaView === "history" || qaView === "settings")) ui.view = qaView;
   applySnapshot(snap);
+  if (ui.platform.mobile && hasFeature("system_settings")) void refreshSystemStatus();
   if (ui.view === "settings") void loadSettingsExtras();
   if (snap.initial_scroll) {
     requestAnimationFrame(() => {

@@ -3,7 +3,8 @@
 
 import { invoke as tauriInvoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
-import type { PlatformInfo, Snapshot } from "./types";
+import type { PlatformInfo, Snapshot, SystemSettingsTarget, SystemStatus } from "./types";
+import { NOTIFICATION_CHANNELS, SYSTEM_SETTINGS_TARGETS } from "./types";
 
 export const inTauri = typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
 
@@ -38,6 +39,34 @@ export function platformInfo(): Promise<PlatformInfo> {
     document.documentElement.dataset.platform = info.os;
     return info;
   }));
+}
+
+function validSystemStatus(value: unknown): value is SystemStatus {
+  if (value === null || typeof value !== "object") return false;
+  const s = value as Partial<SystemStatus>;
+  return Number.isInteger(s.sdkInt) && s.sdkInt! >= 1 && s.sdkInt! <= 1000
+    && typeof s.manufacturer === "string" && s.manufacturer.length <= 128
+    && typeof s.notificationsEnabled === "boolean" && typeof s.canScheduleExactAlarms === "boolean"
+    && typeof s.ignoringBatteryOptimizations === "boolean" && Array.isArray(s.channels) && s.channels.length <= 16
+    && s.channels.every((c) => c !== null && typeof c === "object" && NOTIFICATION_CHANNELS.includes(c.id)
+      && typeof c.name === "string" && c.name.length <= 128 && typeof c.enabled === "boolean"
+      && Number.isInteger(c.importance) && c.importance >= -1000 && c.importance <= 1000 && typeof c.vibration === "boolean"
+      && (c.sound === null || (typeof c.sound === "string" && c.sound.length <= 2048)))
+    && new Set(s.channels.map((c) => c.id)).size === s.channels.length;
+}
+
+export async function systemStatus(): Promise<SystemStatus> {
+  const status = await invoke<unknown>("system_status");
+  if (!validSystemStatus(status)) throw new Error("系统提醒状态数据格式无效");
+  return status;
+}
+
+export async function openSystemSettings(target: SystemSettingsTarget, channelId?: string): Promise<void> {
+  if (!SYSTEM_SETTINGS_TARGETS.includes(target)
+    || (target === "channel" ? !NOTIFICATION_CHANNELS.includes(channelId as typeof NOTIFICATION_CHANNELS[number]) : channelId !== undefined)) {
+    throw new Error("请选择有效的系统设置入口和通知渠道");
+  }
+  await invoke("open_system_settings", { target, channelId });
 }
 
 export async function onSnapshot(callback: (snapshot: Snapshot) => void): Promise<void> {

@@ -1,6 +1,6 @@
 // 界面自己的状态（不落盘）：当前页、草稿、展开项、菜单与对话框。
 
-import type { ArchivedDay, CategoryDef, CategoryState, Day, PlatformInfo, Preferences, Snapshot, View } from "./types";
+import type { ArchivedDay, CategoryDef, CategoryState, Day, PlatformInfo, Preferences, Snapshot, SystemStatus, View } from "./types";
 import { nowUnix, shortNameFrom } from "./format";
 
 /** 处理完这一下之后要不要留着框：返回 `"keep"` 就留着（重试还没成功），否则关掉。 */
@@ -21,6 +21,8 @@ export interface Dialog {
   extension?: { minutes: string; max: number };
   /** 收到的是自己这一个实例：await 之后要认它，别去动期间换上来的新框。 */
   onConfirm: (self: Dialog) => DialogOutcome | Promise<DialogOutcome>;
+  /** 仅显式点击取消键时执行；返回键和遮罩仍只是关框，不替用户作决定。 */
+  onCancel?: (self: Dialog) => DialogOutcome | Promise<DialogOutcome>;
   /** 主按钮之外的第三个动作（红色）。只有退出前保存失败用到。 */
   alt?: { label: string; onAlt: (self: Dialog) => DialogOutcome | Promise<DialogOutcome> };
 }
@@ -75,6 +77,10 @@ export const ui = {
   hostDraft: "",
   urlDraft: "",
   notificationStatus: "checking",
+  systemStatus: null as SystemStatus | null,
+  systemStatusLoading: false,
+  systemStatusError: "",
+  startingDay: false,
   autostart: null as boolean | null,
   appVersion: null as string | null,
   removal: null as Removal | null,

@@ -81,7 +81,7 @@ function startBoard(): string {
       </div>
       <div class="plan-foot">
         <div class="plan-total"><span class="engraved">总目标</span><span class="num">${esc(meter(total * 60))}</span></div>
-        <div class="plan-go">${btn("开始今天", { kind: "primary", cls: "lg", action: "start-day", data: { id: plan.id } })}</div>
+        <div class="plan-go">${btn("开始今天", { kind: "primary", cls: "lg", action: "start-day", data: { id: plan.id }, disabled: ui.startingDay })}</div>
       </div>
       ${crescentArt("start-art")}
     </section>`;
@@ -103,7 +103,9 @@ function activeBoard(d: Day): string {
   // 四块排成两行两列：这一格 | 今天这一轮月，今日配额 | 今天的总读数。
   // 左右两列上下各自对齐，窗口第一屏里放得下「此刻」和「今天」两个尺度。
   const moon = `<div class="moon-cell moon-stage" id="day-moon">${dayMoon(d)}</div>`;
-  return `<section class="today-top${ui.compact && suggestion ? " choosing" : ""}" id="today-top">${focusPanel(d)}${moon}${quotaPanel(d, suggestion?.category ?? null)}${dayReadings(d)}</section>
+  const notificationWarning = ui.platform?.mobile && ui.systemStatus?.notificationsEnabled === false
+    ? `<div class="notification-warning"><b>通知未开启，锁屏后到点不会提醒</b>${btn("去开启", { kind: "plate", action: "system-settings", data: { target: "app_notifications" } })}</div>` : "";
+  return `<section class="today-top${ui.compact && suggestion ? " choosing" : ""}${ui.compact && notificationWarning ? " with-warning" : ""}" id="today-top">${focusPanel(d)}${moon}${quotaPanel(d, suggestion?.category ?? null)}${dayReadings(d)}${notificationWarning}</section>
     ${diagramBlock()}
     ${d.ledger.length ? logBlock(d) : ""}`;
 }

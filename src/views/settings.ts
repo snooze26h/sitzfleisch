@@ -4,11 +4,11 @@
 import type { CategoryDef, ProfileDef } from "../types";
 import { inTauri } from "../api";
 import { conflictingHost, MAX_BLOCK_RULES, normalizeHost, normalizeUrl } from "../blocking";
-import { ICON_NAMED } from "../types";
+import { ICON_NAMED, NOTIFICATION_CHANNELS } from "../types";
 import { esc, meter, shortNameFrom } from "../format";
 import { icon } from "../icons";
 import { PROJECT_ICON_CHOICES } from "../project-icons";
-import { btn, labelled, select, stepper, toggle } from "../components";
+import { btn, labelled, sectionLabel, select, stepper, toggle } from "../components";
 import { BLOCK_OPTIONS, BREAK_OPTIONS, IDLE_OPTIONS, day, hasFeature, prefs, profileTotalMinutes, ui, withValue } from "../state";
 
 /** 设置的分区：id → 标题 + 图标。侧栏在设置页直接列它们，一区一页。 */
@@ -52,8 +52,8 @@ export function settingsPage(): string {
     + `<section class="settings-section" id="panel-${esc(id)}" tabindex="-1" aria-label="${esc(title)}">${sectionBody(id)}</section>`;
 }
 
-function settingRow(title: string, detail: string, control: string): string {
-  return `<div class="setting-row"><span class="titles"><b>${esc(title)}</b>${detail ? `<span>${esc(detail)}</span>` : ""}</span><span class="ctl">${control}</span></div>`;
+function settingRow(title: string, detail: string, control: string, cls = ""): string {
+  return `<div class="setting-row${cls ? ` ${cls}` : ""}"><span class="titles"><b>${esc(title)}</b>${detail ? `<span>${esc(detail)}</span>` : ""}</span><span class="ctl">${control}</span></div>`;
 }
 
 // ---------- 项目 ----------
@@ -288,6 +288,7 @@ function notificationStatusText(): string {
 }
 
 function notificationPanel(): string {
+  if (ui.platform?.mobile) return mobileNotificationPanel();
   const p = prefs();
   // 还没授权时才给「申请权限」——授权过之后这个按钮点了也没有反应，留着只会误导。
   const grant = ui.notificationStatus === "granted" || ui.notificationStatus === "checking"
@@ -295,7 +296,33 @@ function notificationPanel(): string {
     : btn("申请权限", { kind: "plate", action: "notif-recheck" });
   return `<div class="settings-panel rows">
     ${hasFeature("in_app_sound_toggle") ? settingRow("提示音", "提醒时播放声音。", toggle({ change: "sound", checked: p.sound_enabled, label: "提示音" })) : ""}
-    ${settingRow("系统通知", notificationStatusText(), `${grant}${btn("试一条", { kind: "plate", action: "notif-test" })}${hasFeature("system_settings") ? btn("打开系统设置", { kind: "quiet", action: "notif-open" }) : ""}`)}
+    ${settingRow("系统通知", notificationStatusText(), `${grant}${btn("试一条", { kind: "plate", action: "notif-test" })}${btn("打开系统设置", { kind: "quiet", action: "notif-open" })}`)}
+  </div>`;
+}
+
+function mobileNotificationPanel(): string {
+  const s = ui.systemStatus;
+  const open = (target: string, channel?: string) => btn("去设置", { kind: "plate", action: "system-settings", data: { target, ...(channel ? { channel } : {}) }, disabled: !hasFeature("system_settings") });
+  const state = (allowed: boolean | undefined, yes: string, no: string) => allowed === undefined ? "尚未读取" : allowed ? yes : no;
+  const names = { timer: "计时", body: "身体提醒", water: "喝水", status: "进行中" };
+  const channels = NOTIFICATION_CHANNELS.map((id) => {
+    const channel = s?.channels.find((c) => c.id === id);
+    const detail = channel
+      ? `${channel.enabled ? "已开启" : "已关闭"} · ${channel.sound ? "有提示音" : "静音"} · ${channel.vibration ? "振动开启" : "振动关闭"}`
+      : s ? "尚未创建，重新打开应用后再检查。" : "尚未读取";
+    return settingRow(names[id], detail, open("channel", id));
+  }).join("");
+  const honor = /honor|huawei|荣耀|华为/i.test(s?.manufacturer ?? "");
+  const guidance = honor
+    ? "在「设置 → 应用和服务 → 应用启动管理 → 坐功」中关闭自动管理，允许自启动、关联启动和后台活动。最近任务里下拉坐功卡片并锁定，避免一键清理。菜单名称以手机实际显示为准。"
+    : "在系统的应用或电池设置中允许坐功后台活动。可在最近任务中锁定坐功，避免一键清理。菜单名称以手机实际显示为准。";
+  return `<div class="reminder-settings">
+    <div class="reminder-check"><p role="status">${ui.systemStatusLoading ? "正在读取系统状态…" : ui.systemStatusError ? "暂时无法读取提醒状态，请重新检查。" : "从系统设置返回后，会自动重新检查。"}</p>${btn("重新检查", { kind: "quiet", action: "system-recheck", disabled: ui.systemStatusLoading })}</div>
+    <div class="settings-panel rows">${settingRow("通知权限", state(s?.notificationsEnabled, "已允许", "未开启；锁屏后到点不会提醒。"), open("app_notifications"))}</div>
+    <section class="reminder-section">${sectionLabel("通知渠道")}<div class="settings-panel rows">${channels}</div></section>
+    <div class="settings-panel rows">${settingRow("精确闹钟", state(s?.canScheduleExactAlarms, "已允许", "未允许；到点提醒可能延迟。"), open("exact_alarm"))}${settingRow("系统电池优化", state(s?.ignoringBatteryOptimizations, "已豁免", "尚未豁免"), open("battery"))}${settingRow("后台运行", guidance, open("app_details"), "background-guidance")}</div>
+    <div class="reminder-tests">${btn("发测试通知", { kind: "plate", action: "mobile-notif-test" })}${btn("试听喝水提醒", { kind: "plate", action: "mobile-water-test" })}</div>
+    <p class="t-note">在系统通知设置中，分别开启计时、身体提醒和喝水的横幅、锁屏通知与响铃。声音与振动由系统管理。</p>
   </div>`;
 }
 
