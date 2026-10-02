@@ -58,5 +58,8 @@ code { font-size: 13px; overflow-wrap: anywhere; color: var(--high); }
 .popup .brand { margin-bottom: 20px; }
 .popup .state { padding: 16px 18px; border: 0; border-radius: 10px; background: #1d1c19; box-shadow: inset 0 0 0 1px var(--line); }
 .popup #sync { width: 100%; }
+.popup #pairing-code { width: 100%; margin: 8px 0 12px; padding: 10px; border: 1px solid var(--control); border-radius: 8px; background: transparent; color: var(--high); font: inherit; }
+.popup #pairing-code:focus-visible { outline: 2px solid var(--high); outline-offset: 2px; }
+.popup label { color: var(--muted); }
 @media (max-width: 900px) { .blocked-layout { grid-template-columns: minmax(0, 1fr); gap: 24px; } .blocked-art { width: 220px; grid-row: 1; } .blocked-copy h1 { font-size: 32px; } }
 @media (max-width: 420px) { .blocked main { padding-left: 24px; padding-right: 24px; } }

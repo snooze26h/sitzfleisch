@@ -1,4 +1,13 @@
 export function describeStatus(state) {
+  if (state.error === "pairing-storage-error") {
+    return { title: "配对存储不可用", detail: "当前已停止屏蔽。请在扩展管理页重新加载坐功扩展后重试配对。" };
+  }
+  if (state.error === "pairing-required" || state.paired === false) {
+    return { title: "需要配对坐功", detail: "在主程序「设置 → 网站屏蔽」复制配对码，粘贴到下方完成连接。更新前的规则缓存不会在配对前生效。" };
+  }
+  if (state.error === "authentication-error") {
+    return { title: "连接身份验证失败", detail: "当前已停止屏蔽。请确认主程序与扩展均已更新；配对码重新生成后，需要重新粘贴配对。" };
+  }
   if (state.connection === "disconnected") {
     return {
       title: "未连接 · 已解除屏蔽",

@@ -22,5 +22,22 @@ async function update(type) {
   }
 }
 button.addEventListener("click", () => { void update("sync"); });
+document.getElementById("pairing").addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const input = document.getElementById("pairing-code");
+  const result = document.getElementById("pairing-result");
+  const code = input.value.trim().toLowerCase();
+  if (!/^[0-9a-f]{64}$/.test(code)) { result.textContent = "请粘贴主程序复制的完整配对码。"; return; }
+  const submit = event.currentTarget.querySelector("button");
+  submit.disabled = true;
+  try {
+    const state = await chrome.runtime.sendMessage({ type: "pair", code });
+    if (!state?.ok) throw new Error("pairing-failed");
+    input.value = "";
+    render(state);
+    result.textContent = state.connection === "connected" ? "配对成功。" : "配对码已保存，请检查主程序连接状态。";
+  } catch { result.textContent = "配对未能保存，请重新加载扩展后重试。"; }
+  finally { submit.disabled = false; }
+});
 await update("status");
 void update("sync");

@@ -17,6 +17,9 @@ use tauri_plugin_notification::NotificationExt;
 use tauri_plugin_window_state::{AppHandleExt, StateFlags};
 
 mod browser_blocking;
+mod browser_auth;
+#[cfg(any(target_os = "windows", test))]
+mod windows_hosts;
 #[cfg(target_os = "macos")]
 mod space_preview;
 
@@ -39,7 +42,7 @@ struct Shared {
     /// 从取快照到原子替换必须串行，避免旧存档后写或共用暂存文件。
     save_lock: Mutex<()>,
     /// 屏蔽只能一次做一件：连着改列表会起好几个线程，各自读 hosts、各自提权，
-    /// 后写的会盖掉先写的，还共用同一个暂存文件。
+    /// 后写的会盖掉先写的，因此整个读取、授权与回读过程都必须串行。
     blocking_lock: Mutex<()>,
     /// QA 启动参数（--qa-view today|history|settings，--qa-scroll <px>）：只影响首屏，平时为空。
     qa_view: Option<String>,
@@ -609,9 +612,9 @@ fn play_alert_sound(sound: AlertSound) {
         .arg(sound.file())
         .spawn();
     #[cfg(target_os = "windows")]
-    let _ = Command::new("powershell")
-        .args(["-NoProfile", "-Command", sound.command()])
-        .spawn();
+    if let Ok(mut command) = windows_hosts::powershell_process() {
+        let _ = command.args(["-NoProfile", "-NonInteractive", "-Command", sound.command()]).spawn();
+    }
 }
 
 /// 推进一次时间，并报告这一下是不是把格自然走完了（台账多了一条，格也不在了）。
@@ -654,10 +657,9 @@ fn mutate(
 /// 写入与退出清理共用同一条验证路径；只修改坐功托管段。
 fn sync_hosts_file(
     path: &Path,
-    data_dir: &Path,
     hosts: &[String],
     enable: bool,
-    install: impl FnOnce(&Path) -> Result<(), String>,
+    install: impl FnOnce(&str) -> Result<(), String>,
 ) -> Result<bool, String> {
     let current = fs::read_to_string(path).map_err(|e| format!("读不到系统 hosts：{e}"))?;
     // 丢失结束标记时直接剥离会吞掉后面的用户条目；先确认每段边界完整。
@@ -676,11 +678,11 @@ fn sync_hosts_file(
     if desired == current {
         return Ok(core::hosts_section_present(&current));
     }
-    let staged = data_dir.join(format!("hosts.staged.{}", std::process::id()));
-    fs::write(&staged, &desired).map_err(|e| format!("暂存文件写入失败：{e}"))?;
-    let installed = install(&staged);
-    let _ = fs::remove_file(&staged);
-    installed?;
+    if desired.is_empty() || desired.len() > 65536 {
+        return Err("hosts 内容为空或超过 65536 字节，原文件已保留。".into());
+    }
+    // 授权只接收这次计算出的内存内容，不能重新读取一个可被替换的用户文件。
+    install(&desired)?;
     let after = fs::read_to_string(path).map_err(|e| format!("回读系统 hosts 失败：{e}"))?;
     if after != desired {
         return Err("回读核验不一致，规则可能没有生效。".into());
@@ -695,7 +697,7 @@ fn record_blocking_result(shared: &Shared, result: &Result<bool, String>) {
         Ok(present) => { blocking.active = *present; blocking.error = None; }
         Err(message) => {
             blocking.error = Some(message.clone());
-            blocking.active = fs::read_to_string(hosts_path())
+            blocking.active = read_system_hosts()
                 .map(|c| core::hosts_section_present(&c)).unwrap_or(blocking.active);
         }
     }
@@ -706,22 +708,25 @@ fn release_system_blocking(shared: &Shared) -> Result<(), String> {
     // 必须等已在写 hosts 的线程完成；后续排队写入也会看到 exiting，只能清理。
     let _serial = shared.blocking_lock.lock().unwrap_or_else(|e| e.into_inner());
     shared.blocking.lock().unwrap().busy = true;
-    let result = sync_hosts_file(&hosts_path(), &shared.data_dir, &[], false, privileged_install);
+    let result = hosts_path().and_then(|path| sync_hosts_file(&path, &[], false, |content| privileged_install(content, &shared.data_dir)));
     record_blocking_result(shared, &result);
     result.map(|_| ())
 }
 
-fn hosts_path() -> PathBuf {
+fn hosts_path() -> Result<PathBuf, String> {
     #[cfg(target_os = "windows")]
     {
-        let root = std::env::var("SystemRoot").unwrap_or_else(|_| "C:\\Windows".into());
-        return PathBuf::from(root).join("System32").join("drivers").join("etc").join("hosts");
+        return Ok(windows_hosts::system_directory()?.join("drivers/etc/hosts"));
     }
     #[cfg(not(target_os = "windows"))]
-    PathBuf::from("/etc/hosts")
+    Ok(PathBuf::from("/etc/hosts"))
 }
 
-/// 标准 Base64（带 = 补位）。只用来把 hosts 内容嵌进授权脚本，不值得为它引一个依赖。
+fn read_system_hosts() -> Result<String, String> {
+    fs::read_to_string(hosts_path()?).map_err(|e| format!("读不到系统 hosts：{e}"))
+}
+
+/// macOS 授权脚本使用的标准 Base64（带 = 补位）。
 #[cfg(target_os = "macos")]
 fn base64_encode(bytes: &[u8]) -> String {
     const TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
@@ -798,31 +803,33 @@ const HOSTS_HELPER_SOURCE: &str = include_str!("../../scripts/hosts-helper.sh");
 /// 所以这条路要么静默成功，要么无声让开，不会在授权框之前多出一次打扰。
 /// 任何失败都返回 None：调用方回到 osascript 授权，行为与没装助手时完全一致。
 #[cfg(target_os = "macos")]
-fn helper_install(staged: &Path) -> Option<()> {
+fn helper_install(content: &str) -> Option<()> {
     // 对不上就当没装：退回系统授权框，不替一个过时的免密入口背书。重新运行安装脚本即可换成新版。
     if fs::read_to_string(HOSTS_HELPER).ok()? != HOSTS_HELPER_SOURCE {
         return None;
     }
-    let file = fs::File::open(staged).ok()?;
-    let status = Command::new("/usr/bin/sudo")
+    let mut child = Command::new("/usr/bin/sudo")
+        .env_clear().env("PATH", "/usr/bin:/bin:/usr/sbin:/sbin").current_dir("/")
         .args(["-n", HOSTS_HELPER])
-        .stdin(std::process::Stdio::from(file))
+        .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
-        .status()
+        .spawn()
         .ok()?;
-    status.success().then_some(())
+    use std::io::Write;
+    let written = child.stdin.take()?.write_all(content.as_bytes()).is_ok();
+    let status = child.wait().ok()?;
+    (written && status.success()).then_some(())
 }
 
 #[cfg(target_os = "macos")]
-fn privileged_install(staged: &Path) -> Result<(), String> {
-    if helper_install(staged).is_some() {
+fn privileged_install(content: &str, _data_dir: &Path) -> Result<(), String> {
+    if helper_install(content).is_some() {
         return Ok(());
     }
-    // 授权框弹出之前就把内容读进来：框停着的那段时间里暂存文件再被动手脚，也碰不到要写进去的东西。
-    let content = fs::read_to_string(staged).map_err(|e| format!("暂存文件读取失败：{e}"))?;
-    let script = install_script(&content);
-    let output = Command::new("osascript")
+    let script = install_script(content);
+    let output = Command::new("/usr/bin/osascript")
+        .env_clear().env("PATH", "/usr/bin:/bin:/usr/sbin:/sbin").current_dir("/")
         .arg("-e")
         .arg(script)
         .output()
@@ -834,51 +841,17 @@ fn privileged_install(staged: &Path) -> Result<(), String> {
     if err.contains("-128") || err.to_lowercase().contains("cancel") {
         Err("授权被取消，屏蔽规则未写入。".into())
     } else {
-        Err(format!("写入失败：{}", err.trim()))
+        Err("系统授权或 hosts 写入失败，请重试。".into())
     }
 }
 
-/// PowerShell 单引号字符串里，单引号自己写两遍。外层这一层用它，
-/// 里层 cmd 的双引号引用要求路径本身不含 `"`——Windows 文件名本来就不允许，
-/// 但那是用户给的 `SITZFLEISCH_DATA_DIR`，还是当场挡住，别指望约定。
 #[cfg(target_os = "windows")]
-fn powershell_single_quote(raw: &str) -> String {
-    raw.replace('\'', "''")
-}
-
-#[cfg(target_os = "windows")]
-fn install_command(staged: &Path) -> Result<String, String> {
-    let path = staged.to_str().ok_or("暂存文件路径不是有效的 UTF-8，无法安全地交给 UAC。")?;
-    let target = hosts_path();
-    let target = target.to_str().ok_or("系统 hosts 路径不是有效的 UTF-8。")?;
-    if path.contains('"') || target.contains('"') {
-        return Err("路径里不能有双引号，无法安全地交给 UAC。".into());
-    }
-    // 只有 -ArgumentList 后面那一对单引号里的内容需要转义，外面是 PowerShell 语法本身。
-    let arguments = format!("/c copy /y \"{path}\" \"{target}\" & ipconfig /flushdns");
-    Ok(format!(
-        "Start-Process -FilePath cmd.exe -ArgumentList '{}' -Verb RunAs -Wait",
-        powershell_single_quote(&arguments)
-    ))
-}
-
-#[cfg(target_os = "windows")]
-fn privileged_install(staged: &Path) -> Result<(), String> {
-    // 未在真机验收：通过 UAC 提权把暂存文件拷成系统 hosts 并刷新 DNS。
-    let script = install_command(staged)?;
-    let status = Command::new("powershell")
-        .args(["-NoProfile", "-Command", &script])
-        .status()
-        .map_err(|e| format!("无法调用 UAC 提权：{e}"))?;
-    if status.success() {
-        Ok(())
-    } else {
-        Err("提权被取消或失败，屏蔽规则未写入。".into())
-    }
+fn privileged_install(content: &str, data_dir: &Path) -> Result<(), String> {
+    windows_hosts::install(content, data_dir)
 }
 
 #[cfg(not(any(target_os = "macos", target_os = "windows")))]
-fn privileged_install(_staged: &Path) -> Result<(), String> {
+fn privileged_install(_content: &str, _data_dir: &Path) -> Result<(), String> {
     Err("此平台暂不支持网站屏蔽。".into())
 }
 
@@ -891,7 +864,7 @@ fn spawn_apply_blocking(app: &AppHandle) {
         // 暂存文件跟着状态文件走同一个目录：隔离测试时不能落回真实目录。
         let data_dir = shared.data_dir.clone();
         apply_latest_blocking(&shared, |hosts, enable| {
-            let result = sync_hosts_file(&hosts_path(), &data_dir, hosts, enable, privileged_install);
+            let result = hosts_path().and_then(|path| sync_hosts_file(&path, hosts, enable, |content| privileged_install(content, &data_dir)));
             record_blocking_result(&shared, &result);
         });
         // 退出钩子可能在主线程等 blocking_lock；原生界面调用放到解锁之后。
@@ -945,6 +918,19 @@ fn refresh_hosts_status(blocking: &mut BlockingStatus, current: &str, hosts: &[S
 #[tauri::command]
 fn get_snapshot(shared: State<'_, Shared>) -> Snapshot {
     snapshot(&shared, true)
+}
+
+// 凭据只通过桌面 IPC 在明确点击时返回，不能混进每秒广播的普通状态快照。
+#[tauri::command]
+fn browser_pairing_code(shared: State<'_, Shared>) -> Result<String, String> {
+    browser_blocking::pairing_code(&shared, false)
+}
+
+#[tauri::command]
+fn reset_browser_pairing(app: AppHandle) -> Result<String, String> {
+    let code = browser_blocking::pairing_code(&app.state::<Shared>(), true)?;
+    broadcast(&app);
+    Ok(code)
 }
 
 #[tauri::command]
@@ -1103,9 +1089,9 @@ fn check_blocking(app: AppHandle) -> Snapshot {
             (state.preferences.blocked_hosts.clone(), state.day.is_some())
         };
         let mut blocking = shared.blocking.lock().unwrap();
-        match fs::read_to_string(hosts_path()) {
+        match read_system_hosts() {
             Ok(current) => refresh_hosts_status(&mut blocking, &current, &hosts, enable),
-            Err(e) => blocking.error = Some(format!("读不到系统 hosts：{e}")),
+            Err(e) => blocking.error = Some(e),
         }
     }
     broadcast(&app);
@@ -1505,9 +1491,9 @@ pub fn run() {
 
             // 建窗前先只读体检；Ready 后按保留的学习日恢复规则或清理残留。
             let mut blocking = BlockingStatus::default();
-            match fs::read_to_string(hosts_path()) {
+            match read_system_hosts() {
                 Ok(current) => refresh_hosts_status(&mut blocking, &current, &state.preferences.blocked_hosts, state.day.is_some()),
-                Err(e) => blocking.error = Some(format!("读不到系统 hosts：{e}")),
+                Err(e) => blocking.error = Some(e),
             }
 
             let (qa_view, qa_scroll) = qa_launch_args();
@@ -1630,6 +1616,8 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             get_snapshot,
+            browser_pairing_code,
+            reset_browser_pairing,
             start_day,
             switch_profile,
             start_block,
@@ -1713,10 +1701,10 @@ mod tests {
     use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
     use std::sync::{mpsc, Barrier};
 
-    struct TestShared(Shared);
+    pub(super) struct TestShared(pub(super) Shared);
 
     impl TestShared {
-        fn new(state: core::State) -> Self {
+        pub(super) fn new(state: core::State) -> Self {
             static NEXT_ID: AtomicU64 = AtomicU64::new(0);
             let dir = std::env::temp_dir().join(format!(
                 "sitzfleisch-runtime-{}-{}-{}",
@@ -1768,13 +1756,13 @@ mod tests {
         let original = "127.0.0.1 localhost\n::1 localhost\n192.0.2.10 custom.example # keep\n";
         let blocked = core::render_hosts(original, &["live.bilibili.com".into()], true);
         fs::write(&path, &blocked).unwrap();
-        let result = sync_hosts_file(&path, dir, &[], false, |staged| {
-            fs::copy(staged, &path).map(|_| ()).map_err(|e| e.to_string())
+        let result = sync_hosts_file(&path, &[], false, |content| {
+            fs::write(&path, content).map_err(|e| e.to_string())
         });
         assert_eq!(result, Ok(false));
         assert_eq!(fs::read_to_string(&path).unwrap().trim(), original.trim());
         assert!(!dir.join(format!("hosts.staged.{}", std::process::id())).exists());
-        assert_eq!(sync_hosts_file(&path, dir, &[], false, |_| panic!("没有托管段时不能提权")), Ok(false));
+        assert_eq!(sync_hosts_file(&path, &[], false, |_| panic!("没有托管段时不能提权")), Ok(false));
     }
 
     #[test]
@@ -1784,10 +1772,10 @@ mod tests {
         let path = dir.join("test.hosts");
         let blocked = core::render_hosts("127.0.0.1 localhost\n", &["live.bilibili.com".into()], true);
         fs::write(&path, &blocked).unwrap();
-        assert!(sync_hosts_file(&path, dir, &[], false, |_| Err("授权被取消".into())).is_err());
+        assert!(sync_hosts_file(&path, &[], false, |_| Err("授权被取消".into())).is_err());
         assert_eq!(fs::read_to_string(&path).unwrap(), blocked);
         assert!(!dir.join(format!("hosts.staged.{}", std::process::id())).exists());
-        assert!(sync_hosts_file(&path, dir, &[], false, |_| Ok(())).is_err(), "必须核对真正解除，不能只信提权进程退出码");
+        assert!(sync_hosts_file(&path, &[], false, |_| Ok(())).is_err(), "必须核对真正解除，不能只信提权进程退出码");
     }
 
     #[test]
@@ -1799,7 +1787,7 @@ mod tests {
             format!("{}\n{}\n{}", core::HOSTS_BEGIN, core::HOSTS_BEGIN, core::HOSTS_END)] {
             let content = format!("127.0.0.1 localhost\n{markers}\n192.0.2.10 custom.example\n");
             fs::write(&path, &content).unwrap();
-            assert!(sync_hosts_file(&path, dir, &[], false, |_| panic!("标记异常时不能调用提权写入")).is_err());
+            assert!(sync_hosts_file(&path, &[], false, |_| panic!("标记异常时不能调用提权写入")).is_err());
             assert_eq!(fs::read_to_string(&path).unwrap(), content);
         }
     }
@@ -2539,7 +2527,7 @@ mod tests {
     #[test]
     fn applescript_escaping_round_trips_through_osascript() {
         for raw in ["plain", r#"has "quotes""#, r"has\backslash", r#"both\"mixed"#] {
-            let output = Command::new("osascript")
+            let output = Command::new("/usr/bin/osascript")
                 .arg("-e")
                 .arg(format!(r#"return "{}""#, applescript_string(raw)))
                 .output()

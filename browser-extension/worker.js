@@ -1,17 +1,21 @@
 import { blockedPageContext, blockedPageUrl, matchingRuleKind, matchesUrl, normalizeUrl, originalBlockedUrl, validateRules } from "./rules.js";
+import { PAIRING_KEY, requestAuthentication, sessionChallenge, validPairingCode, verifyResponse } from "./auth.js";
 
 export const BRIDGE_URL = "http://127.0.0.1:47832/v1/rules";
+export const SESSION_URL = "http://127.0.0.1:47832/v1/session";
 export const CACHE_KEY = "sitzfleisch.rules.v1";
 export const ALARM_NAME = "sitzfleisch.sync.v1";
 const MAX_RESPONSE_BYTES = 2 * 1024 * 1024;
 
-async function readResponse(response) {
-  if (response.status !== 200 || response.redirected
+async function readResponse(response, code, nonce, sessionOnly = false) {
+  if (!/^[0-9a-f]{64}$/.test(response.headers.get("x-sitzfleisch-proof") || "")) throw new Error("authentication-error");
+  if (![200, 503].includes(response.status) || response.redirected
     || !/^application\/json(?:\s*;|$)/i.test(response.headers.get("content-type") || "")) {
     throw new Error("invalid-response");
   }
   const declaredLength = response.headers.get("content-length");
-  if (declaredLength !== null && (!/^\d+$/.test(declaredLength) || Number(declaredLength) > MAX_RESPONSE_BYTES)) {
+  const limit = sessionOnly ? 1024 : MAX_RESPONSE_BYTES;
+  if (declaredLength !== null && (!/^\d+$/.test(declaredLength) || Number(declaredLength) > limit)) {
     throw new Error("invalid-response");
   }
   if (!response.body) throw new Error("invalid-response");
@@ -24,11 +28,18 @@ async function readResponse(response) {
       const { done, value } = await reader.read();
       if (done) break;
       bytes += value.byteLength;
-      if (bytes > MAX_RESPONSE_BYTES) throw new Error("invalid-response");
+      if (bytes > limit) throw new Error("invalid-response");
       text += decoder.decode(value, { stream: true });
     }
     text += decoder.decode();
-    return validateRules(JSON.parse(text));
+    await verifyResponse(response, text, code, nonce);
+    if (response.status !== 200) throw new Error("rules-unavailable");
+    const value = JSON.parse(text);
+    if (sessionOnly) {
+      if (!value || typeof value !== "object" || Object.keys(value).length !== 1 || !validPairingCode(value.session)) throw new Error("authentication-error");
+      return value.session;
+    }
+    return validateRules(value);
   } finally {
     await reader.cancel().catch(() => {});
     reader.releaseLock();
@@ -40,6 +51,8 @@ export function createBlocker({ chromeApi, fetchImpl = fetch, now = Date.now, ti
   const blockedPage = chromeApi.runtime.getURL("blocked.html");
   const extensionRoot = chromeApi.runtime.getURL("");
   let rules = null;
+  let pairingCode = null;
+  let pairingStorageAvailable = false;
   let appliedRevision = null;
   let lastSyncAt = null;
   let connection = "waiting";
@@ -56,6 +69,7 @@ export function createBlocker({ chromeApi, fetchImpl = fetch, now = Date.now, ti
   function status(url) {
     return {
       ok: true,
+      paired: pairingCode !== null,
       connection,
       active: rules?.active ?? false,
       ruleCount: rules?.active ? rules.urls.length + (rules.hosts?.length ?? 0) : 0,
@@ -70,6 +84,13 @@ export function createBlocker({ chromeApi, fetchImpl = fetch, now = Date.now, ti
 
   async function initialize() {
     try {
+      // MV3 storage 默认也开放给内容脚本；凭据必须限制在扩展自身的可信页面与 worker。
+      await chromeApi.storage.local.setAccessLevel({ accessLevel: "TRUSTED_CONTEXTS" });
+      const storedCode = (await chromeApi.storage.local.get(PAIRING_KEY))[PAIRING_KEY];
+      if (validPairingCode(storedCode)) pairingCode = storedCode;
+      pairingStorageAvailable = true;
+    } catch { error = "pairing-storage-error"; }
+    try {
       const stored = (await chromeApi.storage.local.get(CACHE_KEY))[CACHE_KEY];
       if (stored !== undefined) {
         const cached = validateRules(stored.rules);
@@ -77,7 +98,8 @@ export function createBlocker({ chromeApi, fetchImpl = fetch, now = Date.now, ti
           || !(stored.appliedRevision === null || stored.appliedRevision === cached.revision)) {
           throw new Error("invalid-cache");
         }
-        rules = cached;
+        // 磁盘缓存可能来自旧的未认证版本；重启后必须重新验证服务端再启用规则。
+        rules = { protocol: 2, active: false, urls: [], hosts: [], revision: "0000000000000000" };
         // 新 worker 先重新检查当前标签，不沿用上次进程的应用成功声明。
         appliedRevision = null;
         lastSyncAt = stored.lastSyncAt;
@@ -153,14 +175,28 @@ export function createBlocker({ chromeApi, fetchImpl = fetch, now = Date.now, ti
     const timeout = setTimeout(() => controller.abort(), timeoutMs);
     let phase = "connection-error";
     try {
-      const headers = { "X-Sitzfleisch-Client": "browser-extension-v1", "X-Sitzfleisch-Protocol": "2" };
+      if (!pairingStorageAvailable) { phase = "pairing-storage-error"; throw new Error(phase); }
+      if (!pairingCode) { phase = "pairing-required"; throw new Error(phase); }
+      const code = pairingCode;
+      const common = { "X-Sitzfleisch-Client": "browser-extension-v1", "X-Sitzfleisch-Protocol": "2" };
+      const challenge = sessionChallenge();
+      const sessionResponse = await fetchImpl(SESSION_URL, {
+        method: "GET", headers: { ...common, ...challenge.headers }, cache: "no-store", credentials: "omit",
+        redirect: "error", signal: controller.signal,
+      });
+      phase = "authentication-error";
+      const session = await readResponse(sessionResponse, code, challenge.nonce, true);
+      const authentication = await requestAuthentication(code, appliedRevision, now(), session);
+      const headers = { ...common };
+      Object.assign(headers, authentication.headers);
       if (appliedRevision) headers["X-Sitzfleisch-Applied"] = appliedRevision;
+      phase = "connection-error";
       const response = await fetchImpl(BRIDGE_URL, {
         method: "GET", headers, cache: "no-store", credentials: "omit",
         redirect: "error", signal: controller.signal,
       });
       phase = "response-error";
-      const next = await readResponse(response);
+      const next = await readResponse(response, code, authentication.nonce);
       // 连接到旧主程序时不能悄悄丢掉已生效的整站缓存；明确收工仍可解除。
       if (rules?.hosts?.length && next.protocol === 1 && next.active) throw new Error("host-rules-unavailable");
       phase = "apply-error";
@@ -183,10 +219,11 @@ export function createBlocker({ chromeApi, fetchImpl = fetch, now = Date.now, ti
       lastSyncAt = syncedAt;
       connection = "connected";
       error = null;
-    } catch {
+    } catch (cause) {
+      if (cause?.message === "authentication-error") phase = "authentication-error";
       connection = phase === "connection-error" ? "disconnected" : rules ? "cache" : "waiting";
       error = phase;
-      if (phase === "connection-error") {
+      if (["connection-error", "authentication-error", "pairing-required", "pairing-storage-error"].includes(phase)) {
         // 完整退出后本机服务不再响应：解除执行状态，不能无限期沿用旧学习日。
         // 这是本地释放，不是主程序的成功同步，因此不产生 ACK，也不改 lastSyncAt。
         rules = { protocol: 2, active: false, urls: [], hosts: [], revision: "0000000000000000" };
@@ -209,6 +246,19 @@ export function createBlocker({ chromeApi, fetchImpl = fetch, now = Date.now, ti
       clearTimeout(timeout);
     }
     return status();
+  }
+
+  async function pair(code) {
+    await ready;
+    if (!pairingStorageAvailable || !validPairingCode(code)) return { ok: false };
+    if (syncFlight) await syncFlight;
+    const released = { protocol: 2, active: false, urls: [], hosts: [], revision: "0000000000000000" };
+    await chromeApi.storage.local.set({ [PAIRING_KEY]: code, [CACHE_KEY]: { rules: released, lastSyncAt: null, appliedRevision: null } });
+    pairingCode = code;
+    rules = released;
+    appliedRevision = null;
+    lastSyncAt = null;
+    return sync();
   }
 
   function sync() {
@@ -274,6 +324,11 @@ export function createBlocker({ chromeApi, fetchImpl = fetch, now = Date.now, ti
     chromeApi.runtime.onInstalled.addListener(() => { void sync(); });
     chromeApi.runtime.onMessage.addListener((message, sender, sendResponse) => {
       if (sender.id !== chromeApi.runtime.id || ![`${extensionRoot}popup.html`, blockedPage].some((page) => sender.url === page || sender.url?.startsWith(`${page}#`))) return false;
+      if (message?.type === "pair") {
+        if (sender.url !== `${extensionRoot}popup.html` || Object.keys(message).some((key) => !["type", "code"].includes(key)) || !validPairingCode(message.code)) return false;
+        void pair(message.code).then(sendResponse).catch(() => sendResponse({ ok: false }));
+        return true;
+      }
       if (!message || typeof message !== "object" || !["status", "sync", "back"].includes(message.type)
         || Object.keys(message).some((key) => !["type", "url"].includes(key))) return false;
       if (message.type === "back") {

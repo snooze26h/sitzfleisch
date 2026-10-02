@@ -160,7 +160,7 @@ function browserBlockState(): BlockState {
   if (!inTauri) return { title: "预览模式 · 扩展未连接", detail: "预览不拦截网页。请在桌面应用中连接扩展。", problem: false };
   if (b.error) return { title: "扩展连接需要处理", detail: b.error, problem: true };
   if (!b.available) return { title: "本地连接服务未启动", detail: "重启坐功后重试。", problem: true };
-  if (!b.connected) return { title: "扩展未连接", detail: "启用 Chrome / Edge 扩展，并保持坐功运行。", problem: false };
+  if (!b.connected) return { title: "扩展未连接", detail: "首次连接请复制下方配对码，在 Chrome / Edge 的坐功扩展中保存配对。", problem: false };
   if (!b.synced) return { title: "扩展已连接 · 等待同步", detail: "规则待同步，可在扩展中立即同步。", problem: false };
   if (!prefs().blocked_urls.length) return { title: "扩展已连接 · 未配置精确网址", problem: false };
   return day()
@@ -227,10 +227,12 @@ function websiteBlock(): string {
     ${warning}
     <div class="blocking-group-heading"><b>精确网址</b><span class="t-note">只拦这一个网址</span>${statusLabel(browserState)}</div>
     ${browserState.detail ? `<p class="blocking-note${browserState.problem ? " caution" : ""}">${esc(browserState.detail)}</p>` : ""}
+    <div class="host-add">${btn("复制扩展配对码", { kind: "plate", action: "copy-browser-pairing", disabled: !inTauri || !ui.snap!.blocking.browser.available })}${btn("重新生成配对码", { kind: "quiet", action: "reset-browser-pairing", disabled: !inTauri || !ui.snap!.blocking.browser.available })}</div>
+    <p class="blocking-note">在扩展弹窗中粘贴一次即可连接。重新生成会使已有浏览器配对失效，需要重新配对。</p>
     ${ruleEditor("url")}
     ${ruleRows("url", p.blocked_urls)}
     <details id="blocking-help" class="blocking-help" data-preserve-open><summary>${icon("chevron-right", 14)}<span>安装与用法</span></summary>
-      <ol><li>打开 Chrome 的 <span class="mono sel">chrome://extensions</span> 或 Edge 的 <span class="mono sel">edge://extensions</span>，开启「开发者模式」。</li><li>点击下方按钮找到扩展目录，再在浏览器中选择「加载已解压的扩展程序」，选中该目录。</li><li>保持坐功运行；扩展约每 30 秒尝试同步规则。上方显示「已同步」后，在学习日期间生效。</li></ol>
+      <ol><li>打开 Chrome 的 <span class="mono sel">chrome://extensions</span> 或 Edge 的 <span class="mono sel">edge://extensions</span>，开启「开发者模式」。</li><li>点击下方按钮找到扩展目录，再在浏览器中选择「加载已解压的扩展程序」，选中该目录。</li><li>复制上方配对码，打开坐功扩展弹窗，粘贴后点击「保存配对并同步」。</li><li>保持坐功运行；扩展约每 30 秒尝试同步规则。上方显示「已同步」后，在学习日期间生效。</li></ol>
       ${btn("打开扩展文件夹", { kind: "plate", action: "reveal-browser-extension" })}
       <p class="blocking-note">抖音推荐页：<span class="mono sel">https://www.douyin.com/?recommend=1</span>。收藏页路径不同，可以正常打开。</p>
       <p class="blocking-note">B 站首页：<span class="mono sel">https://www.bilibili.com/</span>。视频页 <span class="mono sel">/video/…</span> 可以正常打开。</p>

@@ -1,7 +1,13 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { createBlocker, ALARM_NAME, BRIDGE_URL, CACHE_KEY } from "./worker.js";
+import { createHmac } from "node:crypto";
+import { createBlocker, ALARM_NAME, BRIDGE_URL, CACHE_KEY, SESSION_URL } from "./worker.js";
 import { blockedPageContext, blockedPageUrl } from "./rules.js";
+import { PAIRING_KEY } from "./auth.js";
+
+// 固定测试向量，对应 Rust 测试中的 [7; 32]；不是用户配对凭据。
+const TEST_CODE = "07".repeat(32);
+const TEST_SESSION = "09".repeat(32);
 
 const recommend = "https://www.douyin.com/?recommend=1";
 const favorite = "https://www.douyin.com/user/self?from_tab_name=main&showSubTab=video&showTab=favorite_collection";
@@ -17,13 +23,19 @@ function event() {
   return { listeners, addListener(fn) { listeners.push(fn); }, emit(...args) { for (const fn of listeners) fn(...args); } };
 }
 
-function harness({ initial = snapshot(), stored = {}, initialTabs = [], timeoutMs = 3000 } = {}) {
-  const data = structuredClone(stored);
+function harness({ initial = snapshot(), stored = {}, initialTabs = [], timeoutMs = 3000, code = TEST_CODE } = {}) {
+  const data = { ...(code ? { [PAIRING_KEY]: code } : {}), ...structuredClone(stored) };
   const tabs = new Map(initialTabs.map((tab) => [tab.id, { status: "complete", ...tab }]));
   const updates = [];
   const requests = [];
+  const sessions = [];
   const alarms = new Map();
   const state = {
+    authenticate: true,
+    authenticateSession: true,
+    sessionFetch: async () => response({ session: TEST_SESSION }),
+    signingCode: TEST_CODE,
+    setAccessLevel: async () => {},
     storageGet: async (key) => ({ [key]: data[key] }),
     fetch: async () => response(initial),
     get: async (id) => { if (!tabs.has(id)) throw new Error("closed"); return { ...tabs.get(id) }; },
@@ -36,13 +48,24 @@ function harness({ initial = snapshot(), stored = {}, initialTabs = [], timeoutM
       id: "test", getURL: (path) => `chrome-extension://test/${path}`,
       onStartup: event(), onInstalled: event(), onMessage: event(),
     },
-    storage: { local: { get: (key) => state.storageGet(key), set: (value) => state.set(value) } },
+    storage: { local: { get: (key) => state.storageGet(key), set: (value) => state.set(value), setAccessLevel: async ({ accessLevel }) => { assert.equal(accessLevel, "TRUSTED_CONTEXTS"); await state.setAccessLevel(); } } },
     alarms: { get: async (name) => alarms.get(name), create: async (name, value) => { alarms.set(name, value); }, onAlarm: event() },
     tabs: { get: (id) => state.get(id), query: () => state.query(), update: (id, patch) => state.update(id, patch), onUpdated: event(), onActivated: event(), onRemoved: event() },
     webNavigation: Object.fromEntries(["onBeforeNavigate", "onCommitted", "onHistoryStateUpdated", "onReferenceFragmentUpdated", "onTabReplaced"].map((name) => [name, event()])),
   };
-  const blocker = createBlocker({ chromeApi, timeoutMs, now: () => 1_800_000_000_000, fetchImpl: async (url, options) => { requests.push({ url, options }); return state.fetch(url, options); } });
-  return { blocker, chromeApi, data, tabs, updates, requests, alarms, state, async boot() { await blocker.start(); await blocker.sync(); await tick(); } };
+  const blocker = createBlocker({ chromeApi, timeoutMs, now: () => 1_800_000_000_000, fetchImpl: async (url, options) => {
+    const session = url === SESSION_URL;
+    (session ? sessions : requests).push({ url, options });
+    const result = await (session ? state.sessionFetch : state.fetch)(url, options);
+    if (session ? state.authenticateSession : state.authenticate) {
+      const text = await result.clone().text();
+      const status = result.status === 200 ? "200 OK" : "503 Service Unavailable";
+      const proof = createHmac("sha256", Buffer.from(state.signingCode, "hex")).update(`sitzfleisch-response-v1\n${options.headers["X-Sitzfleisch-Nonce"]}\n${status}\n${text}`).digest("hex");
+      result.headers.set("X-Sitzfleisch-Proof", proof);
+    }
+    return result;
+  } });
+  return { blocker, chromeApi, data, tabs, updates, requests, sessions, alarms, state, async boot() { await blocker.start(); await blocker.sync(); await tick(); } };
 }
 
 test("学习日启动同步：拦推荐和首页，已开收藏和视频保持；成功后才 ACK", async () => {
@@ -63,7 +86,10 @@ test("学习日启动同步：拦推荐和首页，已开收藏和视频保持�
     assert.equal(request.options.credentials, "omit");
     assert.equal(request.options.redirect, "error");
     assert.equal(request.options.headers["X-Sitzfleisch-Protocol"], "2");
-    assert.deepEqual(Object.keys(request.options.headers).filter((key) => key !== "X-Sitzfleisch-Applied"), ["X-Sitzfleisch-Client", "X-Sitzfleisch-Protocol"]);
+    assert.deepEqual(Object.keys(request.options.headers).filter((key) => key !== "X-Sitzfleisch-Applied"), ["X-Sitzfleisch-Client", "X-Sitzfleisch-Protocol", "X-Sitzfleisch-Nonce", "X-Sitzfleisch-Time", "X-Sitzfleisch-Session", "X-Sitzfleisch-Proof"]);
+    assert.match(request.options.headers["X-Sitzfleisch-Nonce"], /^[0-9a-f]{64}$/);
+    assert.match(request.options.headers["X-Sitzfleisch-Proof"], /^[0-9a-f]{64}$/);
+    assert(!Object.values(request.options.headers).includes(TEST_CODE));
   }
   assert.equal(h.alarms.get(ALARM_NAME).periodInMinutes, 0.5);
 });
@@ -297,13 +323,14 @@ test("同步 single flight 避免并发旧写，事件共用进行中的请求",
   const h = harness({ initialTabs: [{ id: 1, url: favorite }] });
   await h.boot();
   const held = deferred();
-  h.state.fetch = () => held.promise;
+  const entered = deferred();
+  h.state.fetch = () => { entered.resolve(); return held.promise; };
   const before = h.requests.length;
   const first = h.blocker.sync();
   assert.equal(first, h.blocker.sync());
   h.chromeApi.alarms.onAlarm.emit({ name: ALARM_NAME });
   h.chromeApi.tabs.onActivated.emit({ tabId: 1 });
-  await Promise.resolve();
+  await entered.promise;
   assert.equal(h.requests.length, before + 1);
   held.resolve(response(snapshot(false, [], "3333333333333333")));
   await first;
@@ -422,7 +449,7 @@ test("缓存读取失败或损坏且主程序离线时，也恢复已有阻止�
     await h.boot();
     assert.equal(h.tabs.get(1).url, recommend);
     assert.equal(h.blocker.status(recommend).blocked, false);
-    assert.equal(h.blocker.status().connection, "disconnected");
+    assert.equal(h.blocker.status().connection, brokenStorage ? "waiting" : "disconnected");
   }
 });
 
@@ -462,15 +489,123 @@ for (const eventName of ["onCommitted", "onHistoryStateUpdated", "onReferenceFra
   });
 }
 
-test("返回目标跟随阻止页恢复，worker 重启且主程序响应无效时仍可返回", async () => {
+test("worker 重启后不使用旧规则，首次认证失败时恢复已有阻止页", async () => {
   const page = blockedPageUrl("chrome-extension://test/blocked.html", recommend, favorite);
   const first = harness();
   await first.boot();
   const h = harness({ stored: first.data, initialTabs: [{ id: 1, url: page }] });
   h.state.fetch = async () => new Response("unavailable", { status: 503 });
   await h.boot();
-  assert.deepEqual(await goBack(h), { ok: true });
-  assert.equal(h.tabs.get(1).url, favorite);
+  assert.equal(h.tabs.get(1).url, recommend);
+  assert.equal(h.blocker.status().active, false);
+});
+
+test("未配对时不请求服务也不启用旧的未认证缓存", async () => {
+  const old = { [CACHE_KEY]: { rules: wholeSite(), appliedRevision: wholeSite().revision, lastSyncAt: 1 } };
+  const page = blockedPageUrl("chrome-extension://test/blocked.html", recommend, favorite);
+  const h = harness({ code: null, stored: old, initialTabs: [{ id: 1, url: page }] });
+  await h.boot();
+  assert.equal(h.requests.length, 0);
+  assert.equal(h.blocker.status().paired, false);
+  assert.equal(h.blocker.status().error, "pairing-required");
+  assert.equal(h.blocker.status().active, false);
+  assert.equal(h.data[CACHE_KEY].rules.active, false);
+  assert.equal(h.tabs.get(1).url, recommend);
+});
+
+test("不能限制 storage 到可信上下文时拒绝配对与网络同步", async () => {
+  const h = harness({ code: null });
+  h.state.setAccessLevel = async () => { throw new Error("cannot restrict storage"); };
+  await h.boot();
+  assert.equal(h.requests.length, 0);
+  assert.equal(h.blocker.status().error, "pairing-storage-error");
+  const listener = h.chromeApi.runtime.onMessage.listeners[0];
+  const result = await new Promise((resolve) => listener({ type: "pair", code: TEST_CODE }, { id: "test", url: "chrome-extension://test/popup.html" }, resolve));
+  assert.deepEqual(result, { ok: false });
+  assert.equal(h.data[PAIRING_KEY], undefined);
+});
+
+test("伪造端口服务、错误配对密钥和重放响应都不能持久化或应用攻击规则", async () => {
+  for (const attack of ["unsigned", "wrong-key", "replay", "tamper"]) {
+    const h = harness({ initialTabs: [{ id: 1, url: favorite }] });
+    await h.boot();
+    let saved;
+    h.state.fetch = async () => { saved = response(snapshot(true, [favorite], "aaaaaaaaaaaaaaaa")); return saved; };
+    if (attack === "wrong-key") h.state.signingCode = "08".repeat(32);
+    if (attack === "unsigned") { h.state.authenticate = false; h.state.authenticateSession = false; }
+    if (attack === "replay" || attack === "tamper") {
+      // 有效的旧响应仍绑定上一轮 nonce；修改正文也不会保留其有效签名。
+      const previousNonce = h.requests.at(-1).options.headers["X-Sitzfleisch-Nonce"];
+      const original = JSON.stringify(snapshot());
+      const proof = createHmac("sha256", Buffer.from(TEST_CODE, "hex")).update(`sitzfleisch-response-v1\n${previousNonce}\n200 OK\n${original}`).digest("hex");
+      h.state.authenticate = false;
+      h.state.fetch = async (_url, options) => {
+        const nonce = attack === "tamper" ? options.headers["X-Sitzfleisch-Nonce"] : previousNonce;
+        const signature = attack === "tamper" ? createHmac("sha256", Buffer.from(TEST_CODE, "hex")).update(`sitzfleisch-response-v1\n${nonce}\n200 OK\n${original}`).digest("hex") : proof;
+        return new Response(JSON.stringify(snapshot(true, [favorite], "aaaaaaaaaaaaaaaa")), { headers: { "content-type": "application/json", "x-sitzfleisch-proof": signature } });
+      };
+    }
+    await h.blocker.sync();
+    assert.equal(h.blocker.status().error, "authentication-error", attack);
+    assert.equal(h.blocker.status().active, false, attack);
+    assert.equal(h.tabs.get(1).url, favorite, attack);
+    assert.equal(h.data[CACHE_KEY].rules.active, false, attack);
+    assert(!JSON.stringify(h.data[CACHE_KEY]).includes(favorite), attack);
+    assert.equal(h.data[PAIRING_KEY], TEST_CODE);
+  }
+});
+
+test("每次同步生成新的 nonce，请求证明用独立实现核验且不包含配对密钥", async () => {
+  const h = harness();
+  await h.boot();
+  await h.blocker.sync();
+  const nonces = h.requests.map(({ options }) => options.headers["X-Sitzfleisch-Nonce"]);
+  assert.equal(new Set(nonces).size, nonces.length);
+  for (const { options } of h.requests) {
+    const headers = options.headers;
+    const message = `sitzfleisch-request-v1\nGET /v1/rules\n2\n${headers["X-Sitzfleisch-Applied"] ?? ""}\n${headers["X-Sitzfleisch-Time"]}\n${headers["X-Sitzfleisch-Nonce"]}\n${headers["X-Sitzfleisch-Session"]}`;
+    assert.equal(headers["X-Sitzfleisch-Proof"], createHmac("sha256", Buffer.from(TEST_CODE, "hex")).update(message).digest("hex"));
+    assert(!JSON.stringify(options).includes(TEST_CODE));
+  }
+});
+
+test("先验证服务端握手，伪造或重放握手不能取得本轮请求证明", async () => {
+  for (const attack of ["unsigned", "wrong-key", "replay"]) {
+    const h = harness();
+    await h.boot();
+    const requestsBefore = h.requests.length;
+    if (attack === "unsigned") h.state.authenticateSession = false;
+    if (attack === "wrong-key") h.state.signingCode = "08".repeat(32);
+    if (attack === "replay") {
+      const oldNonce = h.sessions.at(-1).options.headers["X-Sitzfleisch-Nonce"];
+      const body = JSON.stringify({ session: TEST_SESSION });
+      const proof = createHmac("sha256", Buffer.from(TEST_CODE, "hex")).update(`sitzfleisch-response-v1\n${oldNonce}\n200 OK\n${body}`).digest("hex");
+      h.state.authenticateSession = false;
+      h.state.sessionFetch = async () => new Response(body, { headers: { "content-type": "application/json", "x-sitzfleisch-proof": proof } });
+    }
+    await h.blocker.sync();
+    assert.equal(h.blocker.status().error, "authentication-error");
+    assert.equal(h.requests.length, requestsBefore, "服务端身份未验证时不发送带证明的规则请求");
+    assert.equal(h.blocker.status().active, false);
+  }
+});
+
+test("配对只允许本扩展 popup 的完整有效输入，凭据不进入状态回复", async () => {
+  const h = harness({ code: null });
+  await h.boot();
+  const listener = h.chromeApi.runtime.onMessage.listeners[0];
+  const popup = { id: "test", url: "chrome-extension://test/popup.html" };
+  for (const sender of [{ id: "other", url: popup.url }, { id: "test", url: "https://example.com" }, { id: "test", url: "chrome-extension://test/blocked.html" }]) {
+    assert.equal(listener({ type: "pair", code: TEST_CODE }, sender, () => {}), false);
+  }
+  for (const code of [null, {}, "short", "0".repeat(65), "g".repeat(64)]) {
+    assert.equal(listener({ type: "pair", code }, popup, () => {}), false);
+  }
+  assert.equal(listener({ type: "pair", code: TEST_CODE, extra: true }, popup, () => {}), false);
+  const result = await new Promise((resolve) => { assert.equal(listener({ type: "pair", code: TEST_CODE }, popup, resolve), true); });
+  assert.equal(result.connection, "connected");
+  assert.equal(h.data[PAIRING_KEY], TEST_CODE);
+  assert(!JSON.stringify(result).includes(TEST_CODE));
 });
 
 test("旧阻止页、无历史和返回目标也被屏蔽时有空白页出口", async () => {

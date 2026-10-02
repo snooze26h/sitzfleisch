@@ -9,6 +9,7 @@ use std::time::{Duration, Instant};
 use serde::Serialize;
 use sitzfleisch_core as core;
 use tauri::Manager;
+use super::browser_auth::Auth;
 
 const ADDRESS: &str = "127.0.0.1:47832";
 const MAX_HEADERS: usize = 8192;
@@ -26,6 +27,7 @@ pub(crate) struct Status {
 
 #[derive(Default)]
 pub(crate) struct Bridge {
+    auth: Option<Auth>,
     available: bool,
     last_seen: Option<Instant>,
     applied: Option<String>,
@@ -99,17 +101,24 @@ impl Rules {
 }
 
 /// 浏览器普通网页不能携带自定义头跨域读取此接口；同时拒绝网页 Origin 与重绑定 Host。
-/// 协议头不提供身份认证：本机客户端（包括其他登录账号）可读取配置的规则。
+/// 配对 HMAC 校验客户端身份，时间窗与一次性 nonce 拒绝重放。
 /// 接口只返回学习日开关与生效网址，不提供计时记录、浏览记录或写入命令。
-fn parse_request(bytes: &[u8]) -> Result<(u8, Option<String>), ()> {
+enum Request {
+    Session(String),
+    Rules(u8, Option<String>, String),
+}
+
+fn parse_request(bytes: &[u8], auth: &mut Auth) -> Result<Request, ()> {
     if bytes.len() > MAX_HEADERS || !bytes.is_ascii() || bytes.windows(4).position(|part| part == b"\r\n\r\n") != bytes.len().checked_sub(4) {
         return Err(());
     }
     let request = std::str::from_utf8(bytes).map_err(|_| ())?;
     let mut lines = request.split("\r\n");
-    if lines.next() != Some("GET /v1/rules HTTP/1.1") {
-        return Err(());
-    }
+    let session_request = match lines.next() {
+        Some("GET /v1/rules HTTP/1.1") => false,
+        Some("GET /v1/session HTTP/1.1") => true,
+        _ => return Err(()),
+    };
     let mut headers = std::collections::HashMap::new();
     for line in lines {
         if line.is_empty() { break; }
@@ -148,7 +157,14 @@ fn parse_request(bytes: &[u8]) -> Result<(u8, Option<String>), ()> {
         Some("2") => 2,
         _ => return Err(()),
     };
-    Ok((protocol, applied))
+    let nonce = *headers.get("x-sitzfleisch-nonce").ok_or(())?;
+    if nonce.len() != 64 || !nonce.bytes().all(|c| c.is_ascii_digit() || (b'a'..=b'f').contains(&c)) { return Err(()); }
+    if session_request { return Ok(Request::Session(nonce.into())); }
+    let time = *headers.get("x-sitzfleisch-time").ok_or(())?;
+    let proof = *headers.get("x-sitzfleisch-proof").ok_or(())?;
+    let session = *headers.get("x-sitzfleisch-session").ok_or(())?;
+    auth.authorize(protocol, applied.as_deref(), time, nonce, proof, session)?;
+    Ok(Request::Rules(protocol, applied, nonce.into()))
 }
 
 fn read_request(stream: &mut impl Read) -> Result<Vec<u8>, ()> {
@@ -173,8 +189,14 @@ fn read_request_with_budget(stream: &mut impl Read, budget: Duration) -> Result<
 }
 
 fn write_response(stream: &mut impl Write, status: &str, body: &[u8]) -> std::io::Result<()> {
+    write_response_with_proof(stream, status, body, None)
+}
+
+fn write_response_with_proof(stream: &mut impl Write, status: &str, body: &[u8], proof: Option<&str>) -> std::io::Result<()> {
     // 不开放网页 CORS、不缓存；一个请求后关闭连接，避免持久连接及管线化增加解析面。
-    write!(stream, "HTTP/1.1 {status}\r\nContent-Type: application/json; charset=utf-8\r\nContent-Length: {}\r\nCache-Control: no-store\r\nX-Content-Type-Options: nosniff\r\nConnection: close\r\n\r\n", body.len())?;
+    write!(stream, "HTTP/1.1 {status}\r\nContent-Type: application/json; charset=utf-8\r\nContent-Length: {}\r\nCache-Control: no-store\r\nX-Content-Type-Options: nosniff\r\nConnection: close\r\n", body.len())?;
+    if let Some(proof) = proof { write!(stream, "X-Sitzfleisch-Proof: {proof}\r\n")?; }
+    write!(stream, "\r\n")?;
     stream.write_all(body)
 }
 
@@ -183,8 +205,25 @@ fn serve(stream: &mut TcpStream, shared: &super::Shared) {
     if stream.set_read_timeout(timeout).is_err() || stream.set_write_timeout(timeout).is_err() {
         return;
     }
-    let (protocol, applied) = match read_request(stream).and_then(|bytes| parse_request(&bytes)) {
-        Ok(request) => request,
+    let request = read_request(stream).and_then(|bytes| {
+        let mut bridge = shared.browser_bridge.lock().unwrap();
+        parse_request(&bytes, bridge.auth.as_mut().ok_or(())?)
+    });
+    let (protocol, applied, nonce) = match request {
+        Ok(Request::Rules(protocol, applied, nonce)) => (protocol, applied, nonce),
+        Ok(Request::Session(nonce)) => {
+            // 公共握手只返回本次启动的随机会话，并证明服务端持有配对密钥；
+            // 不返回规则、不登记客户端，也不会让旧请求跨应用重启继续有效。
+            let (body, proof) = {
+                let bridge = shared.browser_bridge.lock().unwrap();
+                let Some(auth) = bridge.auth.as_ref() else { return; };
+                let body = serde_json::to_vec(&serde_json::json!({"session": auth.session()})).unwrap();
+                let proof = auth.response_proof(&nonce, "200 OK", &body);
+                (body, proof)
+            };
+            let _ = write_response_with_proof(stream, "200 OK", &body, Some(&proof));
+            return;
+        }
         Err(()) => {
             let _ = write_response(stream, "403 Forbidden", br#"{"error":"request rejected"}"#);
             return;
@@ -205,10 +244,12 @@ fn serve(stream: &mut TcpStream, shared: &super::Shared) {
             Some(serde_json::to_vec(&rules).expect("网址规则可以序列化"))
         }
     };
-    match response {
-        Some(body) => { let _ = write_response(stream, "200 OK", &body); }
-        None => { let _ = write_response(stream, "503 Service Unavailable", br#"{"error":"rules unavailable"}"#); }
-    }
+    let (status, body) = match response {
+        Some(body) => ("200 OK", body),
+        None => ("503 Service Unavailable", br#"{"error":"rules unavailable"}"#.to_vec()),
+    };
+    let proof = shared.browser_bridge.lock().unwrap().auth.as_ref().map(|auth| auth.response_proof(&nonce, status, &body));
+    let _ = write_response_with_proof(stream, status, &body, proof.as_deref());
 }
 
 pub(crate) fn start(app: &tauri::AppHandle, isolated: bool) {
@@ -219,6 +260,13 @@ pub(crate) fn start(app: &tauri::AppHandle, isolated: bool) {
         );
         return;
     }
+    let auth = match Auth::load(&app.state::<super::Shared>().data_dir) {
+        Ok(auth) => auth,
+        Err(error) => {
+            app.state::<super::Shared>().browser_bridge.lock().unwrap().error = Some(error);
+            return;
+        }
+    };
     let listener = match TcpListener::bind(ADDRESS) {
         Ok(listener) => listener,
         Err(_) => {
@@ -228,7 +276,12 @@ pub(crate) fn start(app: &tauri::AppHandle, isolated: bool) {
             return;
         }
     };
-    app.state::<super::Shared>().browser_bridge.lock().unwrap().available = true;
+    {
+        let shared = app.state::<super::Shared>();
+        let mut bridge = shared.browser_bridge.lock().unwrap();
+        bridge.auth = Some(auth);
+        bridge.available = true;
+    }
     let app = app.clone();
     std::thread::spawn(move || {
         for stream in listener.incoming() {
@@ -244,28 +297,93 @@ pub(crate) fn start(app: &tauri::AppHandle, isolated: bool) {
 
 pub(crate) fn new_bridge() -> Mutex<Bridge> { Mutex::new(Bridge::default()) }
 
+pub(crate) fn pairing_code(shared: &super::Shared, rotate: bool) -> Result<String, String> {
+    let mut bridge = shared.browser_bridge.lock().unwrap();
+    let auth = bridge.auth.as_mut().ok_or("浏览器连接尚未启动，无法生成配对码。")?;
+    if rotate { auth.rotate(&shared.data_dir)?; }
+    let code = auth.pairing_code();
+    if rotate { bridge.last_seen = None; bridge.applied = None; }
+    Ok(code)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     fn request(extra: &str) -> Vec<u8> {
-        format!("GET /v1/rules HTTP/1.1\r\nHost: {ADDRESS}\r\nX-Sitzfleisch-Client: {CLIENT}\r\n{extra}\r\n").into_bytes()
+        let protocol = if extra.contains("X-Sitzfleisch-Protocol: 2\r\n") { 2 } else { 1 };
+        let applied = extra.split("\r\n").find_map(|line| line.strip_prefix("X-Sitzfleisch-Applied: "));
+        let time = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs().to_string();
+        let nonce = "a".repeat(64);
+        let session = Auth::testing().session().to_string();
+        let proof = Auth::testing().proof(super::super::browser_auth::request_message(protocol, applied, &time, &nonce, &session).as_bytes());
+        format!("GET /v1/rules HTTP/1.1\r\nHost: {ADDRESS}\r\nX-Sitzfleisch-Client: {CLIENT}\r\nX-Sitzfleisch-Nonce: {nonce}\r\nX-Sitzfleisch-Time: {time}\r\nX-Sitzfleisch-Session: {session}\r\nX-Sitzfleisch-Proof: {proof}\r\n{extra}\r\n").into_bytes()
+    }
+
+    fn parse(bytes: &[u8]) -> Result<(u8, Option<String>), ()> {
+        match parse_request(bytes, &mut Auth::testing())? {
+            Request::Rules(protocol, applied, _) => Ok((protocol, applied)),
+            Request::Session(_) => Err(()),
+        }
+    }
+
+    #[test]
+    fn real_transport_never_discloses_rules_or_accepts_ack_without_authentication() {
+        let mut state = core::State::new(1000);
+        state.preferences.blocked_urls = vec!["https://example.com/private?token=fixture".into()];
+        state.start_day("standard", 1000).unwrap();
+        let fixture = crate::tests::TestShared::new(state);
+        fixture.0.browser_bridge.lock().unwrap().auth = Some(Auth::testing());
+        let shared = &fixture.0;
+        let transact = |bytes: &[u8]| std::thread::scope(|scope| {
+            // 使用临时端口，不抢占正式应用的 47832，也不读取用户存档。
+            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            let address = listener.local_addr().unwrap();
+            scope.spawn(move || {
+                let (mut stream, _) = listener.accept().unwrap();
+                serve(&mut stream, shared);
+            });
+            let mut client = TcpStream::connect(address).unwrap();
+            client.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
+            client.write_all(bytes).unwrap();
+            let mut response = String::new();
+            client.read_to_string(&mut response).unwrap();
+            response
+        });
+        let public_headers = format!("GET /v1/rules HTTP/1.1\r\nHost: {ADDRESS}\r\nX-Sitzfleisch-Client: {CLIENT}\r\nX-Sitzfleisch-Protocol: 2\r\nX-Sitzfleisch-Applied: 0123456789abcdef\r\n\r\n");
+        let rejected = transact(public_headers.as_bytes());
+        assert!(rejected.starts_with("HTTP/1.1 403"));
+        assert!(!rejected.contains("private"));
+        assert!(fixture.0.browser_bridge.lock().unwrap().last_seen.is_none());
+        let challenge = format!("GET /v1/session HTTP/1.1\r\nHost: {ADDRESS}\r\nX-Sitzfleisch-Client: {CLIENT}\r\nX-Sitzfleisch-Nonce: {}\r\n\r\n", "b".repeat(64));
+        let session_response = transact(challenge.as_bytes());
+        assert!(session_response.starts_with("HTTP/1.1 200"));
+        assert!(!session_response.contains("private"));
+        assert!(fixture.0.browser_bridge.lock().unwrap().last_seen.is_none(), "握手不登记客户端或伪报规则同步");
+        let bytes = request("X-Sitzfleisch-Protocol: 2\r\n");
+        let accepted = transact(&bytes);
+        assert!(accepted.starts_with("HTTP/1.1 200"));
+        assert!(accepted.contains("https://example.com/private?token=fixture"));
+        let (headers, body) = accepted.split_once("\r\n\r\n").unwrap();
+        let expected = Auth::testing().response_proof(&"a".repeat(64), "200 OK", body.as_bytes());
+        assert!(headers.contains(&format!("X-Sitzfleisch-Proof: {expected}")));
+        assert!(transact(&bytes).starts_with("HTTP/1.1 403"), "重放不能再读取一次规则");
     }
 
     #[test]
     fn only_accepts_bounded_read_only_extension_requests() {
-        assert_eq!(parse_request(&request("")), Ok((1, None)));
+        assert_eq!(parse(&request("")), Ok((1, None)));
         let ack = "0123456789abcdef";
-        assert_eq!(parse_request(&request(&format!("X-Sitzfleisch-Applied: {ack}\r\nOrigin: chrome-extension://{}\r\n", "a".repeat(32)))), Ok((1, Some(ack.into()))));
-        assert_eq!(parse_request(&request("X-Sitzfleisch-Protocol: 2\r\n")), Ok((2, None)));
-        assert!(parse_request(&request("X-Sitzfleisch-Protocol: 3\r\n")).is_err());
+        assert_eq!(parse(&request(&format!("X-Sitzfleisch-Applied: {ack}\r\nOrigin: chrome-extension://{}\r\n", "a".repeat(32)))), Ok((1, Some(ack.into()))));
+        assert_eq!(parse(&request("X-Sitzfleisch-Protocol: 2\r\n")), Ok((2, None)));
+        assert!(parse(&request("X-Sitzfleisch-Protocol: 3\r\n")).is_err());
         for extra in [
             "Origin: https://evil.example\r\n", "Origin: null\r\n",
             "Origin: chrome-extension://bad\r\n", "Host: evil.example\r\n",
             "Content-Length: 1\r\n", "Transfer-Encoding: chunked\r\n",
             "X-Sitzfleisch-Applied: invalid\r\n", " Bad: folded\r\n",
         ] {
-            assert!(parse_request(&request(extra)).is_err(), "{extra}");
+            assert!(parse(&request(extra)).is_err(), "{extra}");
         }
         let valid = String::from_utf8(request("")).unwrap();
         for changed in [
@@ -276,7 +394,7 @@ mod tests {
             format!("{valid}GET /another HTTP/1.1\r\n\r\n"),
             String::from_utf8(request(&format!("X-Large: {}\r\n", "a".repeat(MAX_HEADERS)))).unwrap(),
         ] {
-            assert!(parse_request(changed.as_bytes()).is_err());
+            assert!(parse(changed.as_bytes()).is_err());
         }
     }
 

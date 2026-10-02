@@ -3,6 +3,7 @@
 #
 #   安装： sudo scripts/install-hosts-helper.sh
 #   卸载： sudo scripts/install-hosts-helper.sh --uninstall
+#   校验： scripts/install-hosts-helper.sh --check（不提权、不安装）
 #
 # 做两件事：
 #   1. 把 hosts-helper.sh 以 root:wheel 0755 装到 /usr/local/libexec/sitzfleisch-hosts-install。
@@ -18,8 +19,8 @@ export PATH
 HELPER=/usr/local/libexec/sitzfleisch-hosts-install
 SUDOERS=/etc/sudoers.d/sitzfleisch
 
-if [ "$#" -gt 1 ] || { [ "$#" -eq 1 ] && [ "$1" != --uninstall ]; }; then
-  echo "用法：sudo $0 [--uninstall]" >&2
+if [ "$#" -gt 1 ] || { [ "$#" -eq 1 ] && [ "$1" != --uninstall ] && [ "$1" != --check ]; }; then
+  echo "用法：sudo $0 [--uninstall]；或 $0 --check" >&2
   exit 2
 fi
 
@@ -28,7 +29,7 @@ if [ "$(uname -s)" != Darwin ]; then
   exit 1
 fi
 
-if [ "$(id -u)" -ne 0 ]; then
+if [ "${1:-}" != --check ] && [ "$(id -u)" -ne 0 ]; then
   echo "需要管理员权限。请运行：sudo $0 $*" >&2
   exit 1
 fi
@@ -36,6 +37,32 @@ fi
 if [ "${1:-}" = "--uninstall" ]; then
   rm -f "$SUDOERS" "$HELPER"
   echo "已卸载：免密规则与助手都已删除，应用恢复为每次弹授权框。"
+  exit 0
+fi
+
+# 先把外部源码固定在私有目录；摘要通过前绝不执行。自检和安装都使用这份副本，
+# 不再重新打开用户可写的源路径，避免两次读取之间被替换。
+umask 077
+stage_dir=$(/usr/bin/mktemp -d /private/tmp/sitzfleisch-helper.XXXXXX)
+trap '/bin/rm -rf "$stage_dir"' EXIT INT TERM
+SRC=$(cd "$(dirname "$0")" && pwd)/hosts-helper.sh
+verified_helper="$stage_dir/hosts-helper.sh"
+EXPECTED_SHA256=f79d59c626e79465a619b56e1042926d85b530c222a25f30b3f97ac99f2a4623
+if [ -L "$SRC" ] || [ ! -f "$SRC" ] || ! /bin/cp "$SRC" "$verified_helper"; then
+  echo "找不到可信的助手源文件，未安装。" >&2
+  exit 1
+fi
+actual_digest=$(/usr/bin/shasum -a 256 "$verified_helper")
+if [ "${actual_digest%% *}" != "$EXPECTED_SHA256" ]; then
+  echo "助手完整性校验失败，未执行、未安装。" >&2
+  exit 1
+fi
+if ! printf '127.0.0.1\tlocalhost\n' | /bin/sh "$verified_helper" --check; then
+  echo "助手自检未通过，已放弃安装。" >&2
+  exit 1
+fi
+if [ "${1:-}" = --check ]; then
+  echo "助手完整性与自检通过，未安装。"
   exit 0
 fi
 
@@ -50,18 +77,6 @@ case "$USER_NAME" in
 esac
 if [ "$(id -u "$USER_NAME")" != "${SUDO_UID:-}" ]; then
   echo "sudo 用户身份不一致，未安装。" >&2
-  exit 1
-fi
-
-SRC=$(cd "$(dirname "$0")" && pwd)/hosts-helper.sh
-if [ ! -f "$SRC" ]; then
-  echo "找不到助手脚本：$SRC" >&2
-  exit 1
-fi
-
-# 装之前先自检一遍：校验逻辑坏掉的助手不该进系统目录。
-if ! printf '127.0.0.1\tlocalhost\n' | /bin/sh "$SRC" --check; then
-  echo "助手自检未通过，已放弃安装。" >&2
   exit 1
 fi
 
@@ -82,11 +97,10 @@ for directory in /usr /usr/local /usr/local/libexec; do
 done
 
 install -d -o root -g wheel -m 755 /usr/local/libexec
-install -o root -g wheel -m 755 "$SRC" "$HELPER"
+install -o root -g wheel -m 755 "$verified_helper" "$HELPER"
 
 # 语法错误的 sudoers 片段会让整个 sudo 不可用，所以先用 visudo 校验再就位。
-sudoers_tmp=$(mktemp /tmp/sitzfleisch-sudoers.XXXXXX)
-trap 'rm -f "$sudoers_tmp"' EXIT INT TERM
+sudoers_tmp="$stage_dir/sudoers"
 # 末尾的 "" 把规则收紧到「不带任何参数」。只写命令路径的话 sudoers 允许任意参数，
 # 虽然助手自己会拒绝未知参数，但白名单能挡在更前面就挡在更前面。
 printf '%s ALL=(root) NOPASSWD: %s ""\n' "$USER_NAME" "$HELPER" > "$sudoers_tmp"
