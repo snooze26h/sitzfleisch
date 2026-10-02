@@ -1,5 +1,23 @@
 // 与 core 的 serde 输出一一对应的类型。字段名保持 snake_case，和 Rust 端同名。
 
+/** 启动时查询一次的平台能力，不随每秒快照重复推送。 */
+export interface PlatformInfo {
+  os: string;
+  mobile: boolean;
+  features: {
+    tray: boolean;
+    website_blocking: boolean;
+    browser_extension: boolean;
+    autostart: boolean;
+    reveal_state_file: boolean;
+    window_title: boolean;
+    quit_flow: boolean;
+    in_app_sound_toggle: boolean;
+    system_settings: boolean;
+    exact_alarm_status: boolean;
+  };
+}
+
 export interface CategoryDef {
   id: string;
   name: string;

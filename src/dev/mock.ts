@@ -1,12 +1,14 @@
 // 浏览器里的模拟后台：把 core 的规则用 TS 复刻一遍，让界面能在没有 Tauri 的地方
 // 跑起来、点起来、截图验收。只在非 Tauri 环境被动态加载，不进正式包的主路径。
-// 场景通过 URL hash 选：#qa=start|fresh|chooser|running|paused|break|done|protected|savefail|nohistory
+// 场景通过 URL hash 选：#qa=start|fresh|chooser|completed|finishing|running|paused|suspended|resting|done|protected|savefail|nohistory
+// 可加 &platform=android 预览平台能力，&clock=<带时区的 ISO 时间> 固定截图时钟。
 
 import type {
   AppState,
   ArchivedDay,
   CategoryState,
   Day,
+  PlatformInfo,
   Preferences,
   ProfileDef,
   Snapshot,
@@ -17,6 +19,36 @@ import { version } from "../../package.json";
 import { MAX_BLOCK_RULES, normalizeHost, normalizeUrl } from "../blocking";
 
 const HISTORY_LIMIT = 60;
+const params = new URLSearchParams(location.hash.replace(/^#/, ""));
+const mobile = params.get("platform") === "android";
+
+// 只接受带时区的完整时间；非法日期不能被 Date.parse 悄悄滚到下个月。
+const clock = params.get("clock");
+if (clock !== null && clock.length <= 35
+  && /^\d{4}-(0[1-9]|1[0-2])-(0[1-9]|[12]\d|3[01])T([01]\d|2[0-3]):[0-5]\d:[0-5]\d(?:\.\d{1,3})?(?:Z|[+-]([01]\d|2[0-3]):[0-5]\d)$/.test(clock)) {
+  const date = new Date(`${clock.slice(0, 10)}T00:00:00Z`);
+  const fixedNow = Date.parse(clock);
+  if (Number.isFinite(fixedNow) && date.toISOString().slice(0, 10) === clock.slice(0, 10)) {
+    Date.now = () => fixedNow;
+  }
+}
+
+const platform: PlatformInfo = {
+  os: mobile ? "android" : "macos",
+  mobile,
+  features: {
+    tray: !mobile,
+    website_blocking: !mobile,
+    browser_extension: !mobile,
+    autostart: !mobile,
+    reveal_state_file: !mobile,
+    window_title: !mobile,
+    quit_flow: !mobile,
+    in_app_sound_toggle: !mobile,
+    system_settings: true,
+    exact_alarm_status: mobile,
+  },
+};
 
 function nowUnix(): number {
   return Math.floor(Date.now() / 1000);
@@ -167,7 +199,7 @@ function tick(now: number) {
   if (delta <= 0) return;
   const day = state.day;
   if (!day) return;
-  if (delta > SUSPEND_GAP_SECONDS) {
+  if (!mobile && delta > SUSPEND_GAP_SECONDS) {
     // 与 core 同一条规矩：空档一秒不补，但暂停段从空档开始那一刻起算。
     day.suspend_seconds += delta;
     day.paused_seconds += delta;
@@ -589,7 +621,6 @@ function buildScenario(name: string): MockState {
 }
 
 function scenarioName(): string {
-  const params = new URLSearchParams(location.hash.replace(/^#/, ""));
   return params.get("qa") ?? "start";
 }
 
@@ -630,6 +661,8 @@ export async function mockInvoke<T>(command: string, args: Record<string, unknow
   const a = args as Record<string, never>;
   await new Promise((resolve) => setTimeout(resolve, 8));
   switch (command) {
+    case "platform_info":
+      return structuredClone(platform) as T;
     case "get_snapshot":
       return snapshot() as T;
     case "start_day":
@@ -673,6 +706,7 @@ export async function mockInvoke<T>(command: string, args: Record<string, unknow
       // 浏览器里没有进程可退：写不进去就把失败原样端回对话框，写得进去就当已经退出。
       throw saveError ? "（mock）仍然写不进去" : "（mock）已退出";
     case "quit_without_saving":
+    case "quit_leaving_blocking":
       throw "（mock）已退出";
     case "reapply_blocking":
       blocking.busy = true;
