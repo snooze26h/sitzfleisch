@@ -9,7 +9,7 @@
 // 一像素对一像素地上色（两块屏幕像素密度不同也跟得上），只有亮度或尺寸变了才重画。
 
 import type { Day } from "./types";
-import { quotaSeconds } from "./state";
+import { quotaSeconds, ui } from "./state";
 import shading from "./assets/yue/moon-shading.json";
 
 const mapsUrl = new URL("./assets/yue/moon-maps.webp", import.meta.url).href;
@@ -242,7 +242,9 @@ let scratch: HTMLCanvasElement | null = null;
  */
 export function paintMoons(root: ParentNode): void {
   if (!levels) return;
-  const dpr = window.devicePixelRatio || 1;
+  // 手机限制画布与着色缓存，避免高密度屏幕在长学习日里积累大块图像内存。
+  const dpr = ui.platform?.mobile ? Math.min(2, window.devicePixelRatio || 1) : window.devicePixelRatio || 1;
+  const cacheLimit = ui.platform?.mobile ? 16 : 96;
   for (const canvas of root.querySelectorAll<HTMLCanvasElement>("canvas[data-moon]")) {
     const css = canvas.getBoundingClientRect().width;
     if (css <= 0) continue;
@@ -262,7 +264,7 @@ export function paintMoons(root: ParentNode): void {
     if (!img) {
       img = shade(level, lit, earth);
       shaded.set(key, img);
-      if (shaded.size > 96) shaded.delete(shaded.keys().next().value!);
+      if (shaded.size > cacheLimit) shaded.delete(shaded.keys().next().value!);
     }
     const ctx = canvas.getContext("2d");
     if (!ctx) continue;
