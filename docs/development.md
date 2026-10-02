@@ -47,6 +47,7 @@ node scripts/check-scheduler.mjs
 node scripts/check-timeline.mjs
 node scripts/check-blocking-rules.mjs
 node --test browser-extension/*.test.mjs
+node scripts/check-security.mjs
 cargo test --manifest-path core/Cargo.toml
 cargo clippy --manifest-path core/Cargo.toml --all-targets -- -D warnings
 cargo test --manifest-path src-tauri/Cargo.toml
@@ -121,6 +122,8 @@ cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings
 ## 构建与发布
 
 [build.yml](../.github/workflows/build.yml) 在 macOS 和 Windows runner 上构建安装包。可在 Actions 中手动触发并下载 Artifacts；推送 `v*` 标签会构建并发布 GitHub Release。
+
+所有 Action 使用完整提交 SHA；默认 `contents: read`，checkout 不保留凭据，仅发布任务有 `contents: write`。两个平台的构建均运行外壳测试；Windows 的提权脚本测试只写临时文件，不调用 UAC 或刷新系统 DNS。安全扫描与本地修复记录见 [2026-10-02 安全修复](security-20261002.md)。
 
 macOS 发布包是 Apple 芯片与 Intel 通用二进制。当前仅做 ad-hoc 签名，未做 Developer ID 签名与公证；Windows 构建成功不等同于真机验收通过。
 

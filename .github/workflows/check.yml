@@ -6,23 +6,29 @@ on:
   push:
   pull_request:
 
+permissions:
+  contents: read
+
 jobs:
   check:
     # 跑在 macOS 上：src-tauri 的测试要编译 tauri 本体，
     # 在 Linux 上得先装一串 GTK/webkit 系统包，不值当。
     runs-on: macos-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          persist-credentials: false
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: 22
 
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@89b12181fb390509a0842a86cc55eeb8eb928c1d
         with:
+          toolchain: stable
           components: clippy
 
-      - uses: swatinem/rust-cache@v2
+      - uses: swatinem/rust-cache@779680da715d629ac1d338a641029a2f4372abb5 # v2.8.2
         with:
           workspaces: |
             core
@@ -53,6 +59,9 @@ jobs:
         run: |
           node scripts/check-blocking-rules.mjs
           node --test browser-extension/*.test.mjs
+
+      - name: 安全边界回归
+        run: node scripts/check-security.mjs
 
       - name: 规则引擎测试
         run: cargo test

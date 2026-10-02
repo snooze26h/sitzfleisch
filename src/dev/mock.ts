@@ -702,6 +702,9 @@ export async function mockInvoke<T>(command: string, args: Record<string, unknow
       return undefined as T;
     case "reveal_browser_extension":
       throw "浏览器预览无法打开扩展目录，请在坐功桌面应用中使用这个按钮。";
+    case "browser_pairing_code":
+    case "reset_browser_pairing":
+      throw "浏览器预览无法生成配对码，请在坐功桌面应用中配对。";
     case "app_version":
       return `${version}（预览）` as T;
     case "autostart_status":

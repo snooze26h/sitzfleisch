@@ -6,7 +6,7 @@ on:
     tags: ["v*"]
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
   build:
@@ -20,20 +20,24 @@ jobs:
             target: ""
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          persist-credentials: false
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: 22
 
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@89b12181fb390509a0842a86cc55eeb8eb928c1d
+        with:
+          toolchain: stable
 
       # macOS 出通用二进制，Intel 和 Apple 芯片各一半，装哪台都能跑。
       - name: Add Intel target
         if: runner.os == 'macOS'
         run: rustup target add x86_64-apple-darwin aarch64-apple-darwin
 
-      - uses: swatinem/rust-cache@v2
+      - uses: swatinem/rust-cache@779680da715d629ac1d338a641029a2f4372abb5 # v2.8.2
         with:
           workspaces: |
             src-tauri
@@ -45,6 +49,10 @@ jobs:
       - name: Rules engine tests
         run: cargo test
         working-directory: core
+
+      - name: System integration tests
+        run: cargo test --locked
+        working-directory: src-tauri
 
       - name: Build app
         run: npm run tauri build ${{ matrix.target && format('-- --target {0}', matrix.target) || '' }}
@@ -58,7 +66,7 @@ jobs:
           find src-tauri/target -type f \( -name "*.dmg" -o -name "*-setup.exe" \) -exec cp {} release-artifacts/ \;
           ls -lh release-artifacts
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: sitzfleisch-${{ runner.os }}
           path: release-artifacts/*
@@ -67,9 +75,11 @@ jobs:
   release:
     needs: build
     if: startsWith(github.ref, 'refs/tags/v')
+    permissions:
+      contents: write
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           path: release-artifacts
           merge-multiple: true
@@ -77,7 +87,7 @@ jobs:
       - run: ls -lh release-artifacts
 
       - name: Publish release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@6cbd405e2c4e67a21c47fa9e383d020e4e28b836 # v2.3.3
         with:
           files: release-artifacts/*
           draft: false

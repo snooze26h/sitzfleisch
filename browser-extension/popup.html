@@ -17,6 +17,13 @@
       <p id="last-sync" class="detail" hidden></p>
     </section>
     <button id="sync" type="button">立即同步</button>
+    <form id="pairing">
+      <h2>连接主程序</h2>
+      <label for="pairing-code">主程序「设置 → 网站屏蔽」中的配对码</label>
+      <input id="pairing-code" type="password" maxlength="64" minlength="64" autocomplete="off" spellcheck="false" required aria-describedby="pairing-result">
+      <button type="submit">保存配对并同步</button>
+      <p id="pairing-result" class="detail" role="status"></p>
+    </form>
     <h2>添加要屏蔽的页面</h2>
     <ol>
       <li>打开坐功的「设置 → 网站屏蔽」。</li>

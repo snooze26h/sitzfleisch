@@ -654,6 +654,13 @@ async function handleAction(action: string, el: HTMLElement) {
     case "reveal-browser-extension":
       await invoke("reveal_browser_extension").catch((error) => toast(String(error)));
       break;
+    case "copy-browser-pairing":
+    case "reset-browser-pairing":
+      try {
+        const code = await invoke<string>(action === "reset-browser-pairing" ? "reset_browser_pairing" : "browser_pairing_code");
+        toast(await copyText(code) ? action === "reset-browser-pairing" ? "新配对码已复制，请在各浏览器扩展中重新配对。" : "配对码已复制，请粘贴到坐功扩展弹窗。" : "无法复制配对码，请检查剪贴板权限后重试。");
+      } catch (error) { toast(String(error)); }
+      break;
     case "recheck-blocking":
       if (await act("check_blocking")) toast(blockState().detail ?? blockState().title);
       break;
