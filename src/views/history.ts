@@ -42,9 +42,10 @@ function midnight(unix: number): Date {
  * 学习日正在进行的那一格画今天这一轮，亮到此刻为止。
  */
 function moonWall(days: ArchivedDay[]): string {
+  const weeks = ui.compact ? 6 : WALL_WEEKS;
   const today = midnight(ui.now);
   const first = new Date(today);
-  first.setDate(today.getDate() - ((today.getDay() + 6) % 7) - 7 * (WALL_WEEKS - 1));
+  first.setDate(today.getDate() - ((today.getDay() + 6) % 7) - 7 * (weeks - 1));
 
   // 同一天归档过两次（收工后又开了一天），墙上放学得多的那一次，列表里两条都在。
   const byDate = new Map<string, ArchivedDay>();
@@ -64,7 +65,7 @@ function moonWall(days: ArchivedDay[]): string {
   const columns: string[] = [`<span class="wall-corner"></span>`, ...WEEKDAY_MARKS.map((w) => `<span class="wall-wd">${w}</span>`)];
   const cursor = new Date(first);
   let lastMonth = -1;
-  for (let week = 0; week < WALL_WEEKS; week++) {
+  for (let week = 0; week < weeks; week++) {
     // 一列归它周一所在的月。第一列若紧挨着就换月，不再写，两个月份不挤在一起。
     const month = cursor.getMonth();
     const nextMonday = new Date(cursor);
@@ -97,7 +98,10 @@ function moonWall(days: ArchivedDay[]): string {
         columns.push(`<span class="day-cell"></span>`);
       } else if (time >= oldest) {
         missing++;
-        columns.push(`<span class="day-cell miss" title="${esc(`${dayLabel(time / 1000)}，没有记录`)}">${newMoon("tile")}</span>`);
+        const label = `${dayLabel(time / 1000)}，没有记录`;
+        columns.push(ui.compact
+          ? `<button class="day-cell miss" data-action="history-gap" data-id="${time / 1000}" aria-label="${esc(label)}">${newMoon("tile")}</button>`
+          : `<span class="day-cell miss" title="${esc(label)}">${newMoon("tile")}</span>`);
       } else {
         columns.push(`<span class="day-cell"></span>`);
       }
@@ -116,9 +120,9 @@ function moonWall(days: ArchivedDay[]): string {
       ${row("", "平均", avg)}
       ${row("", "最好", best)}
     </dl>`;
-  return `<section class="wall-block" id="wall">${sectionLabel(`最近 ${WALL_WEEKS} 周`)}
+  return `<section class="wall-block" id="wall">${sectionLabel(`最近 ${weeks} 周`)}
     <div class="wall-body">
-      <div class="wall-side"><div class="wall" role="group" aria-label="最近 ${WALL_WEEKS} 周，每天一轮月">${columns.join("")}</div><p class="t-note">点一轮月，查看当天的配额和记录。</p></div>
+      <div class="wall-side"><div class="wall" role="group" aria-label="最近 ${weeks} 周，每天一轮月">${columns.join("")}</div><p class="t-note">点一轮月，查看当天的配额和记录。</p></div>
       ${legend}
     </div>
   </section>`;

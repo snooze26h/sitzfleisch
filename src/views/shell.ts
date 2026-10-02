@@ -15,6 +15,13 @@ const NAV: [View, string][] = [
   ["settings", "设置"],
 ];
 
+export function mobileTabs(): string {
+  if (!ui.compact) return "";
+  return `<nav class="mobile-tabs" aria-label="主导航">${NAV.map(([view, label]) =>
+    `<button class="mobile-tab${ui.view === view ? " on" : ""}" data-action="tab" data-view="${view}" aria-current="${ui.view === view ? "page" : "false"}">${brandIcon(view)}<span>${label}</span></button>`
+  ).join("")}</nav>`;
+}
+
 export function sidebar(): string {
   // 进了设置，侧栏整个换成设置的分区：一区一页，不再一根滚动条到底。
   const inSettings = ui.view === "settings";

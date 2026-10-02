@@ -103,7 +103,7 @@ function activeBoard(d: Day): string {
   // 四块排成两行两列：这一格 | 今天这一轮月，今日配额 | 今天的总读数。
   // 左右两列上下各自对齐，窗口第一屏里放得下「此刻」和「今天」两个尺度。
   const moon = `<div class="moon-cell moon-stage" id="day-moon">${dayMoon(d)}</div>`;
-  return `<section class="today-top" id="today-top">${focusPanel(d)}${moon}${quotaPanel(d, suggestion?.category ?? null)}${dayReadings(d)}</section>
+  return `<section class="today-top${ui.compact && suggestion ? " choosing" : ""}" id="today-top">${focusPanel(d)}${moon}${quotaPanel(d, suggestion?.category ?? null)}${dayReadings(d)}</section>
     ${diagramBlock()}
     ${d.ledger.length ? logBlock(d) : ""}`;
 }
@@ -118,6 +118,11 @@ function dayReadings(d: Day): string {
     : "";
   const paused = secondary("已暂停", Math.max(0, d.paused_seconds - rest)) + secondary("已休息", rest);
   const moreItems = `${menuItem("复制今天的 Markdown 总结", "copy-today-md")}<div class="menu-sep"></div>${menuItem("返回开始页…", "discard-day", { danger: true })}${menuItem("收工归档…", "end-day", { danger: true })}`;
+  if (ui.compact) {
+    // 钟点与菜单通栏，给右侧的 40px / 28px 读数留足宽度。
+    return `<div class="day-heading"><header class="section-head"><h2 class="section-title">从 ${esc(wallClock(d.started_at))} 坐下</h2><span class="trail">${menuButton("more", ui.menu, icon("ellipsis-vertical", 17), moreItems, { iconOnly: true, ariaLabel: "更多操作" })}</span></header></div>
+      <aside class="day-readings" id="day-readings"><div class="net"><span class="engraved">已学</span><div class="figure"><span class="val">${esc(meter(netSeconds(d)))}</span><span class="of">/ ${esc(meter(quotaSeconds(d)))}</span></div></div>${paused}</aside>`;
+  }
   return `<aside class="day-readings" id="day-readings">
     <header class="section-head"><h2 class="section-title">从 ${esc(wallClock(d.started_at))} 坐下</h2><span class="trail">${menuButton("more", ui.menu, icon("ellipsis-vertical", 17), moreItems, { iconOnly: true, ariaLabel: "更多操作" })}</span></header>
     <div class="net"><span class="engraved">已学</span><div class="figure"><span class="val">${esc(meter(netSeconds(d)))}</span><span class="of">/ ${esc(meter(quotaSeconds(d)))}</span></div></div>

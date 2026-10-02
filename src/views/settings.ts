@@ -40,10 +40,15 @@ function sectionBody(id: string): string {
 
 export function settingsPage(): string {
   const sections = settingsSections();
+  if (ui.compact && ui.settingsIndex) {
+    return `<header class="page-heading"><div class="heading-copy"><h1>设置</h1></div></header><nav class="settings-index" aria-label="设置分区">${sections.map(([id, label, ic]) =>
+      `<button class="settings-link" data-action="jump-settings" data-id="${id}">${icon(ic, 20)}<span>${label}</span>${icon("chevron-right", 16, "chev")}</button>`
+    ).join("")}</nav>`;
+  }
   const current = sections.find(([id]) => id === ui.settingsSection) ?? sections[0];
   const [id, title] = current;
   // 一次只画一个分区：整页一根滚动条到底是上一版最难用的地方。
-  return `<header class="page-heading settings-heading"><div class="heading-copy"><h1>${esc(title)}</h1><p role="status">${ui.pendingPrefs > 0 ? "正在保存…" : ""}</p></div></header>`
+  return `${ui.compact ? `<button class="settings-back" data-action="settings-index" aria-label="返回设置索引">${icon("chevron-left", 18)}<span>设置</span></button>` : ""}<header class="page-heading settings-heading"><div class="heading-copy"><h1>${esc(title)}</h1><p role="status">${ui.pendingPrefs > 0 ? "正在保存…" : ""}</p></div></header>`
     + `<section class="settings-section" id="panel-${esc(id)}" tabindex="-1" aria-label="${esc(title)}">${sectionBody(id)}</section>`;
 }
 

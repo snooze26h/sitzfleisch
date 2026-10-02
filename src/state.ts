@@ -49,6 +49,7 @@ export interface CompletionEditor {
 
 export const ui = {
   platform: null as PlatformInfo | null,
+  compact: false,
   view: "today" as View,
   snap: null as Snapshot | null,
   // 历史不在每秒的推送里，单独存一份，收到带历史的快照时才换。
@@ -68,6 +69,7 @@ export const ui = {
   // 设置
   /** 设置里当前打开的分区；侧栏在设置页会整个换成分区列表。 */
   settingsSection: "projects",
+  settingsIndex: true,
   pendingPrefs: 0,
   expandedProject: null as string | null,
   hostDraft: "",

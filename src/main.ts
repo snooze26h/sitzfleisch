@@ -23,18 +23,20 @@ import {
   type DialogOutcome,
 } from "./state";
 import { btn } from "./components";
+import { icon } from "./icons";
 import { blockMinutes, suggest } from "./scheduler";
 import { mergeSnapshot } from "./snapshots";
 import { markdownForDay } from "./markdown";
-import { sidebar } from "./views/shell";
+import { mobileTabs, sidebar } from "./views/shell";
 import { todayPage } from "./views/today";
 import { historyEmpty, historyPage } from "./views/history";
-import { blockState, settingsPage } from "./views/settings";
+import { blockState, settingsPage, settingsSections } from "./views/settings";
 import { overlays, toastView } from "./views/overlays";
 import { drawDiagram } from "./views/diagram";
 import { loadMoon, paintMoons } from "./moon";
 
 const app = document.getElementById("app")!;
+const compactQuery = window.matchMedia("(max-width: 700px)");
 const TITLES: Record<View, string> = { today: "今天", history: "历史", settings: "设置" };
 let toastTimer = 0;
 let pulseTimer = 0;
@@ -76,19 +78,24 @@ function renderSuspended(): boolean {
 
 function render() {
   if (!ui.snap || !ui.platform || renderSuspended()) return;
+  ui.compact = compactQuery.matches;
   ui.now = nowUnix();
   reconcileSelection();
   const hadCompletion = !!ui.completion;
   promptPendingCompletion();
   // 状态文件损坏或来自更高版本时 App 不落盘：这件事必须在每一页都看得见。
   const protect = ui.snap.write_protected
-    ? `<div class="protect-banner" id="protect"><b>状态文件处于保护模式，本次运行不会保存任何改动。</b><span>${esc(ui.snap.write_protected)} 应用不会覆盖原文件：${esc(ui.snap.state_path)}</span></div>`
+    ? ui.compact
+      ? `<div class="protect-banner" id="protect"><b>状态文件处于保护模式，本次运行不会保存任何改动。</b><details class="banner-detail" id="protect-reason" data-preserve-open><summary>${icon("chevron-right", 14)}<span>查看原因</span></summary><p>${esc(ui.snap.write_protected)} 应用不会覆盖原文件：${esc(ui.snap.state_path)}</p></details></div>`
+      : `<div class="protect-banner" id="protect"><b>状态文件处于保护模式，本次运行不会保存任何改动。</b><span>${esc(ui.snap.write_protected)} 应用不会覆盖原文件：${esc(ui.snap.state_path)}</span></div>`
     : "";
   // 保护模式本来就不写盘，那不叫保存失败；只有真的写不进去才报这一条。
   const saveFailed = ui.snap.save_error && !ui.snap.write_protected
-    ? `<div class="protect-banner save-banner" id="save-banner"><b>上次保存失败：${esc(ui.snap.save_error)}。改动还在内存里，先别退出。</b>${btn("立即重试", { kind: "plate", action: "retry-save" })}</div>`
+    ? ui.compact
+      ? `<div class="protect-banner save-banner" id="save-banner"><b>上次保存失败，先别退出。</b><div class="banner-actions">${btn("立即重试", { kind: "plate", action: "retry-save" })}<details class="banner-detail" id="save-reason" data-preserve-open><summary>${icon("chevron-right", 14)}<span>查看原因</span></summary><p>上次保存失败：${esc(ui.snap.save_error)}。改动还在内存里，先别退出。</p></details></div></div>`
+      : `<div class="protect-banner save-banner" id="save-banner"><b>上次保存失败：${esc(ui.snap.save_error)}。改动还在内存里，先别退出。</b>${btn("立即重试", { kind: "plate", action: "retry-save" })}</div>`
     : "";
-  const html = `<div id="app"><div class="shell" id="shell">${sidebar()}<main class="content" id="content" tabindex="-1" data-scroll>${protect}${saveFailed}${pageHtml()}${toastView()}</main></div>${overlays()}</div>`;
+  const html = `<div id="app"><div class="shell" id="shell">${sidebar()}<main class="content" id="content" tabindex="-1" data-scroll>${protect}${saveFailed}${pageHtml()}${toastView()}</main>${mobileTabs()}</div>${overlays()}</div>`;
   morphdom(app, html, {
     onBeforeElUpdated(from, to) {
       // 正在编辑的控件不动，免得打断输入；它的其它属性会在失焦后的下一次渲染补上。
@@ -147,6 +154,7 @@ document.addEventListener("visibilitychange", () => {
   // 后台仍接纳快照；回来时立刻按最新状态补画，不必等下一次心跳。
   if (ui.platform?.mobile && !document.hidden) render();
 });
+compactQuery.addEventListener("change", render);
 
 new ResizeObserver(() => requestAnimationFrame(() => {
   if (renderSuspended()) return;
@@ -394,6 +402,8 @@ async function handleAction(action: string, el: HTMLElement) {
   switch (action) {
     case "tab": {
       const view = el.dataset.view as View;
+      if (view !== "today" && view !== "history" && view !== "settings") break;
+      if (view === "settings" && ui.view !== "settings") ui.settingsIndex = true;
       ui.view = view;
       ui.menu = null;
       render();
@@ -528,6 +538,11 @@ async function handleAction(action: string, el: HTMLElement) {
       break;
     }
     // ----- 历史 -----
+    case "history-gap": {
+      const at = Number(id);
+      if (Number.isSafeInteger(at) && at > 0 && at < ui.now) toast(`${dayLabel(at)}，没有记录。`);
+      break;
+    }
     case "open-chart-day": {
       const key = Number(id);
       if (!history().some((entry) => entry.day.started_at === key)) break;
@@ -572,10 +587,18 @@ async function handleAction(action: string, el: HTMLElement) {
     }
 
     // ----- 设置：项目 -----
+    case "settings-index":
+      ui.settingsIndex = true;
+      ui.menu = null;
+      render();
+      document.getElementById("content")?.scrollTo({ top: 0 });
+      break;
     case "jump-settings": {
+      if (!settingsSections().some(([section]) => section === id)) break;
       // 换分区＝换页：滚动条回顶，焦点落到新分区上，读屏也跟着走。
       ui.view = "settings";
       ui.settingsSection = id;
+      ui.settingsIndex = false;
       ui.expandedProject = null;
       render();
       document.getElementById("content")?.scrollTo({ top: 0 });
