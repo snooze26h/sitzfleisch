@@ -52,3 +52,11 @@ design/yue/source/
 
 # Android 迁移的本地进度、验证记录和截图不入库。
 /.android-work/
+
+# Android 签名、本机配置和构建缓存不入库；生成的工程源码保留。
+*.jks
+*.keystore
+src-tauri/gen/android/keystore.properties
+src-tauri/gen/android/local.properties
+src-tauri/gen/android/**/build/
+src-tauri/gen/android/.gradle/
