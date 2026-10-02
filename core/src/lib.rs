@@ -7,6 +7,9 @@
 
 use serde::{Deserialize, Serialize};
 
+mod alerts;
+pub use alerts::{AlertKind, PlannedAlert};
+
 pub const SCHEMA_VERSION: u32 = 5;
 pub const SUSPEND_GAP_SECONDS: i64 = 120;
 pub const MIN_BLOCK_MINUTES: i64 = 1;
