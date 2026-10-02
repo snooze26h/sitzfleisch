@@ -1,7 +1,7 @@
 // 主循环：快照进来 → 拼 HTML → morphdom 打补丁 → 画运行图。所有交互走事件委托。
 
 import morphdom from "morphdom";
-import { invoke, onExtendRequested, onQuitBlocked, onQuitBlockingFailed, onReminder, onSnapshot, platformInfo, setWindowTitle } from "./api";
+import { invoke, onBackRequested, onExtendRequested, onQuitBlocked, onQuitBlockingFailed, onReminder, onSnapshot, platformInfo, setWindowTitle } from "./api";
 import { conflictingHost, MAX_BLOCK_RULES, normalizeHost, normalizeUrl } from "./blocking";
 import type { Day, Preferences, Snapshot, View } from "./types";
 import { MAX_BLOCK_MINUTES, MIN_BLOCK_MINUTES, MAX_COMPLETION_NOTE_CHARS } from "./types";
@@ -37,6 +37,7 @@ import { loadMoon, paintMoons } from "./moon";
 
 const app = document.getElementById("app")!;
 const compactQuery = window.matchMedia("(max-width: 700px)");
+const touchQuery = window.matchMedia("(pointer: coarse)");
 const TITLES: Record<View, string> = { today: "今天", history: "历史", settings: "设置" };
 let toastTimer = 0;
 let pulseTimer = 0;
@@ -74,6 +75,11 @@ function reconcileSelection() {
 
 function renderSuspended(): boolean {
   return ui.platform?.mobile === true && document.hidden;
+}
+
+function canAutoFocus(): boolean {
+  // 手机上的自动聚焦会先弹键盘，把用户还没读完的弹层推走。
+  return ui.platform?.mobile !== true && !touchQuery.matches;
 }
 
 function render() {
@@ -131,7 +137,7 @@ function render() {
     const main = app.querySelector<HTMLElement>("[data-scroll]");
     if (main) main.scrollTop = 0;
   }
-  if (!hadCompletion && topOverlay() === "completion") app.querySelector<HTMLTextAreaElement>("#completion-note")?.focus({ preventScroll: true });
+  if (canAutoFocus() && !hadCompletion && topOverlay() === "completion") app.querySelector<HTMLTextAreaElement>("#completion-note")?.focus({ preventScroll: true });
   drawDiagrams();
   paintMoons(app);
   const title = TITLES[ui.view];
@@ -269,7 +275,7 @@ function ask(dialog: Omit<Dialog, "token">) {
 
 /** 打开或恢复可点状态之后，把焦点放回它自己指定的那个键。 */
 function focusDialog(dialog: Dialog) {
-  if (!dialog.focus) return;
+  if (!dialog.focus || !canAutoFocus()) return;
   if (dialog.focus === "input") {
     app.querySelector<HTMLInputElement>("#extension-minutes")?.focus();
     return;
@@ -290,8 +296,30 @@ function closeDialog() {
   if (topOverlay() === "completion") return;
   const opener = dialogOpener;
   dialogOpener = null;
-  if (opener?.isConnected) opener.focus();
-  else app.querySelector<HTMLElement>("#content")?.focus();
+  if (canAutoFocus()) {
+    if (opener?.isConnected) opener.focus();
+    else app.querySelector<HTMLElement>("#content")?.focus();
+  }
+}
+
+async function handleBack() {
+  const top = topOverlay();
+  if (top === "completion") { await cancelCompletion(); return; }
+  if (top === "dialog") { if (!dialogIsBusy()) closeDialog(); return; }
+  if (top === "removal") { ui.removal = null; render(); return; }
+  if (ui.menu) { ui.menu = null; render(); return; }
+  if (ui.view === "settings" && ui.compact && !ui.settingsIndex) {
+    ui.settingsIndex = true;
+    render();
+    document.getElementById("content")?.scrollTo({ top: 0 });
+    return;
+  }
+  if (ui.view !== "today") {
+    ui.view = "today";
+    render();
+    return;
+  }
+  await invoke("move_task_to_back").catch((error) => toast(String(error)));
 }
 
 /**
@@ -517,7 +545,7 @@ async function handleAction(action: string, el: HTMLElement) {
       if (recordDay && Number.isInteger(index) && recordDay.ledger[index]?.ended_at === Number(el.dataset.ended)) {
         openCompletion(recordDay, index, false);
         render();
-        app.querySelector<HTMLTextAreaElement>("#completion-note")?.focus();
+        if (canAutoFocus()) app.querySelector<HTMLTextAreaElement>("#completion-note")?.focus();
       }
       break;
     }
@@ -550,7 +578,7 @@ async function handleAction(action: string, el: HTMLElement) {
       ui.expandedDays.add(key);
       render();
       const row = document.getElementById(`archive-${key}`);
-      row?.focus({ preventScroll: true });
+      if (canAutoFocus()) row?.focus({ preventScroll: true });
       row?.scrollIntoView({ block: "start" });
       break;
     }
@@ -602,7 +630,7 @@ async function handleAction(action: string, el: HTMLElement) {
       ui.expandedProject = null;
       render();
       document.getElementById("content")?.scrollTo({ top: 0 });
-      document.getElementById(`panel-${id}`)?.focus({ preventScroll: true });
+      if (canAutoFocus()) document.getElementById(`panel-${id}`)?.focus({ preventScroll: true });
       break;
     }
     case "add-project": {
@@ -671,7 +699,7 @@ async function handleAction(action: string, el: HTMLElement) {
     case "removal-next":
       if (ui.removal) ui.removal.step = 2;
       render();
-      setTimeout(() => app.querySelector<HTMLInputElement>("[data-input='removal']")?.focus(), 30);
+      if (canAutoFocus()) setTimeout(() => app.querySelector<HTMLInputElement>("[data-input='removal']")?.focus(), 30);
       break;
     case "removal-back":
       if (ui.removal) {
@@ -855,7 +883,7 @@ async function saveCompletion(skip: boolean) {
     applySnapshot(snap);
     if (ui.completion === editor) ui.completion = null;
     render();
-    if (!topOverlay()) app.querySelector<HTMLElement>("#content")?.focus({ preventScroll: true });
+    if (canAutoFocus() && !topOverlay()) app.querySelector<HTMLElement>("#content")?.focus({ preventScroll: true });
   } catch (error) {
     editor.busy = false;
     editor.error = String(error);
@@ -876,7 +904,7 @@ async function cancelCompletion() {
   else {
     ui.completion = null;
     render();
-    if (!topOverlay()) app.querySelector<HTMLElement>("#content")?.focus({ preventScroll: true });
+    if (canAutoFocus() && !topOverlay()) app.querySelector<HTMLElement>("#content")?.focus({ preventScroll: true });
   }
 }
 
@@ -1223,6 +1251,7 @@ if (initialView === "today" || initialView === "history" || initialView === "set
 async function start() {
   // 先拿能力再渲染首屏，手机上不会闪过桌面入口。
   ui.platform = await platformInfo();
+  if (ui.platform.mobile) await onBackRequested(handleBack);
   await onSnapshot(applySnapshot);
   void onExtendRequested(openExtensionDialog);
   // 退出流程只属于桌面，手机不监听这些事件。

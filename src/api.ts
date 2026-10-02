@@ -64,6 +64,16 @@ export async function onExtendRequested(callback: () => void): Promise<void> {
   if (inTauri) await listen("timer://extend", callback);
 }
 
+export async function onBackRequested(callback: () => void | Promise<void>): Promise<void> {
+  if (inTauri) {
+    const { onBackButtonPress } = await import("@tauri-apps/api/app");
+    // 注册后原生会把返回键交给界面，按界面层级退回，不走 WebView 历史。
+    await onBackButtonPress(() => { void callback(); });
+    return;
+  }
+  (await mock()).mockBackButton(callback);
+}
+
 /**
  * 退出前那次保存没写进去：外壳不退出，把原因推过来让界面问用户。
  * 浏览器里没有进程可退，触发口由 mock 挂到控制台（`qaQuitBlocked()`）。

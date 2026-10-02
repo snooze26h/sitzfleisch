@@ -102,6 +102,8 @@ declare global {
     /** QA：浏览器里没有「退出」这个动作，退出前保存失败的对话框从控制台叫出来。 */
     qaQuitBlocked?: () => void;
     qaQuitBlockingFailed?: () => void;
+    qaBackButton?: () => void | Promise<void>;
+    qaBackgrounded?: number;
   }
 }
 
@@ -661,6 +663,10 @@ export async function mockInvoke<T>(command: string, args: Record<string, unknow
   const a = args as Record<string, never>;
   await new Promise((resolve) => setTimeout(resolve, 8));
   switch (command) {
+    case "move_task_to_back":
+      if (!mobile) throw "退到后台仅支持 Android。";
+      window.qaBackgrounded = (window.qaBackgrounded ?? 0) + 1;
+      return undefined as T;
     case "platform_info":
       return structuredClone(platform) as T;
     case "get_snapshot":
@@ -765,6 +771,10 @@ export function mockQuitBlocked(callback: (reason: string) => void) {
 
 export function mockQuitBlockingFailed(callback: (reason: string) => void) {
   window.qaQuitBlockingFailed = () => callback("（mock）系统授权被取消");
+}
+
+export function mockBackButton(callback: () => void | Promise<void>) {
+  window.qaBackButton = callback;
 }
 
 window.setInterval(() => {
