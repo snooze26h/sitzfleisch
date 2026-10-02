@@ -41,6 +41,7 @@ let pulseTimer = 0;
 let prevSnap: Snapshot | null = null;
 let historyRevision = -1;
 let lastView: View | null = null;
+let lastWindowTitle: string | null = null;
 let preferencesQueue: Promise<void> = Promise.resolve();
 let dialogToken = 0;
 /** 把框叫出来的那个元素；关框之后焦点还给它。 */
@@ -69,8 +70,12 @@ function reconcileSelection() {
   ui.minutesDraft = null;
 }
 
+function renderSuspended(): boolean {
+  return ui.platform?.mobile === true && document.hidden;
+}
+
 function render() {
-  if (!ui.snap || !ui.platform) return;
+  if (!ui.snap || !ui.platform || renderSuspended()) return;
   ui.now = nowUnix();
   reconcileSelection();
   const hadCompletion = !!ui.completion;
@@ -122,10 +127,15 @@ function render() {
   if (!hadCompletion && topOverlay() === "completion") app.querySelector<HTMLTextAreaElement>("#completion-note")?.focus({ preventScroll: true });
   drawDiagrams();
   paintMoons(app);
-  if (hasFeature("window_title")) void setWindowTitle(TITLES[ui.view]);
+  const title = TITLES[ui.view];
+  if (hasFeature("window_title") && (!ui.platform.mobile || title !== lastWindowTitle)) {
+    lastWindowTitle = title;
+    void setWindowTitle(title);
+  }
 }
 
 function drawDiagrams() {
+  if (renderSuspended()) return;
   const d = day();
   if (!d) return;
   for (const canvas of app.querySelectorAll<HTMLCanvasElement>("canvas[data-diagram]")) {
@@ -133,12 +143,20 @@ function drawDiagrams() {
   }
 }
 
+document.addEventListener("visibilitychange", () => {
+  // 后台仍接纳快照；回来时立刻按最新状态补画，不必等下一次心跳。
+  if (ui.platform?.mobile && !document.hidden) render();
+});
+
 new ResizeObserver(() => requestAnimationFrame(() => {
+  if (renderSuspended()) return;
   drawDiagrams();
   paintMoons(app);
 })).observe(app);
 // 月面资料图读好之前，页面上的月亮是空的；读好后立刻补画一次。
-loadMoon(() => paintMoons(app));
+loadMoon(() => {
+  if (!renderSuspended()) paintMoons(app);
+});
 // 字体装载完成前 canvas 会用回退字体画刻度，装好后重画一次。
 void document.fonts.ready.then(() => drawDiagrams());
 
