@@ -9,10 +9,10 @@ import { esc, meter, shortNameFrom } from "../format";
 import { icon } from "../icons";
 import { PROJECT_ICON_CHOICES } from "../project-icons";
 import { btn, labelled, select, stepper, toggle } from "../components";
-import { BLOCK_OPTIONS, BREAK_OPTIONS, IDLE_OPTIONS, day, prefs, profileTotalMinutes, ui, withValue } from "../state";
+import { BLOCK_OPTIONS, BREAK_OPTIONS, IDLE_OPTIONS, day, hasFeature, prefs, profileTotalMinutes, ui, withValue } from "../state";
 
 /** 设置的分区：id → 标题 + 图标。侧栏在设置页直接列它们，一区一页。 */
-export const SETTINGS_SECTIONS: [string, string, string][] = [
+const SETTINGS_SECTIONS: [string, string, string][] = [
   ["projects", "项目", "layers"],
   ["tiers", "时间安排", "sliders-horizontal"],
   ["rhythm", "节奏", "timer"],
@@ -21,6 +21,10 @@ export const SETTINGS_SECTIONS: [string, string, string][] = [
   ["notify", "提醒", "bell"],
   ["about", "关于", "info"],
 ];
+
+export function settingsSections(): [string, string, string][] {
+  return SETTINGS_SECTIONS.filter(([id]) => id !== "hosts" || hasFeature("website_blocking"));
+}
 
 function sectionBody(id: string): string {
   switch (id) {
@@ -35,7 +39,8 @@ function sectionBody(id: string): string {
 }
 
 export function settingsPage(): string {
-  const current = SETTINGS_SECTIONS.find(([id]) => id === ui.settingsSection) ?? SETTINGS_SECTIONS[0];
+  const sections = settingsSections();
+  const current = sections.find(([id]) => id === ui.settingsSection) ?? sections[0];
   const [id, title] = current;
   // 一次只画一个分区：整页一根滚动条到底是上一版最难用的地方。
   return `<header class="page-heading settings-heading"><div class="heading-copy"><h1>${esc(title)}</h1><p role="status">${ui.pendingPrefs > 0 ? "正在保存…" : ""}</p></div></header>`
@@ -131,7 +136,7 @@ function rhythm(): string {
     )}
     ${uniform === 0 ? p.categories.map((c) => settingRow(c.name, "默认专注时长", select({ change: "block-length", value: c.default_block_minutes, options: withValue(BLOCK_OPTIONS, c.default_block_minutes).map((n) => ({ value: n, label: `${n} 分` })), width: 104, label: `${c.name}默认专注时长`, data: { id: c.id } }))).join("") : ""}
     ${settingRow("暂停提醒", "未开格时定时提醒。", select({ change: "idle", value: idle, options: withValue(IDLE_OPTIONS, idle).map((n) => ({ value: n, label: n === 0 ? "关闭" : `${n} 分` })), width: 104, label: "暂停提醒间隔" }))}
-    ${settingRow("登录时自动启动", ui.autostart === null ? "正在读取系统设置…" : "", toggle({ change: "autostart", checked: ui.autostart === true, disabled: ui.autostart === null, label: "登录时自动启动" }))}
+    ${hasFeature("autostart") ? settingRow("登录时自动启动", ui.autostart === null ? "正在读取系统设置…" : "", toggle({ change: "autostart", checked: ui.autostart === true, disabled: ui.autostart === null, label: "登录时自动启动" })) : ""}
   </div>`;
 }
 
@@ -233,7 +238,7 @@ function websiteBlock(): string {
     ${ruleRows("url", p.blocked_urls)}
     <details id="blocking-help" class="blocking-help" data-preserve-open><summary>${icon("chevron-right", 14)}<span>安装与用法</span></summary>
       <ol><li>打开 Chrome 的 <span class="mono sel">chrome://extensions</span> 或 Edge 的 <span class="mono sel">edge://extensions</span>，开启「开发者模式」。</li><li>点击下方按钮找到扩展目录，再在浏览器中选择「加载已解压的扩展程序」，选中该目录。</li><li>复制上方配对码，打开坐功扩展弹窗，粘贴后点击「保存配对并同步」。</li><li>保持坐功运行；扩展约每 30 秒尝试同步规则。上方显示「已同步」后，在学习日期间生效。</li></ol>
-      ${btn("打开扩展文件夹", { kind: "plate", action: "reveal-browser-extension" })}
+      ${hasFeature("browser_extension") ? btn("打开扩展文件夹", { kind: "plate", action: "reveal-browser-extension" }) : ""}
       <p class="blocking-note">抖音推荐页：<span class="mono sel">https://www.douyin.com/?recommend=1</span>。收藏页路径不同，可以正常打开。</p>
       <p class="blocking-note">B 站首页：<span class="mono sel">https://www.bilibili.com/</span>。视频页 <span class="mono sel">/video/…</span> 可以正常打开。</p>
       <p class="blocking-note">精确匹配逐字比较：路径、参数、顺序或 # 后内容不同都会放行。拦截发生在页面导航之后，可能一闪。</p>
@@ -251,10 +256,13 @@ function websiteBlock(): string {
 
 function bodyPanel(): string {
   const p = prefs();
-  const water = `${btn("试听", { kind: "quiet", action: "water-sound-test", disabled: !p.sound_enabled || !inTauri, title: inTauri ? "试听喝水提示音" : "请在桌面应用中试听" })}${toggle({ change: "water-on", checked: p.water_reminder_enabled, label: "喝水提醒" })}`;
+  const water = `${hasFeature("in_app_sound_toggle") ? btn("试听", { kind: "quiet", action: "water-sound-test", disabled: !p.sound_enabled || !inTauri, title: inTauri ? "试听喝水提示音" : "请在桌面应用中试听" }) : ""}${toggle({ change: "water-on", checked: p.water_reminder_enabled, label: "喝水提醒" })}`;
+  const waterDetail = ui.platform?.mobile
+    ? "学习日进行中，按本地时钟在整点和半点提醒。暂停、休息时也提醒；本次暂停满 2 小时后停止，开下一格后恢复。错过不补发，提示音由系统通知设置管理。"
+    : "按本地时钟，整点和半点提醒。暂停、休息时也提醒；休眠错过不补发。使用独立提示音。";
   const stretch = `${p.stretch_reminder_enabled ? stepper({ bind: "stretch-min", value: p.stretch_reminder_minutes, label: `${p.stretch_reminder_minutes} 分`, min: 15, max: 180, step: 5, ariaLabel: "起身提醒间隔" }) : ""}${toggle({ change: "stretch-on", checked: p.stretch_reminder_enabled, label: "起身护眼提醒" })}`;
   return `<div class="settings-panel rows">
-    ${settingRow("喝水提醒", "按本地时钟，整点和半点提醒。暂停、休息时也提醒；休眠错过不补发。使用独立提示音。", water)}
+    ${settingRow("喝水提醒", waterDetail, water)}
     ${settingRow("起身 / 护眼提醒", "", stretch)}
   </div>`;
 }
@@ -281,8 +289,8 @@ function notificationPanel(): string {
     ? ""
     : btn("申请权限", { kind: "plate", action: "notif-recheck" });
   return `<div class="settings-panel rows">
-    ${settingRow("提示音", "提醒时播放声音。", toggle({ change: "sound", checked: p.sound_enabled, label: "提示音" }))}
-    ${settingRow("系统通知", notificationStatusText(), `${grant}${btn("试一条", { kind: "plate", action: "notif-test" })}${btn("打开系统设置", { kind: "quiet", action: "notif-open" })}`)}
+    ${hasFeature("in_app_sound_toggle") ? settingRow("提示音", "提醒时播放声音。", toggle({ change: "sound", checked: p.sound_enabled, label: "提示音" })) : ""}
+    ${settingRow("系统通知", notificationStatusText(), `${grant}${btn("试一条", { kind: "plate", action: "notif-test" })}${hasFeature("system_settings") ? btn("打开系统设置", { kind: "quiet", action: "notif-open" }) : ""}`)}
   </div>`;
 }
 
@@ -291,6 +299,6 @@ function notificationPanel(): string {
 function aboutPanel(): string {
   return `<div class="settings-panel rows">
     ${settingRow("版本", "", `<span class="mono t-note">${esc(ui.appVersion ?? "读取中…")}</span>`)}
-    ${settingRow("数据只存在本机", ui.snap!.state_path, btn("在 Finder 中显示", { kind: "quiet", action: "reveal-state" }))}
+    ${settingRow("数据只存在本机", hasFeature("reveal_state_file") ? ui.snap!.state_path : "", hasFeature("reveal_state_file") ? btn("在 Finder 中显示", { kind: "quiet", action: "reveal-state" }) : "")}
   </div>`;
 }

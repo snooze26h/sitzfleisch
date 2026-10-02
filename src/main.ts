@@ -1,7 +1,7 @@
 // 主循环：快照进来 → 拼 HTML → morphdom 打补丁 → 画运行图。所有交互走事件委托。
 
 import morphdom from "morphdom";
-import { invoke, onExtendRequested, onQuitBlocked, onQuitBlockingFailed, onReminder, onSnapshot, setWindowTitle } from "./api";
+import { invoke, onExtendRequested, onQuitBlocked, onQuitBlockingFailed, onReminder, onSnapshot, platformInfo, setWindowTitle } from "./api";
 import { conflictingHost, MAX_BLOCK_RULES, normalizeHost, normalizeUrl } from "./blocking";
 import type { Day, Preferences, Snapshot, View } from "./types";
 import { MAX_BLOCK_MINUTES, MIN_BLOCK_MINUTES, MAX_COMPLETION_NOTE_CHARS } from "./types";
@@ -12,6 +12,7 @@ import {
   day,
   dialogIsBusy,
   history,
+  hasFeature,
   isPaused,
   nameOf,
   prefs,
@@ -69,7 +70,7 @@ function reconcileSelection() {
 }
 
 function render() {
-  if (!ui.snap) return;
+  if (!ui.snap || !ui.platform) return;
   ui.now = nowUnix();
   reconcileSelection();
   const hadCompletion = !!ui.completion;
@@ -121,7 +122,7 @@ function render() {
   if (!hadCompletion && topOverlay() === "completion") app.querySelector<HTMLTextAreaElement>("#completion-note")?.focus({ preventScroll: true });
   drawDiagrams();
   paintMoons(app);
-  void setWindowTitle(TITLES[ui.view]);
+  if (hasFeature("window_title")) void setWindowTitle(TITLES[ui.view]);
 }
 
 function drawDiagrams() {
@@ -348,10 +349,12 @@ async function loadSettingsExtras() {
   } catch {
     ui.notificationStatus = "unknown";
   }
-  try {
-    ui.autostart = await invoke<boolean>("autostart_status");
-  } catch {
-    ui.autostart = false;
+  if (hasFeature("autostart")) {
+    try {
+      ui.autostart = await invoke<boolean>("autostart_status");
+    } catch {
+      ui.autostart = false;
+    }
   }
   try {
     ui.appVersion = await invoke<string>("app_version");
@@ -824,7 +827,7 @@ async function cancelCompletion() {
   if (ui.completion.automatic) {
     // 自动弹出的框按 Esc 等于「先跳过」；已经写了字的话不能就这么丢掉。
     if (ui.completion.draft.trim()) {
-      toast("按 ⌘↩ 保存这段记录，或点「先跳过」。");
+      toast(ui.platform?.mobile ? "点「保存记录」保存，或点「先跳过」" : "按 ⌘↩ 保存这段记录，或点「先跳过」。");
       return;
     }
     await saveCompletion(true);
@@ -1176,70 +1179,75 @@ const params = new URLSearchParams(location.hash.replace(/^#/, ""));
 const initialView = params.get("view");
 if (initialView === "today" || initialView === "history" || initialView === "settings") ui.view = initialView;
 
-void onSnapshot(applySnapshot);
-void onExtendRequested(openExtensionDialog);
-// 退出前那次保存没写进去：外壳不退出，在这里问用户怎么办。
-void onQuitBlocked((reason) => {
-  ask({
-    id: QUIT_DIALOG_ID,
-    title: "退出前保存失败",
-    message: `${reason}。现在退出会丢掉自上次成功保存以来的改动。`,
-    confirmLabel: "重试并退出",
-    cancelLabel: "留在这里",
-    destructive: false,
-    focus: "confirm",
-    onConfirm: async (self): Promise<"keep"> => {
-      // 成功的话进程已经没了，走不到下一行；失败就把最新的原因换进正文，框留着。
-      try {
-        await invoke("quit_after_save");
-      } catch (error) {
-        // 认 token 不认 id：await 期间这个框若已被换掉，改的就是别人的正文了。
-        if (ui.dialog?.token === self.token) ui.dialog.message = `${String(error)}。现在退出会丢掉自上次成功保存以来的改动。`;
-      }
-      return "keep";
-    },
-    alt: {
-      label: "不保存退出",
-      onAlt: async () => {
-        try {
-          await invoke("quit_without_saving");
-        } catch (error) {
-          toast(String(error));
-        }
-      },
-    },
+async function start() {
+  // 先拿能力再渲染首屏，手机上不会闪过桌面入口。
+  ui.platform = await platformInfo();
+  await onSnapshot(applySnapshot);
+  void onExtendRequested(openExtensionDialog);
+  // 退出流程只属于桌面，手机不监听这些事件。
+  if (hasFeature("quit_flow")) {
+    void onQuitBlocked((reason) => {
+      ask({
+        id: QUIT_DIALOG_ID,
+        title: "退出前保存失败",
+        message: `${reason}。现在退出会丢掉自上次成功保存以来的改动。`,
+        confirmLabel: "重试并退出",
+        cancelLabel: "留在这里",
+        destructive: false,
+        focus: "confirm",
+        onConfirm: async (self): Promise<"keep"> => {
+          // 成功的话进程已经没了，走不到下一行；失败就把最新的原因换进正文，框留着。
+          try {
+            await invoke("quit_after_save");
+          } catch (error) {
+            // 认 token 不认 id：await 期间这个框若已被换掉，改的就是别人的正文了。
+            if (ui.dialog?.token === self.token) ui.dialog.message = `${String(error)}。现在退出会丢掉自上次成功保存以来的改动。`;
+          }
+          return "keep";
+        },
+        alt: {
+          label: "不保存退出",
+          onAlt: async () => {
+            try {
+              await invoke("quit_without_saving");
+            } catch (error) {
+              toast(String(error));
+            }
+          },
+        },
+      });
+    });
+    void onQuitBlockingFailed((reason) => {
+      const why = reason.replace(/[。.]\s*$/, "");
+      ask({
+        id: QUIT_DIALOG_ID,
+        title: "退出暂未完成",
+        message: `网站屏蔽还没有解除：${why}。重试并完成系统授权后会自动退出；也可以仍然退出，系统里的整站规则会留到下次打开坐功再解除。`,
+        confirmLabel: "重试并退出", cancelLabel: "留在这里", destructive: false, focus: "confirm",
+        onConfirm: async (self): Promise<"keep"> => {
+          try { await invoke("quit_after_save"); }
+          catch (error) {
+            if (ui.dialog?.token === self.token) ui.dialog.message = `退出暂未完成：${String(error)}`;
+          }
+          return "keep";
+        },
+        // 授权一再被拒或托管标记损坏时，重试永远不会成功，不能把人困在应用里。
+        alt: {
+          label: "仍然退出",
+          onAlt: async () => {
+            try { await invoke("quit_leaving_blocking"); }
+            catch (error) { toast(String(error)); }
+          },
+        },
+      });
+    });
+  }
+  // 系统通知发不出去时（未签名的本地构建很常见），至少界面里看得见。
+  void onReminder((reminder) => {
+    // 系统横幅显不显示由系统设置决定，App 判断不了，所以界面里这条一律也出。
+    toast(`${reminder.title}：${reminder.body}`, 8000);
   });
-});
-void onQuitBlockingFailed((reason) => {
-  const why = reason.replace(/[。.]\s*$/, "");
-  ask({
-    id: QUIT_DIALOG_ID,
-    title: "退出暂未完成",
-    message: `网站屏蔽还没有解除：${why}。重试并完成系统授权后会自动退出；也可以仍然退出，系统里的整站规则会留到下次打开坐功再解除。`,
-    confirmLabel: "重试并退出", cancelLabel: "留在这里", destructive: false, focus: "confirm",
-    onConfirm: async (self): Promise<"keep"> => {
-      try { await invoke("quit_after_save"); }
-      catch (error) {
-        if (ui.dialog?.token === self.token) ui.dialog.message = `退出暂未完成：${String(error)}`;
-      }
-      return "keep";
-    },
-    // 授权一再被拒或托管标记损坏时，重试永远不会成功，不能把人困在应用里。
-    alt: {
-      label: "仍然退出",
-      onAlt: async () => {
-        try { await invoke("quit_leaving_blocking"); }
-        catch (error) { toast(String(error)); }
-      },
-    },
-  });
-});
-// 系统通知发不出去时（未签名的本地构建很常见），至少界面里看得见。
-void onReminder((reminder) => {
-  // 系统横幅显不显示由系统设置决定，App 判断不了，所以界面里这条一律也出。
-  toast(`${reminder.title}：${reminder.body}`, 8000);
-});
-void invoke<Snapshot>("get_snapshot").then((snap) => {
+  const snap = await invoke<Snapshot>("get_snapshot");
   const qaView = snap.initial_view;
   if (!initialView && (qaView === "today" || qaView === "history" || qaView === "settings")) ui.view = qaView;
   applySnapshot(snap);
@@ -1250,4 +1258,8 @@ void invoke<Snapshot>("get_snapshot").then((snap) => {
       if (main) main.scrollTop = snap.initial_scroll ?? 0;
     });
   }
+}
+
+void start().catch((error) => {
+  app.innerHTML = `<p role="alert">无法启动坐功：${esc(String(error))}。请重新打开应用。</p>`;
 });

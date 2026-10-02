@@ -3,7 +3,7 @@
 
 import { invoke as tauriInvoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
-import type { Snapshot } from "./types";
+import type { PlatformInfo, Snapshot } from "./types";
 
 export const inTauri = typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
 
@@ -15,6 +15,29 @@ function mock() {
 export async function invoke<T>(command: string, args: Record<string, unknown> = {}): Promise<T> {
   if (inTauri) return tauriInvoke<T>(command, args);
   return (await mock()).mockInvoke<T>(command, args);
+}
+
+let platformPromise: Promise<PlatformInfo> | null = null;
+const PLATFORM_FEATURES: (keyof PlatformInfo["features"])[] = [
+  "tray", "website_blocking", "browser_extension", "autostart", "reveal_state_file",
+  "window_title", "quit_flow", "in_app_sound_toggle", "system_settings", "exact_alarm_status",
+];
+
+function validPlatformInfo(value: unknown): value is PlatformInfo {
+  if (value === null || typeof value !== "object") return false;
+  const info = value as Partial<PlatformInfo>;
+  return typeof info.os === "string" && /^[a-z][a-z0-9_-]{0,31}$/.test(info.os)
+    && typeof info.mobile === "boolean" && info.features !== null && typeof info.features === "object"
+    && PLATFORM_FEATURES.every((feature) => typeof info.features?.[feature] === "boolean");
+}
+
+/** 能力跟着外壳走，窗口变窄不代表它变成了手机。 */
+export function platformInfo(): Promise<PlatformInfo> {
+  return (platformPromise ??= invoke<unknown>("platform_info").then((info) => {
+    if (!validPlatformInfo(info)) throw new Error("平台能力数据格式无效");
+    document.documentElement.dataset.platform = info.os;
+    return info;
+  }));
 }
 
 export async function onSnapshot(callback: (snapshot: Snapshot) => void): Promise<void> {

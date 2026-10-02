@@ -6,7 +6,7 @@ import { brandIcon, brandMark } from "../brand";
 import { dayMoon } from "../moon";
 import { suggest } from "../scheduler";
 import type { View } from "../types";
-import { SETTINGS_SECTIONS } from "./settings";
+import { settingsSections } from "./settings";
 import { breakRemaining, day, iconOf, isPaused, nameOf, netSeconds, pauseNowSeconds, prefs, quotaSeconds, resting, shortName, ui } from "../state";
 
 const NAV: [View, string][] = [
@@ -21,7 +21,7 @@ export function sidebar(): string {
   const nav = inSettings
     ? `<button class="nav-item back" data-action="tab" data-view="today" aria-label="离开设置，回到今天">${icon("chevron-left", 16)}<span>返回</span></button>`
       + `<div class="nav-sep"></div>`
-      + SETTINGS_SECTIONS.map(
+      + settingsSections().map(
           ([id, label, ic]) =>
             `<button class="nav-item${ui.settingsSection === id ? " on" : ""}" data-action="jump-settings" data-id="${id}" aria-current="${ui.settingsSection === id ? "page" : "false"}"><i class="rail"></i>${icon(ic, 16)}<span>${label}</span></button>`
         ).join("")

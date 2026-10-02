@@ -1,6 +1,6 @@
 // 界面自己的状态（不落盘）：当前页、草稿、展开项、菜单与对话框。
 
-import type { ArchivedDay, CategoryDef, CategoryState, Day, Preferences, Snapshot, View } from "./types";
+import type { ArchivedDay, CategoryDef, CategoryState, Day, PlatformInfo, Preferences, Snapshot, View } from "./types";
 import { nowUnix, shortNameFrom } from "./format";
 
 /** 处理完这一下之后要不要留着框：返回 `"keep"` 就留着（重试还没成功），否则关掉。 */
@@ -48,6 +48,7 @@ export interface CompletionEditor {
 }
 
 export const ui = {
+  platform: null as PlatformInfo | null,
   view: "today" as View,
   snap: null as Snapshot | null,
   // 历史不在每秒的推送里，单独存一份，收到带历史的快照时才换。
@@ -82,6 +83,10 @@ export const ui = {
   menu: null as string | null,
   toast: null as { message: string } | null,
 };
+
+export function hasFeature(feature: keyof PlatformInfo["features"]): boolean {
+  return ui.platform?.features[feature] ?? false;
+}
 
 /**
  * 当前这个对话框正在跑一次异步动作吗。**显示与事件处理必须共用这一条判据**：
