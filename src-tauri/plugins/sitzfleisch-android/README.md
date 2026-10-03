@@ -37,6 +37,10 @@ python3 src-tauri/plugins/sitzfleisch-android/scripts/generate_water.py
 
 ## 当前范围
 
-L1-1 提供平台与原生底座。计时仍沿用 A1 的策略，墙钟路径由 L1-2 接入；闹钟预排、差分和 alarms.json 由 L1-3 接入。通知权限说明和设置界面由线 ③ 完成。当前阶段不能作为锁屏提醒已经通过的证据。
+L1-2 已接入墙钟与前后台生命周期；L1-3 在每轮心跳取完 take_due_* 后计算未来 12 小时的提醒。应用内提示与系统排程共用文案和 D10/D11 过滤。仅取消未来超过 1 秒且已不需要的项，已经弹出与即将弹出的项只退出本地账本。所有排程显式传 icon / channel_id / UTC 整秒 date / allow_while_idle。
+
+applied 原子保存到应用 data_dir/alarms.json，限制大小、数量、ID 与渠道；临时文件独占创建并刷盘后改名。冷启动读取旧账本，保留已显示通知，只重新确认未来排程以恢复 force-stop / 重启清掉的系统闹钟。损坏或链接到其他位置的账本保留原样，本次从规则构建内存排程。手机重启后、打开应用前不会提醒；强行停止期间也不会提醒，重开不补发已错过的通知。
+
+界面线已整合手机布局、权限说明和提醒设置。构建与单元检查不能代替真机锁屏、Doze、厂商菜单、字体和用户目视验收；这些按 PROGRESS.md 单列状态。
 
 依据：[Android 通知构建 API](https://developer.android.com/reference/androidx/core/app/NotificationCompat.Builder)、[系统设置 Intent](https://developer.android.com/reference/android/provider/Settings)、[通知渠道](https://developer.android.com/reference/android/app/NotificationChannel)。

@@ -32,9 +32,4 @@ class MainActivity : TauriActivity() {
     ViewCompat.requestApplyInsets(content)
   }
 
-  // JS 返回键监听尚未接管时，只把任务移到后台，保留当前学习日。
-  @Suppress("DEPRECATION", "OVERRIDE_DEPRECATION")
-  override fun onBackPressed() {
-    moveTaskToBack(true)
-  }
 }

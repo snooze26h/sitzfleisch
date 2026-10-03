@@ -38,6 +38,7 @@ mod windows_hosts;
 mod space_preview;
 mod platform;
 mod alerts;
+mod alarm_store;
 mod clock_policy;
 use clock_policy::{advance_time, resume_time, show_due_banners, TimePolicy};
 #[cfg(target_os = "android")]
@@ -608,28 +609,31 @@ impl AlertSound {
     }
 }
 
-fn take_due_reminder_notifications(state: &mut core::State) -> Vec<(&'static str, String, AlertSound)> {
+fn local_reminder_seconds(state: &core::State) -> u32 {
+    if cfg!(mobile) && !state.preferences.water_reminder_enabled { return 3600; }
     let local = Local.timestamp_opt(state.last_tick, 0).single();
-    let local_seconds = local.map(|time| time.minute() * 60 + time.second()).unwrap_or(3600);
+    local.map(|time| time.minute() * 60 + time.second()).unwrap_or(3600)
+}
+
+#[cfg(any(not(target_os = "android"), test))]
+fn take_due_reminder_notifications(state: &mut core::State) -> Vec<(&'static str, String, AlertSound)> {
+    let local_seconds = local_reminder_seconds(state);
+    take_due_reminder_notifications_at(state, local_seconds)
+}
+
+fn take_due_reminder_notifications_at(state: &mut core::State, local_seconds: u32) -> Vec<(&'static str, String, AlertSound)> {
     let water_due = state.take_due_water_reminder(local_seconds);
     let (_, stretch_due, idle_due) = state.take_due_reminders();
     let mut notifications = Vec::new();
-    if water_due {
-        notifications.push(("喝点水吧", "忙了一阵，喝几口水再继续。".into(), AlertSound::Water));
-    }
-    if stretch_due {
-        notifications.push((
-            "起来活动一下",
-            format!("已经连续在座 {} 分钟。", state.preferences.stretch_reminder_minutes),
-            AlertSound::Standard,
-        ));
-    }
-    if idle_due {
-        // 提醒计数器每次投递后归零，文案仍要从本次暂停的起点累计，包含休息和休眠。
-        let paused_minutes = state.day.as_ref()
-            .map(|day| day.current_pause_seconds(state.last_tick) / 60)
-            .unwrap_or(0);
-        notifications.push(("还没开格", format!("已经暂停 {paused_minutes} 分钟了。"), AlertSound::Standard));
+    for (due, kind) in [(water_due, core::AlertKind::Water), (stretch_due, core::AlertKind::Stretch), (idle_due, core::AlertKind::Idle)] {
+        if !due { continue; }
+        let pause_started_at = state.day.as_ref().filter(|day| day.is_paused())
+            .and_then(|day| day.pauses.last()).map(|pause| pause.started_at);
+        let alert = core::PlannedAlert { kind, at: state.last_tick, pause_started_at };
+        if cfg!(mobile) && !alerts::mobile_alert_allowed(state, &alert) { continue; }
+        let (title, body, _) = alerts::alert_copy(kind, state, &alert);
+        let sound = if kind == core::AlertKind::Water { AlertSound::Water } else { AlertSound::Standard };
+        notifications.push((title, body, sound));
     }
     notifications
 }
@@ -650,10 +654,13 @@ fn notify(app: &AppHandle, title: &str, body: &str, sound: AlertSound) {
         "body": body,
         "system": delivered,
     }));
-    let sound_on = app.state::<Shared>().state.lock().unwrap().preferences.sound_enabled;
-    if sound_on {
-        play_alert_sound(sound);
+    #[cfg(desktop)]
+    {
+        let sound_on = app.state::<Shared>().state.lock().unwrap().preferences.sound_enabled;
+        if sound_on { play_alert_sound(sound); }
     }
+    #[cfg(mobile)]
+    let _ = sound;
     // 人多半在别的 App 里，Dock 上跳一下比什么都直接。
     #[cfg(desktop)]
     if let Some(window) = app.get_webview_window("main") {
@@ -674,7 +681,7 @@ fn play_alert_sound(sound: AlertSound) {
     }
 }
 
-#[cfg(mobile)]
+#[cfg(all(mobile, not(target_os = "android")))]
 fn play_alert_sound(_sound: AlertSound) {}
 
 /// 推进一次时间，并报告这一下是不是把格自然走完了（台账多了一条，格也不在了）。
@@ -687,7 +694,47 @@ fn tick_reporting_finish(state: &mut core::State, now: i64, policy: TimePolicy) 
 }
 
 fn notify_block_finished(app: &AppHandle) {
-    notify(app, "这一格走完了", "时间已计入。打开坐功，记录这段时间完成了什么。", AlertSound::Standard);
+    let (title, body, _) = {
+        let shared = app.state::<Shared>();
+        let state = shared.state.lock().unwrap();
+        let alert = core::PlannedAlert { kind: core::AlertKind::BlockFinished, at: state.last_tick, pause_started_at: None };
+        alerts::alert_copy(alert.kind, &state, &alert)
+    };
+    notify(app, title, &body, AlertSound::Standard);
+}
+
+struct HeartbeatStep {
+    focus_done: bool,
+    break_done: bool,
+    reminders: Vec<(&'static str, String, AlertSound)>,
+    show_banners: bool,
+    #[cfg(target_os = "android")]
+    desired: Vec<alerts::AppliedAlarm>,
+    #[cfg(target_os = "android")]
+    status: alerts::StatusModel,
+    #[cfg(target_os = "android")]
+    now: i64,
+}
+
+fn advance_heartbeat(state: &mut core::State, now: i64) -> HeartbeatStep {
+    let show_banners = show_due_banners(time_policy(), now.saturating_sub(state.last_tick));
+    let focus_done = tick_reporting_finish(state, now, time_policy());
+    #[cfg(target_os = "android")]
+    let local_seconds = local_reminder_seconds(state);
+    #[cfg(target_os = "android")]
+    let reminders = take_due_reminder_notifications_at(state, local_seconds);
+    #[cfg(not(target_os = "android"))]
+    let reminders = take_due_reminder_notifications(state);
+    let break_done = state.take_due_break(now);
+    HeartbeatStep {
+        focus_done, break_done, reminders, show_banners,
+        #[cfg(target_os = "android")]
+        desired: alerts::desired_alarms(state, local_seconds),
+        #[cfg(target_os = "android")]
+        status: alerts::status_model(state),
+        #[cfg(target_os = "android")]
+        now: state.last_tick,
+    }
 }
 
 fn mutate(
@@ -1772,7 +1819,7 @@ pub fn run() {
                 tray_display: Mutex::new(None),
             });
             #[cfg(target_os = "android")]
-            app.manage(mobile::MobileShared::default());
+            app.manage(mobile::MobileShared::new(dir.join("alarms.json")));
             #[cfg(desktop)]
             browser_blocking::start(app.handle(), isolated);
             #[cfg(target_os = "macos")]
@@ -1808,42 +1855,49 @@ pub fn run() {
                 #[cfg(target_os = "android")]
                 {
                     mobile::set_heartbeat_thread(&handle);
-                    mobile::sync_status(&handle);
                 }
+                #[cfg(target_os = "android")]
+                let mut initial_sync = true;
                 let mut ticks: u64 = 0;
                 loop {
                     #[cfg(not(target_os = "android"))]
                     thread::sleep(Duration::from_secs(1));
                     #[cfg(target_os = "android")]
-                    thread::park_timeout(Duration::from_secs(1));
+                    {
+                        if initial_sync { initial_sync = false; }
+                        else { thread::park_timeout(Duration::from_secs(1)); }
+                    }
                     ticks += 1;
-                    let (focus_done, break_done, reminders, show_banners) = {
+                    let step = {
                         let shared = handle.state::<Shared>();
                         let mut state = shared.state.lock().unwrap();
                         let now = now_unix();
-                        let show_banners = show_due_banners(time_policy(), now.saturating_sub(state.last_tick));
-                        let focus_done = tick_reporting_finish(&mut state, now, time_policy());
-                        let reminders = take_due_reminder_notifications(&mut state);
-                        let break_done = state.take_due_break(now);
+                        let step = advance_heartbeat(&mut state, now);
                         drop(state);
                         if ticks.is_multiple_of(30) {
                             save(&shared);
                         }
-                        (focus_done, break_done, reminders, show_banners)
+                        step
                     };
-                    if focus_done && show_banners {
+                    if step.focus_done && step.show_banners {
                         notify_block_finished(&handle);
                     }
-                    if break_done && show_banners {
-                        notify(&handle, "休息结束", "开下一格吧。", AlertSound::Standard);
+                    if step.break_done && step.show_banners {
+                        let (title, body, _) = {
+                            let shared = handle.state::<Shared>();
+                            let state = shared.state.lock().unwrap();
+                            let alert = core::PlannedAlert { kind: core::AlertKind::RestOver, at: state.last_tick, pause_started_at: None };
+                            alerts::alert_copy(alert.kind, &state, &alert)
+                        };
+                        notify(&handle, title, &body, AlertSound::Standard);
                     }
-                    if show_banners {
-                        for (title, body, sound) in reminders {
+                    if step.show_banners {
+                        for (title, body, sound) in step.reminders {
                             notify(&handle, title, &body, sound);
                         }
                     }
                     #[cfg(target_os = "android")]
-                    mobile::sync_status(&handle);
+                    mobile::sync(&handle, step.desired, step.status, step.now);
                     broadcast(&handle);
                 }
             });
