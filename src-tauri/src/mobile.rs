@@ -12,13 +12,14 @@ use crate::{alerts::{status_model, StatusModel}, platform::{SettingsRequest, Sys
 /// 移动端缓存与唤醒句柄独立于 Shared，规则状态仍由原来的 Rust 状态锁管理。
 pub struct MobileShared {
     dirty: AtomicBool,
+    suspended: AtomicBool,
     heartbeat: Mutex<Option<Thread>>,
     status: Mutex<Option<StatusModel>>,
 }
 
 impl Default for MobileShared {
     fn default() -> Self {
-        Self { dirty: AtomicBool::new(true), heartbeat: Mutex::new(None), status: Mutex::new(None) }
+        Self { dirty: AtomicBool::new(true), suspended: AtomicBool::new(false), heartbeat: Mutex::new(None), status: Mutex::new(None) }
     }
 }
 
@@ -37,6 +38,16 @@ pub fn mark_dirty(app: &AppHandle) {
     mobile.dirty.store(true, Ordering::SeqCst);
     let heartbeat = mobile.heartbeat.lock().unwrap().clone();
     if let Some(thread) = heartbeat { thread.unpark(); }
+}
+
+pub fn is_suspended(app: &AppHandle) -> bool {
+    app.state::<MobileShared>().suspended.load(Ordering::SeqCst)
+}
+
+pub fn on_lifecycle(app: &AppHandle, suspended: bool) {
+    app.state::<MobileShared>().suspended.store(suspended, Ordering::SeqCst);
+    if suspended { crate::save(&app.state::<Shared>()); }
+    mark_dirty(app);
 }
 
 /// 只由心跳调用；先释放 Shared 锁，再串行调用原生插件，失败不记为已应用。

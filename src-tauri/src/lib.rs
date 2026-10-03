@@ -17,7 +17,9 @@ use tauri::menu::{Menu, MenuItem, PredefinedMenuItem};
 #[cfg(desktop)]
 use tauri::tray::TrayIconBuilder;
 #[cfg(desktop)]
-use tauri::{WindowEvent, Wry};
+use tauri::Wry;
+#[cfg(any(desktop, target_os = "android"))]
+use tauri::WindowEvent;
 use tauri::{AppHandle, Emitter, Manager, State};
 #[cfg(desktop)]
 use tauri_plugin_autostart::ManagerExt;
@@ -36,6 +38,8 @@ mod windows_hosts;
 mod space_preview;
 mod platform;
 mod alerts;
+mod clock_policy;
+use clock_policy::{advance_time, resume_time, show_due_banners, TimePolicy};
 #[cfg(target_os = "android")]
 mod mobile;
 
@@ -263,6 +267,10 @@ struct Snapshot {
 
 fn now_unix() -> i64 {
     SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs() as i64).unwrap_or(0)
+}
+
+fn time_policy() -> TimePolicy {
+    if cfg!(mobile) { TimePolicy::WallClock } else { TimePolicy::Heartbeat }
 }
 
 fn snapshot(shared: &Shared, with_history: bool) -> Snapshot {
@@ -529,6 +537,8 @@ fn configure_tray_digits(tray: &tauri::tray::TrayIcon) -> tauri::Result<()> {
 }
 
 fn broadcast(app: &AppHandle) {
+    #[cfg(target_os = "android")]
+    if mobile::is_suspended(app) { return; }
     let shared = app.state::<Shared>();
     // 心跳推送不带历史：历史只在命令返回和首次拉取时随快照走一遍。
     let snap = snapshot(&shared, false);
@@ -628,6 +638,8 @@ fn take_due_reminder_notifications(state: &mut core::State) -> Vec<(&'static str
 /// 所以提醒一次走四条路，任何一条都能让人察觉：
 /// 系统通知 · 界面提示条 · 一声响 · Dock 图标跳一下。
 fn notify(app: &AppHandle, title: &str, body: &str, sound: AlertSound) {
+    #[cfg(target_os = "android")]
+    if mobile::is_suspended(app) { return; }
     #[cfg(desktop)]
     let delivered = app.notification().builder().title(title).body(body).show().is_ok();
     // Android 系统通知由后续的移动端排程负责；A1 只保留应用内提示，避免同步插件阻塞主线程。
@@ -667,10 +679,10 @@ fn play_alert_sound(_sound: AlertSound) {}
 
 /// 推进一次时间，并报告这一下是不是把格自然走完了（台账多了一条，格也不在了）。
 /// 心跳和命令都会推进时间：格恰好在某个命令那一下走完时，通知也得发，不能只看心跳。
-fn tick_reporting_finish(state: &mut core::State, now: i64) -> bool {
+fn tick_reporting_finish(state: &mut core::State, now: i64, policy: TimePolicy) -> bool {
     let had_timer = state.day.as_ref().is_some_and(|d| d.timer.is_some());
     let ledger_before = state.day.as_ref().map_or(0, |d| d.ledger.len());
-    state.tick(now);
+    advance_time(state, now, policy);
     had_timer && state.day.as_ref().is_some_and(|d| d.ledger.len() > ledger_before && d.timer.is_none())
 }
 
@@ -686,12 +698,14 @@ fn mutate(
     if shared.exiting.load(Ordering::SeqCst) {
         return Err("正在退出坐功，请等待网站屏蔽解除。".into());
     }
-    let (outcome, finished) = {
+    let (outcome, finished, show_banners) = {
         let mut state = shared.state.lock().unwrap();
-        let finished = tick_reporting_finish(&mut state, now_unix());
-        (op(&mut state), finished)
+        let now = now_unix();
+        let show_banners = show_due_banners(time_policy(), now.saturating_sub(state.last_tick));
+        let finished = tick_reporting_finish(&mut state, now, time_policy());
+        (op(&mut state), finished, show_banners)
     };
-    if finished {
+    if finished && show_banners {
         notify_block_finished(app);
     }
     outcome.map_err(|e| e.to_string())?;
@@ -1447,7 +1461,7 @@ fn load_initial(path: &PathBuf) -> (core::State, Option<String>) {
     match decide_initial(fs::read_to_string(path).map_err(|e| e.kind())) {
         InitialPlan::Loaded(state) => {
             let mut state = *state;
-            state.resume_after_restart(now_unix());
+            resume_time(&mut state, now_unix(), time_policy());
             (state, None)
         }
         InitialPlan::Protected(message) => (core::State::new(now_unix()), Some(message)),
@@ -1655,7 +1669,7 @@ fn final_save_on_exit(shared: &Shared) {
     if !should_save_on_exit(*shared.declined_final_save.lock().unwrap()) {
         return;
     }
-    shared.state.lock().unwrap().tick(now_unix());
+    advance_time(&mut shared.state.lock().unwrap(), now_unix(), time_policy());
     save(shared);
 }
 
@@ -1803,27 +1817,30 @@ pub fn run() {
                     #[cfg(target_os = "android")]
                     thread::park_timeout(Duration::from_secs(1));
                     ticks += 1;
-                    let (focus_done, break_done, reminders) = {
+                    let (focus_done, break_done, reminders, show_banners) = {
                         let shared = handle.state::<Shared>();
                         let mut state = shared.state.lock().unwrap();
                         let now = now_unix();
-                        let focus_done = tick_reporting_finish(&mut state, now);
+                        let show_banners = show_due_banners(time_policy(), now.saturating_sub(state.last_tick));
+                        let focus_done = tick_reporting_finish(&mut state, now, time_policy());
                         let reminders = take_due_reminder_notifications(&mut state);
                         let break_done = state.take_due_break(now);
                         drop(state);
                         if ticks.is_multiple_of(30) {
                             save(&shared);
                         }
-                        (focus_done, break_done, reminders)
+                        (focus_done, break_done, reminders, show_banners)
                     };
-                    if focus_done {
+                    if focus_done && show_banners {
                         notify_block_finished(&handle);
                     }
-                    if break_done {
+                    if break_done && show_banners {
                         notify(&handle, "休息结束", "开下一格吧。", AlertSound::Standard);
                     }
-                    for (title, body, sound) in reminders {
-                        notify(&handle, title, &body, sound);
+                    if show_banners {
+                        for (title, body, sound) in reminders {
+                            notify(&handle, title, &body, sound);
+                        }
                     }
                     #[cfg(target_os = "android")]
                     mobile::sync_status(&handle);
@@ -1872,6 +1889,14 @@ pub fn run() {
                 api.prevent_close();
             }
         });
+    #[cfg(target_os = "android")]
+    let builder = builder.on_window_event(|window, event| {
+        match event {
+            WindowEvent::Suspended => mobile::on_lifecycle(window.app_handle(), true),
+            WindowEvent::Resumed => mobile::on_lifecycle(window.app_handle(), false),
+            _ => {},
+        }
+    });
     builder.invoke_handler(tauri::generate_handler![
             get_snapshot,
             browser_pairing_code,
