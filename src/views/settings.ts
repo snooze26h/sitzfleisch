@@ -4,15 +4,15 @@
 import type { CategoryDef, ProfileDef } from "../types";
 import { inTauri } from "../api";
 import { conflictingHost, MAX_BLOCK_RULES, normalizeHost, normalizeUrl } from "../blocking";
-import { ICON_NAMED } from "../types";
+import { ICON_NAMED, NOTIFICATION_CHANNELS } from "../types";
 import { esc, meter, shortNameFrom } from "../format";
 import { icon } from "../icons";
 import { PROJECT_ICON_CHOICES } from "../project-icons";
 import { btn, labelled, select, stepper, toggle } from "../components";
-import { BLOCK_OPTIONS, BREAK_OPTIONS, IDLE_OPTIONS, day, prefs, profileTotalMinutes, ui, withValue } from "../state";
+import { BLOCK_OPTIONS, BREAK_OPTIONS, IDLE_OPTIONS, day, hasFeature, prefs, profileTotalMinutes, ui, withValue } from "../state";
 
 /** 设置的分区：id → 标题 + 图标。侧栏在设置页直接列它们，一区一页。 */
-export const SETTINGS_SECTIONS: [string, string, string][] = [
+const SETTINGS_SECTIONS: [string, string, string][] = [
   ["projects", "项目", "layers"],
   ["tiers", "时间安排", "sliders-horizontal"],
   ["rhythm", "节奏", "timer"],
@@ -21,6 +21,10 @@ export const SETTINGS_SECTIONS: [string, string, string][] = [
   ["notify", "提醒", "bell"],
   ["about", "关于", "info"],
 ];
+
+export function settingsSections(): [string, string, string][] {
+  return SETTINGS_SECTIONS.filter(([id]) => id !== "hosts" || hasFeature("website_blocking"));
+}
 
 function sectionBody(id: string): string {
   switch (id) {
@@ -35,15 +39,21 @@ function sectionBody(id: string): string {
 }
 
 export function settingsPage(): string {
-  const current = SETTINGS_SECTIONS.find(([id]) => id === ui.settingsSection) ?? SETTINGS_SECTIONS[0];
+  const sections = settingsSections();
+  if (ui.compact && ui.settingsIndex) {
+    return `<header class="page-heading"><div class="heading-copy"><h1>设置</h1></div></header><nav class="settings-index" aria-label="设置分区">${sections.map(([id, label, ic]) =>
+      `<button class="settings-link" data-action="jump-settings" data-id="${id}">${icon(ic, 20)}<span>${label}</span>${icon("chevron-right", 16, "chev")}</button>`
+    ).join("")}</nav>`;
+  }
+  const current = sections.find(([id]) => id === ui.settingsSection) ?? sections[0];
   const [id, title] = current;
   // 一次只画一个分区：整页一根滚动条到底是上一版最难用的地方。
-  return `<header class="page-heading settings-heading"><div class="heading-copy"><h1>${esc(title)}</h1><p role="status">${ui.pendingPrefs > 0 ? "正在保存…" : ""}</p></div></header>`
+  return `${ui.compact ? `<button class="settings-back" data-action="settings-index" aria-label="返回设置索引">${icon("chevron-left", 18)}<span>设置</span></button>` : ""}<header class="page-heading settings-heading"><div class="heading-copy"><h1>${esc(title)}</h1><p role="status">${ui.pendingPrefs > 0 ? "正在保存…" : ""}</p></div></header>`
     + `<section class="settings-section" id="panel-${esc(id)}" tabindex="-1" aria-label="${esc(title)}">${sectionBody(id)}</section>`;
 }
 
-function settingRow(title: string, detail: string, control: string): string {
-  return `<div class="setting-row"><span class="titles"><b>${esc(title)}</b>${detail ? `<span>${esc(detail)}</span>` : ""}</span><span class="ctl">${control}</span></div>`;
+function settingRow(title: string, detail: string, control: string, cls = ""): string {
+  return `<div class="setting-row${cls ? ` ${cls}` : ""}"><span class="titles"><b>${esc(title)}</b>${detail ? `<span>${esc(detail)}</span>` : ""}</span><span class="ctl">${control}</span></div>`;
 }
 
 // ---------- 项目 ----------
@@ -131,7 +141,7 @@ function rhythm(): string {
     )}
     ${uniform === 0 ? p.categories.map((c) => settingRow(c.name, "默认专注时长", select({ change: "block-length", value: c.default_block_minutes, options: withValue(BLOCK_OPTIONS, c.default_block_minutes).map((n) => ({ value: n, label: `${n} 分` })), width: 104, label: `${c.name}默认专注时长`, data: { id: c.id } }))).join("") : ""}
     ${settingRow("暂停提醒", "未开格时定时提醒。", select({ change: "idle", value: idle, options: withValue(IDLE_OPTIONS, idle).map((n) => ({ value: n, label: n === 0 ? "关闭" : `${n} 分` })), width: 104, label: "暂停提醒间隔" }))}
-    ${settingRow("登录时自动启动", ui.autostart === null ? "正在读取系统设置…" : "", toggle({ change: "autostart", checked: ui.autostart === true, disabled: ui.autostart === null, label: "登录时自动启动" }))}
+    ${hasFeature("autostart") ? settingRow("登录时自动启动", ui.autostart === null ? "正在读取系统设置…" : "", toggle({ change: "autostart", checked: ui.autostart === true, disabled: ui.autostart === null, label: "登录时自动启动" })) : ""}
   </div>`;
 }
 
@@ -233,7 +243,7 @@ function websiteBlock(): string {
     ${ruleRows("url", p.blocked_urls)}
     <details id="blocking-help" class="blocking-help" data-preserve-open><summary>${icon("chevron-right", 14)}<span>安装与用法</span></summary>
       <ol><li>打开 Chrome 的 <span class="mono sel">chrome://extensions</span> 或 Edge 的 <span class="mono sel">edge://extensions</span>，开启「开发者模式」。</li><li>点击下方按钮找到扩展目录，再在浏览器中选择「加载已解压的扩展程序」，选中该目录。</li><li>复制上方配对码，打开坐功扩展弹窗，粘贴后点击「保存配对并同步」。</li><li>保持坐功运行；扩展约每 30 秒尝试同步规则。上方显示「已同步」后，在学习日期间生效。</li></ol>
-      ${btn("打开扩展文件夹", { kind: "plate", action: "reveal-browser-extension" })}
+      ${hasFeature("browser_extension") ? btn("打开扩展文件夹", { kind: "plate", action: "reveal-browser-extension" }) : ""}
       <p class="blocking-note">抖音推荐页：<span class="mono sel">https://www.douyin.com/?recommend=1</span>。收藏页路径不同，可以正常打开。</p>
       <p class="blocking-note">B 站首页：<span class="mono sel">https://www.bilibili.com/</span>。视频页 <span class="mono sel">/video/…</span> 可以正常打开。</p>
       <p class="blocking-note">精确匹配逐字比较：路径、参数、顺序或 # 后内容不同都会放行。拦截发生在页面导航之后，可能一闪。</p>
@@ -251,10 +261,13 @@ function websiteBlock(): string {
 
 function bodyPanel(): string {
   const p = prefs();
-  const water = `${btn("试听", { kind: "quiet", action: "water-sound-test", disabled: !p.sound_enabled || !inTauri, title: inTauri ? "试听喝水提示音" : "请在桌面应用中试听" })}${toggle({ change: "water-on", checked: p.water_reminder_enabled, label: "喝水提醒" })}`;
+  const water = `${hasFeature("in_app_sound_toggle") ? btn("试听", { kind: "quiet", action: "water-sound-test", disabled: !p.sound_enabled || !inTauri, title: inTauri ? "试听喝水提示音" : "请在桌面应用中试听" }) : ""}${toggle({ change: "water-on", checked: p.water_reminder_enabled, label: "喝水提醒" })}`;
+  const waterDetail = ui.platform?.mobile
+    ? "学习日进行中，按本地时钟在整点和半点提醒。暂停、休息时也提醒；本次暂停满 2 小时后停止，开下一格后恢复。错过不补发，提示音由系统通知设置管理。"
+    : "按本地时钟，整点和半点提醒。暂停、休息时也提醒；休眠错过不补发。使用独立提示音。";
   const stretch = `${p.stretch_reminder_enabled ? stepper({ bind: "stretch-min", value: p.stretch_reminder_minutes, label: `${p.stretch_reminder_minutes} 分`, min: 15, max: 180, step: 5, ariaLabel: "起身提醒间隔" }) : ""}${toggle({ change: "stretch-on", checked: p.stretch_reminder_enabled, label: "起身护眼提醒" })}`;
   return `<div class="settings-panel rows">
-    ${settingRow("喝水提醒", "按本地时钟，整点和半点提醒。暂停、休息时也提醒；休眠错过不补发。使用独立提示音。", water)}
+    ${settingRow("喝水提醒", waterDetail, water)}
     ${settingRow("起身 / 护眼提醒", "", stretch)}
   </div>`;
 }
@@ -275,14 +288,46 @@ function notificationStatusText(): string {
 }
 
 function notificationPanel(): string {
+  if (ui.platform?.mobile) return mobileNotificationPanel();
   const p = prefs();
   // 还没授权时才给「申请权限」——授权过之后这个按钮点了也没有反应，留着只会误导。
   const grant = ui.notificationStatus === "granted" || ui.notificationStatus === "checking"
     ? ""
     : btn("申请权限", { kind: "plate", action: "notif-recheck" });
   return `<div class="settings-panel rows">
-    ${settingRow("提示音", "提醒时播放声音。", toggle({ change: "sound", checked: p.sound_enabled, label: "提示音" }))}
+    ${hasFeature("in_app_sound_toggle") ? settingRow("提示音", "提醒时播放声音。", toggle({ change: "sound", checked: p.sound_enabled, label: "提示音" })) : ""}
     ${settingRow("系统通知", notificationStatusText(), `${grant}${btn("试一条", { kind: "plate", action: "notif-test" })}${btn("打开系统设置", { kind: "quiet", action: "notif-open" })}`)}
+  </div>`;
+}
+
+function mobileNotificationPanel(): string {
+  const s = ui.systemStatus;
+  const open = (target: string, channel?: string) => btn("去设置", { kind: "plate", action: "system-settings", data: { target, ...(channel ? { channel } : {}) }, disabled: !hasFeature("system_settings") });
+  const state = (allowed: boolean | undefined, yes: string, no: string) => allowed === undefined ? "尚未读取" : allowed ? yes : no;
+  const names = { timer: "计时", body: "身体提醒", water: "喝水", status: "进行中" };
+  // 渠道以系统开关为准；「进行中」本来就静音，不把无声误报成异常。
+  const channelIssues = s ? NOTIFICATION_CHANNELS.filter((id) => !s.channels.find((c) => c.id === id)?.enabled) : [];
+  const channelSummary = !s ? "尚未读取通知渠道状态。"
+    : channelIssues.length ? `${channelIssues.length} 个通知渠道需要处理。`
+    : "计时、身体提醒、喝水和进行中通知均已开启。";
+  const channels = settingRow("通知渠道", channelSummary, "") + channelIssues.map((id) => {
+    const channel = s!.channels.find((c) => c.id === id);
+    const detail = channel
+      ? `${channel.enabled ? "已开启" : "已关闭"} · ${channel.sound ? "有提示音" : "静音"} · ${channel.vibration ? "振动开启" : "振动关闭"}`
+      : "尚未创建，重新打开应用后再检查。";
+    return settingRow(names[id], detail, open("channel", id));
+  }).join("");
+  const honor = /honor|huawei|荣耀|华为/i.test(s?.manufacturer ?? "");
+  const guidance = honor
+    ? "在「设置 → 应用和服务 → 应用启动管理 → 坐功」中关闭自动管理，允许自启动、关联启动和后台活动。最近任务里下拉坐功卡片并锁定，避免一键清理。菜单名称以手机实际显示为准。"
+    : "在系统的应用或电池设置中允许坐功后台活动。可在最近任务中锁定坐功，避免一键清理。菜单名称以手机实际显示为准。";
+  return `<div class="reminder-settings">
+    <div class="reminder-check"><p role="status">${ui.systemStatusLoading ? "正在读取系统状态…" : ui.systemStatusError ? "暂时无法读取提醒状态，请重新检查。" : "从系统设置返回后，会自动重新检查。"}</p>${btn("重新检查", { kind: "quiet", action: "system-recheck", disabled: ui.systemStatusLoading })}</div>
+    <div class="settings-panel rows">${settingRow("通知权限", state(s?.notificationsEnabled, "已允许", "未开启；锁屏后到点不会提醒。"), open("app_notifications"))}</div>
+    <section class="reminder-section"><div class="settings-panel rows">${channels}</div></section>
+    <div class="settings-panel rows">${settingRow("精确闹钟", state(s?.canScheduleExactAlarms, "已允许", "未允许；到点提醒可能延迟。"), open("exact_alarm"))}${settingRow("系统电池优化", state(s?.ignoringBatteryOptimizations, "已豁免", "尚未豁免"), open("battery"))}${settingRow("后台运行", guidance, open("app_details"), "background-guidance")}</div>
+    <div class="reminder-tests">${btn("发测试通知", { kind: "plate", action: "mobile-notif-test" })}${btn("试听喝水提醒", { kind: "plate", action: "mobile-water-test" })}</div>
+    <p class="t-note">在系统通知设置中，分别开启计时、身体提醒和喝水的横幅、锁屏通知与响铃。声音与振动由系统管理。</p>
   </div>`;
 }
 
@@ -291,6 +336,6 @@ function notificationPanel(): string {
 function aboutPanel(): string {
   return `<div class="settings-panel rows">
     ${settingRow("版本", "", `<span class="mono t-note">${esc(ui.appVersion ?? "读取中…")}</span>`)}
-    ${settingRow("数据只存在本机", ui.snap!.state_path, btn("在 Finder 中显示", { kind: "quiet", action: "reveal-state" }))}
+    ${settingRow("数据只存在本机", hasFeature("reveal_state_file") ? ui.snap!.state_path : "", hasFeature("reveal_state_file") ? btn("在 Finder 中显示", { kind: "quiet", action: "reveal-state" }) : "")}
   </div>`;
 }
