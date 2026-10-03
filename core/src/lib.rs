@@ -1,10 +1,14 @@
 //! 坐功的规则核心，纯逻辑、无平台依赖：
 //! - 一天从「开始今天」那一刻起算，永不跨午夜重置；
 //! - 心跳间隔超过 120 秒判为挂起，那段空档一秒都不记；进程不在的空档不吃宽限；
+//! - 墙钟计时补足空档，专注格仍在真实终点结算，余量归入休息或暂停；
 //! - 专注格完成后按真实用时计入配额，主动放弃的格只留在台账上；
 //! - 项目与那份计划是用户数据（preferences），学习日开始时把配额拷走冻结。
 
 use serde::{Deserialize, Serialize};
+
+mod alerts;
+pub use alerts::{AlertKind, PlannedAlert};
 
 pub const SCHEMA_VERSION: u32 = 5;
 pub const SUSPEND_GAP_SECONDS: i64 = 120;
@@ -644,6 +648,11 @@ pub struct State {
 
 pub type RuleResult = Result<(), &'static str>;
 
+/// 保留下一个提醒的相位；恰好到点时留给 take_due_reminders 消费一次。
+fn fold_reminder_counter(seconds: i64, interval: i64) -> i64 {
+    if seconds <= interval || interval <= 0 { seconds } else { (seconds - 1) % interval + 1 }
+}
+
 impl State {
     pub fn new(now: i64) -> Self {
         State {
@@ -677,6 +686,12 @@ impl State {
         day.suspend_seconds += gap;
         day.paused_seconds += gap;
         day.begin_pause(gap_started_at, true);
+    }
+
+    /// 手机冷启动补足墙钟空档，保留手动暂停；喝水仍从启动时刻重新观察，不追发。
+    pub fn resume_after_restart_wall_clock(&mut self, now: i64) {
+        self.water_clock_checked_at = Some(now);
+        self.advance(now, None);
     }
 
     /// 外壳提供本地钟面在本小时内的秒数，避免把 UTC 半点误当成所有时区的半点。
@@ -742,15 +757,52 @@ impl State {
     /// 一切时间只经由心跳计入。暂停时什么都不走；
     /// 间隔超过 120 秒（休眠、进程被挂起）判为挂起：只记挂起账，并自动暂停。单独锁屏时心跳照走，不算。
     pub fn tick(&mut self, now: i64) {
+        self.advance(now, Some(SUSPEND_GAP_SECONDS));
+    }
+
+    /// 手机按墙钟补时：锁屏和进程挂起不自动暂停，也不增加挂起账。
+    pub fn tick_wall_clock(&mut self, now: i64) {
+        self.advance(now, None);
+    }
+
+    fn needs_wall_clock_boundary_step(&self) -> bool {
+        let Some(day) = &self.day else { return false };
+        if day.timer.is_none() {
+            // 旧状态缺少暂停段时，先补回暂停，再按休息截止时刻计算后面的闲置。
+            !day.is_paused() || (self.preferences.idle_reminder_enabled
+                && self.preferences.idle_reminder_minutes.checked_mul(60)
+                    .is_some_and(|interval| interval > 0 && day.paused_without_block >= interval))
+        } else {
+            !day.is_paused() && self.preferences.stretch_reminder_enabled
+                && self.preferences.stretch_reminder_minutes.checked_mul(60)
+                    .is_some_and(|interval| interval > 0 && day.seated_since_relief >= interval)
+        }
+    }
+
+    fn advance(&mut self, now: i64, max_gap: Option<i64>) {
         let delta = now - self.last_tick;
+        if max_gap.is_none() && delta > 1 && self.needs_wall_clock_boundary_step() {
+            // 刚启用提醒或立刻开下一格时，旧计数可能已经到期；逐秒路径会在下一秒归零。
+            // 最多拆出一秒，保留「先格结束、后取提醒」的顺序，其余空档仍一次折叠。
+            self.advance(self.last_tick + 1, None);
+            self.take_due_reminders();
+            self.advance(now, None);
+            return;
+        }
         self.last_tick = now;
         if delta <= 0 {
             return;
         }
         let fallback_break = self.preferences.break_minutes;
+        let wall_clock = max_gap.is_none();
+        // 两秒空档也可能跨提醒边界；折叠后才能和逐秒消费提醒保留相同余量。
+        let fold_stretch = wall_clock && delta > 1 && self.preferences.stretch_reminder_enabled;
+        let fold_idle = wall_clock && delta > 1 && self.preferences.idle_reminder_enabled;
+        let stretch_minutes = self.preferences.stretch_reminder_minutes;
+        let idle_minutes = self.preferences.idle_reminder_minutes;
         let Some(day) = &mut self.day else { return };
 
-        if delta > SUSPEND_GAP_SECONDS {
+        if max_gap.is_some_and(|limit| delta > limit) {
             // 休眠：一秒都不补，但这段空档要落在暂停段里，从空档开始那一刻算起。
             day.suspend_seconds += delta;
             day.paused_seconds += delta;
@@ -761,8 +813,20 @@ impl State {
         if day.is_paused() {
             day.paused_seconds += delta;
             // 闲置提醒只数休息以外的暂停：休息是排好的，休息中不催开格，休息结束另有提醒。
-            if day.timer.is_none() && !day.resting(now) {
-                day.paused_without_block += delta;
+            if day.timer.is_none() {
+                if wall_clock {
+                    // 空档跨过休息终点时，只把终点以后的秒数计入闲置。
+                    let inc = match day.break_until {
+                        Some(until) => delta.min((now - until).max(0)),
+                        None => delta,
+                    };
+                    day.paused_without_block += inc;
+                    if fold_idle {
+                        day.paused_without_block = fold_reminder_counter(day.paused_without_block, idle_minutes * 60);
+                    }
+                } else if !day.resting(now) {
+                    day.paused_without_block += delta;
+                }
             }
             return;
         }
@@ -772,6 +836,9 @@ impl State {
             day.begin_pause(now - delta, false);
             day.paused_seconds += delta;
             day.paused_without_block += delta;
+            if fold_idle {
+                day.paused_without_block = fold_reminder_counter(day.paused_without_block, idle_minutes * 60);
+            }
             return;
         }
 
@@ -786,6 +853,9 @@ impl State {
         };
         day.seated_seconds += worked;
         day.seated_since_relief += worked;
+        if fold_stretch {
+            day.seated_since_relief = fold_reminder_counter(day.seated_since_relief, stretch_minutes * 60);
+        }
         if !done {
             return;
         }
@@ -797,7 +867,10 @@ impl State {
         day.record(finished, true, ended_at);
         day.begin_pause(ended_at, false);
         day.paused_seconds += overflow;
-        day.paused_without_block = overflow;
+        day.paused_without_block = if wall_clock && rest > 0 { (overflow - rest).max(0) } else { overflow };
+        if fold_idle {
+            day.paused_without_block = fold_reminder_counter(day.paused_without_block, idle_minutes * 60);
+        }
         day.begin_rest(ended_at, rest);
     }
 
