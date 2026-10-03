@@ -1036,9 +1036,7 @@ button.day-cell:active { background: rgba(231, 223, 208, 0.1); }
   .mobile-tabs { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; padding: 8px 12px; background: var(--bed); border-top: 1px solid var(--hair); }
   .mobile-tab { position: relative; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 4px; min-height: 56px; border-radius: 8px; font-size: 14px; color: var(--ink-body); }
   .mobile-tab .ic { color: var(--ink-muted); }
-  .mobile-tab.on { background: var(--plate); color: var(--ink-high); font-weight: 600; }
-  .mobile-tab.on .ic { color: var(--ink-high); }
-  .mobile-tab.on::before { content: ""; position: absolute; left: 8px; top: 50%; width: 2px; height: 16px; margin-top: -8px; background: var(--stroke); }
+  .mobile-tab.on { background: var(--plate); }
   .page { gap: 32px; padding-bottom: 32px; }
   .page-heading h1 { font-size: 26px; }
   .heading-copy p:empty { display: none; }
@@ -1091,7 +1089,7 @@ button.day-cell:active { background: rgba(231, 223, 208, 0.1); }
   .plan-input.field { width: 60px; }
 
   .wall-body { --wu: 5.5; --wall-gap: 4px; }
-  .wall { overflow-x: visible; padding-bottom: 6px; }
+  .wall { overflow-x: visible; padding-bottom: 6px; justify-content: center; }
   .wall-key { width: 100%; max-width: none; }
   .wall-key { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); column-gap: 16px; }
   .wall-key .k { gap: 8px; }

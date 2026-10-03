@@ -8,7 +8,7 @@ import { ICON_NAMED, NOTIFICATION_CHANNELS } from "../types";
 import { esc, meter, shortNameFrom } from "../format";
 import { icon } from "../icons";
 import { PROJECT_ICON_CHOICES } from "../project-icons";
-import { btn, labelled, sectionLabel, select, stepper, toggle } from "../components";
+import { btn, labelled, select, stepper, toggle } from "../components";
 import { BLOCK_OPTIONS, BREAK_OPTIONS, IDLE_OPTIONS, day, hasFeature, prefs, profileTotalMinutes, ui, withValue } from "../state";
 
 /** 设置的分区：id → 标题 + 图标。侧栏在设置页直接列它们，一区一页。 */
@@ -305,11 +305,16 @@ function mobileNotificationPanel(): string {
   const open = (target: string, channel?: string) => btn("去设置", { kind: "plate", action: "system-settings", data: { target, ...(channel ? { channel } : {}) }, disabled: !hasFeature("system_settings") });
   const state = (allowed: boolean | undefined, yes: string, no: string) => allowed === undefined ? "尚未读取" : allowed ? yes : no;
   const names = { timer: "计时", body: "身体提醒", water: "喝水", status: "进行中" };
-  const channels = NOTIFICATION_CHANNELS.map((id) => {
-    const channel = s?.channels.find((c) => c.id === id);
+  // 渠道以系统开关为准；「进行中」本来就静音，不把无声误报成异常。
+  const channelIssues = s ? NOTIFICATION_CHANNELS.filter((id) => !s.channels.find((c) => c.id === id)?.enabled) : [];
+  const channelSummary = !s ? "尚未读取通知渠道状态。"
+    : channelIssues.length ? `${channelIssues.length} 个通知渠道需要处理。`
+    : "计时、身体提醒、喝水和进行中通知均已开启。";
+  const channels = settingRow("通知渠道", channelSummary, "") + channelIssues.map((id) => {
+    const channel = s!.channels.find((c) => c.id === id);
     const detail = channel
       ? `${channel.enabled ? "已开启" : "已关闭"} · ${channel.sound ? "有提示音" : "静音"} · ${channel.vibration ? "振动开启" : "振动关闭"}`
-      : s ? "尚未创建，重新打开应用后再检查。" : "尚未读取";
+      : "尚未创建，重新打开应用后再检查。";
     return settingRow(names[id], detail, open("channel", id));
   }).join("");
   const honor = /honor|huawei|荣耀|华为/i.test(s?.manufacturer ?? "");
@@ -319,7 +324,7 @@ function mobileNotificationPanel(): string {
   return `<div class="reminder-settings">
     <div class="reminder-check"><p role="status">${ui.systemStatusLoading ? "正在读取系统状态…" : ui.systemStatusError ? "暂时无法读取提醒状态，请重新检查。" : "从系统设置返回后，会自动重新检查。"}</p>${btn("重新检查", { kind: "quiet", action: "system-recheck", disabled: ui.systemStatusLoading })}</div>
     <div class="settings-panel rows">${settingRow("通知权限", state(s?.notificationsEnabled, "已允许", "未开启；锁屏后到点不会提醒。"), open("app_notifications"))}</div>
-    <section class="reminder-section">${sectionLabel("通知渠道")}<div class="settings-panel rows">${channels}</div></section>
+    <section class="reminder-section"><div class="settings-panel rows">${channels}</div></section>
     <div class="settings-panel rows">${settingRow("精确闹钟", state(s?.canScheduleExactAlarms, "已允许", "未允许；到点提醒可能延迟。"), open("exact_alarm"))}${settingRow("系统电池优化", state(s?.ignoringBatteryOptimizations, "已豁免", "尚未豁免"), open("battery"))}${settingRow("后台运行", guidance, open("app_details"), "background-guidance")}</div>
     <div class="reminder-tests">${btn("发测试通知", { kind: "plate", action: "mobile-notif-test" })}${btn("试听喝水提醒", { kind: "plate", action: "mobile-water-test" })}</div>
     <p class="t-note">在系统通知设置中，分别开启计时、身体提醒和喝水的横幅、锁屏通知与响铃。声音与振动由系统管理。</p>
