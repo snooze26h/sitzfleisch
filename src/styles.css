@@ -1058,6 +1058,10 @@ button.day-cell:active { background: rgba(231, 223, 208, 0.1); }
   .focus .btn-row .spacer { display: none; }
   .focus .btn-row .btn { min-height: 44px; padding-inline: 10px; }
   .focus[data-phase="flow"] .btn-row .btn-quiet { grid-column: 1 / -1; justify-self: end; }
+  /* Android 会随系统字体设置放大文字，两列给完整操作名留出空间。 */
+  [data-platform="android"] .focus:not([data-phase="done"]) > .btn-row { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  [data-platform="android"] .focus .btn-row .btn { min-width: 0; white-space: normal; overflow-wrap: anywhere; }
+  [data-platform="android"] .focus[data-phase="flow"] .btn-row .btn-quiet { grid-column: auto; }
   .focus-head .right { margin-left: 0; }
   /* 选格控件放在月亮下方，休息倒计时与月亮不被选择器挤出首屏。 */
   .today-top.choosing { grid-template-areas: "pause pause" "stamp stamp" "moon day" "suggestion suggestion" "picker picker" "controls controls" "quota quota"; row-gap: 16px; }
