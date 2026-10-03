@@ -3261,6 +3261,7 @@ dependencies = [
  "tauri-plugin-autostart",
  "tauri-plugin-notification",
  "tauri-plugin-single-instance",
+ "tauri-plugin-sitzfleisch-android",
  "tauri-plugin-window-state",
  "windows-sys 0.61.2",
 ]
@@ -3686,6 +3687,15 @@ dependencies = [
  "tracing",
  "windows-sys 0.60.2",
  "zbus",
+]
+
+[[package]]
+name = "tauri-plugin-sitzfleisch-android"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "tauri",
+ "tauri-plugin",
 ]
 
 [[package]]

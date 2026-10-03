@@ -1,0 +1,16 @@
+[package]
+name = "tauri-plugin-sitzfleisch-android"
+version = "0.1.0"
+authors = [ "snooze26h" ]
+description = "坐功 Android 系统状态、设置与常驻通知的 Rust 专用桥"
+edition = "2021"
+rust-version = "1.77.2"
+exclude = ["/examples", "/dist-js", "/guest-js", "/node_modules"]
+links = "tauri-plugin-sitzfleisch-android"
+
+[dependencies]
+tauri = { version = "~2.11.5" }
+serde = "1.0"
+
+[build-dependencies]
+tauri-plugin = { version = "2.6.3", features = ["build"] }

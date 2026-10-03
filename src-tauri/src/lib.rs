@@ -34,6 +34,10 @@ mod browser_auth;
 mod windows_hosts;
 #[cfg(target_os = "macos")]
 mod space_preview;
+mod platform;
+mod alerts;
+#[cfg(target_os = "android")]
+mod mobile;
 
 #[derive(Clone, Default, Serialize)]
 struct BlockingStatus {
@@ -692,6 +696,8 @@ fn mutate(
     }
     outcome.map_err(|e| e.to_string())?;
     save(&shared);
+    #[cfg(target_os = "android")]
+    mobile::mark_dirty(app);
     broadcast(app);
     Ok(snapshot(&shared, true))
 }
@@ -1170,7 +1176,7 @@ fn check_blocking(app: AppHandle) -> Snapshot {
 /// 通知权限：granted / denied / unknown。
 #[cfg(desktop)]
 #[tauri::command]
-fn notification_status(app: AppHandle) -> String {
+async fn notification_status(app: AppHandle) -> String {
     use tauri_plugin_notification::PermissionState;
     match app.notification().permission_state() {
         Ok(PermissionState::Granted) => "granted".into(),
@@ -1182,7 +1188,7 @@ fn notification_status(app: AppHandle) -> String {
 
 #[cfg(desktop)]
 #[tauri::command]
-fn request_notification_permission(app: AppHandle) -> String {
+async fn request_notification_permission(app: AppHandle) -> String {
     use tauri_plugin_notification::PermissionState;
     match app.notification().request_permission() {
         Ok(PermissionState::Granted) => "granted".into(),
@@ -1193,13 +1199,15 @@ fn request_notification_permission(app: AppHandle) -> String {
 
 /// 打开系统的通知设置页。
 /// 设置页的「试一条」：立刻按完整链路发一条，看得见就说明这条路通。
+#[cfg(not(target_os = "android"))]
 #[tauri::command]
-fn test_notification(app: AppHandle) {
+async fn test_notification(app: AppHandle) {
     notify(&app, "坐功 · 试一条", "看到这条横幅，说明系统通知这条路是通的。", AlertSound::Standard);
 }
 
+#[cfg(not(target_os = "android"))]
 #[tauri::command]
-fn test_water_sound(app: AppHandle) {
+async fn test_water_sound(app: AppHandle) {
     if app.state::<Shared>().state.lock().unwrap().preferences.sound_enabled {
         play_alert_sound(AlertSound::Water);
     }
@@ -1207,7 +1215,7 @@ fn test_water_sound(app: AppHandle) {
 
 #[cfg(desktop)]
 #[tauri::command]
-fn open_notification_settings() -> Result<(), String> {
+async fn open_notification_settings() -> Result<(), String> {
     #[cfg(target_os = "macos")]
     let ok = Command::new("open")
         .arg("x-apple.systempreferences:com.apple.Notifications-Settings.extension")
@@ -1285,20 +1293,84 @@ fn check_blocking(app: AppHandle) -> Snapshot { unsupported_blocking_snapshot(&a
 #[tauri::command]
 fn reapply_blocking(app: AppHandle) -> Snapshot { unsupported_blocking_snapshot(&app) }
 
-#[cfg(mobile)]
+#[cfg(all(mobile, not(target_os = "android")))]
 #[tauri::command]
-fn notification_status(_app: AppHandle) -> String { "unknown".into() }
+async fn notification_status(_app: AppHandle) -> String { "unknown".into() }
 
-#[cfg(mobile)]
+#[cfg(all(mobile, not(target_os = "android")))]
 #[tauri::command]
 async fn request_notification_permission(_app: AppHandle) -> Result<String, String> {
     Err("移动端暂不支持请求通知权限。".into())
 }
 
-#[cfg(mobile)]
+#[cfg(all(mobile, not(target_os = "android")))]
 #[tauri::command]
-fn open_notification_settings() -> Result<(), String> {
+async fn open_notification_settings() -> Result<(), String> {
     Err("移动端暂不支持打开通知设置。".into())
+}
+
+#[cfg(target_os = "android")]
+#[tauri::command]
+async fn notification_status(app: AppHandle) -> Result<String, String> {
+    mobile::notification_status(&app)
+}
+
+#[cfg(target_os = "android")]
+#[tauri::command]
+async fn request_notification_permission(app: AppHandle) -> Result<String, String> {
+    mobile::request_notification_permission(&app)
+}
+
+#[cfg(target_os = "android")]
+#[tauri::command]
+async fn open_notification_settings(app: AppHandle) -> Result<(), String> {
+    mobile::open_settings(&app, platform::SettingsRequest::new(
+        platform::SettingsTarget::AppNotifications, None
+    )?)
+}
+
+#[cfg(target_os = "android")]
+#[tauri::command]
+async fn test_notification(app: AppHandle) -> Result<(), String> {
+    mobile::test_notification(&app, false)
+}
+
+#[cfg(target_os = "android")]
+#[tauri::command]
+async fn test_water_sound(app: AppHandle) -> Result<(), String> {
+    mobile::test_notification(&app, true)
+}
+
+#[tauri::command]
+fn platform_info() -> platform::PlatformInfo { platform::info() }
+
+#[tauri::command]
+async fn system_status(app: AppHandle) -> Result<platform::SystemStatus, String> {
+    #[cfg(target_os = "android")]
+    { mobile::system_status(&app) }
+    #[cfg(not(target_os = "android"))]
+    { let _ = app; Err("系统状态查询仅支持 Android。".into()) }
+}
+
+#[tauri::command]
+async fn open_system_settings(
+    target: platform::SettingsTarget,
+    channel_id: Option<String>,
+    app: AppHandle,
+) -> Result<(), String> {
+    let request = platform::SettingsRequest::new(target, channel_id)?;
+    #[cfg(target_os = "android")]
+    { mobile::open_settings(&app, request) }
+    #[cfg(not(target_os = "android"))]
+    { let _ = (app, request); Err("此系统设置入口仅支持 Android。".into()) }
+}
+
+#[tauri::command]
+async fn move_task_to_back(app: AppHandle) -> Result<(), String> {
+    #[cfg(target_os = "android")]
+    { mobile::move_task_to_back(&app) }
+    #[cfg(not(target_os = "android"))]
+    { let _ = app; Err("退到后台仅支持 Android。".into()) }
 }
 
 #[cfg(mobile)]
@@ -1626,6 +1698,8 @@ pub fn run() {
                 .build(),
         );
     let builder = builder.plugin(tauri_plugin_notification::init());
+    #[cfg(target_os = "android")]
+    let builder = builder.plugin(tauri_plugin_sitzfleisch_android::init());
     #[cfg(desktop)]
     let builder = builder
         .plugin(tauri_plugin_autostart::init(
@@ -1683,6 +1757,8 @@ pub fn run() {
                 tray_shape: Mutex::new(None),
                 tray_display: Mutex::new(None),
             });
+            #[cfg(target_os = "android")]
+            app.manage(mobile::MobileShared::default());
             #[cfg(desktop)]
             browser_blocking::start(app.handle(), isolated);
             #[cfg(target_os = "macos")]
@@ -1715,9 +1791,17 @@ pub fn run() {
             // 每秒走一格；只有「自然走完」的转变才配通知（用户手点的不用提醒自己）。
             let handle = app.handle().clone();
             thread::spawn(move || {
+                #[cfg(target_os = "android")]
+                {
+                    mobile::set_heartbeat_thread(&handle);
+                    mobile::sync_status(&handle);
+                }
                 let mut ticks: u64 = 0;
                 loop {
+                    #[cfg(not(target_os = "android"))]
                     thread::sleep(Duration::from_secs(1));
+                    #[cfg(target_os = "android")]
+                    thread::park_timeout(Duration::from_secs(1));
                     ticks += 1;
                     let (focus_done, break_done, reminders) = {
                         let shared = handle.state::<Shared>();
@@ -1741,6 +1825,8 @@ pub fn run() {
                     for (title, body, sound) in reminders {
                         notify(&handle, title, &body, sound);
                     }
+                    #[cfg(target_os = "android")]
+                    mobile::sync_status(&handle);
                     broadcast(&handle);
                 }
             });
@@ -1820,7 +1906,11 @@ pub fn run() {
             reveal_state_file,
             autostart_status,
             set_autostart,
-            app_version
+            app_version,
+            platform_info,
+            system_status,
+            open_system_settings,
+            move_task_to_back
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")
