@@ -1062,6 +1062,10 @@ button.day-cell:active { background: rgba(231, 223, 208, 0.1); }
   [data-platform="android"] .focus:not([data-phase="done"]) > .btn-row { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   [data-platform="android"] .focus .btn-row .btn { min-width: 0; white-space: normal; overflow-wrap: anywhere; }
   [data-platform="android"] .focus[data-phase="flow"] .btn-row .btn-quiet { grid-column: auto; }
+  [data-platform="android"] .big-reading { display: block; }
+  [data-platform="android"] .big-reading .val { overflow-wrap: anywhere; }
+  [data-platform="android"] .big-reading .unit { display: inline-block; margin-left: 14px; }
+  [data-platform="android"] .net.secondary { flex-direction: column; align-items: flex-start; }
   .focus-head .right { margin-left: 0; }
   /* 选格控件放在月亮下方，休息倒计时与月亮不被选择器挤出首屏。 */
   .today-top.choosing { grid-template-areas: "pause pause" "stamp stamp" "moon day" "suggestion suggestion" "picker picker" "controls controls" "quota quota"; row-gap: 16px; }
