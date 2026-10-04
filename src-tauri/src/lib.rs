@@ -40,6 +40,7 @@ mod platform;
 mod alerts;
 mod alarm_store;
 mod clock_policy;
+mod android_shutdown;
 use clock_policy::{advance_time, resume_time, show_due_banners, TimePolicy};
 #[cfg(target_os = "android")]
 mod mobile;
@@ -1851,7 +1852,7 @@ pub fn run() {
 
             // 每秒走一格；只有「自然走完」的转变才配通知（用户手点的不用提醒自己）。
             let handle = app.handle().clone();
-            thread::spawn(move || {
+            let heartbeat_worker = thread::spawn(move || {
                 #[cfg(target_os = "android")]
                 {
                     mobile::set_heartbeat_thread(&handle);
@@ -1867,6 +1868,8 @@ pub fn run() {
                         if initial_sync { initial_sync = false; }
                         else { thread::park_timeout(Duration::from_secs(1)); }
                     }
+                    #[cfg(target_os = "android")]
+                    if mobile::stop_requested(&handle) { break; }
                     ticks += 1;
                     let step = {
                         let shared = handle.state::<Shared>();
@@ -1879,6 +1882,8 @@ pub fn run() {
                         }
                         step
                     };
+                    #[cfg(target_os = "android")]
+                    if mobile::stop_requested(&handle) { break; }
                     if step.focus_done && step.show_banners {
                         notify_block_finished(&handle);
                     }
@@ -1901,6 +1906,10 @@ pub fn run() {
                     broadcast(&handle);
                 }
             });
+            #[cfg(target_os = "android")]
+            mobile::register_heartbeat_worker(app.handle(), heartbeat_worker);
+            #[cfg(not(target_os = "android"))]
+            drop(heartbeat_worker);
 
             // 通知权限得主动要一次，否则 macOS 根本不会把这个 App 登记进通知中心，
             // 表现出来就是「设置里找不到它，也永远收不到提醒」。放后台线程，别挡住启动。
@@ -1994,6 +2003,10 @@ pub fn run() {
         .build(tauri::generate_context!())
         .expect("error while building tauri application")
         .run(|app, event| {
+            #[cfg(target_os = "android")]
+            if let tauri::RunEvent::ExitRequested { api, .. } = &event {
+                if mobile::prevent_exit_until_heartbeat_stops(app) { api.prevent_exit(); }
+            }
             if matches!(&event, tauri::RunEvent::Ready) {
                 let shared = app.state::<Shared>();
                 // 再次打开未结束的学习日时恢复规则；上次异常退出的残留也按当前状态核对。
@@ -2031,6 +2044,8 @@ pub fn run() {
                         }
                     }
                 }
+                #[cfg(target_os = "android")]
+                android_shutdown::finish_android_process();
             }
         });
 }

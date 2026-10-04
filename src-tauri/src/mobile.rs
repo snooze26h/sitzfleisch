@@ -1,14 +1,14 @@
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::path::PathBuf;
-use std::sync::{atomic::{AtomicBool, Ordering}, Mutex};
-use std::thread::{self, Thread};
+use std::sync::{atomic::{AtomicBool, Ordering}, Arc, Mutex};
+use std::thread::{self, JoinHandle, Thread};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use tauri::{AppHandle, Manager};
 use tauri_plugin_notification::{NotificationExt, PermissionState, Schedule};
 use tauri_plugin_sitzfleisch_android::SitzfleischAndroidExt;
 
-use crate::{alarm_store, alerts::{self, AppliedAlarm, StatusModel}, platform::{SettingsRequest, SystemStatus}, Shared};
+use crate::{alarm_store, alerts::{self, AppliedAlarm, StatusModel}, android_shutdown::HeartbeatShutdown, platform::{SettingsRequest, SystemStatus}, Shared};
 
 struct SyncState {
     applied: Vec<AppliedAlarm>,
@@ -24,6 +24,7 @@ pub struct MobileShared {
     dirty: AtomicBool,
     suspended: AtomicBool,
     heartbeat: Mutex<Option<Thread>>,
+    shutdown: Arc<HeartbeatShutdown>,
     synchronizer: Mutex<SyncState>,
     alarms_path: PathBuf,
 }
@@ -41,6 +42,7 @@ impl MobileShared {
         Self {
             dirty: AtomicBool::new(true), suspended: AtomicBool::new(false),
             heartbeat: Mutex::new(None), alarms_path,
+            shutdown: Arc::new(HeartbeatShutdown::new()),
             synchronizer: Mutex::new(SyncState { applied, status: None, cold: true,
                 persist_dirty: false, persist_enabled, last_error: None }),
         }
@@ -55,6 +57,20 @@ fn plugin_call<T, E: std::fmt::Display>(call: impl FnOnce() -> Result<T, E>) -> 
 
 pub fn set_heartbeat_thread(app: &AppHandle) {
     *app.state::<MobileShared>().heartbeat.lock().unwrap() = Some(thread::current());
+}
+
+pub fn register_heartbeat_worker(app: &AppHandle, worker: JoinHandle<()>) {
+    app.state::<MobileShared>().shutdown.register_worker(worker);
+}
+
+pub fn stop_requested(app: &AppHandle) -> bool {
+    app.state::<MobileShared>().shutdown.stop_requested()
+}
+
+pub fn prevent_exit_until_heartbeat_stops(app: &AppHandle) -> bool {
+    app.state::<Shared>().exiting.store(true, Ordering::SeqCst);
+    let handle = app.clone();
+    app.state::<MobileShared>().shutdown.request_exit(move || handle.exit(0))
 }
 
 pub fn mark_dirty(app: &AppHandle) {
