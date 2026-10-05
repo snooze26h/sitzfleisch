@@ -72,9 +72,101 @@ jobs:
           path: release-artifacts/*
           if-no-files-found: error
 
+  android:
+    runs-on: ubuntu-latest
+    outputs:
+      build_mode: ${{ steps.signing.outputs.mode }}
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: 22
+
+      - uses: actions/setup-java@b6effb05e454b25005698d916606bdc6ffcbf961 # v5
+        with:
+          distribution: temurin
+          java-version: 17
+
+      - uses: android-actions/setup-android@9fc6c4e9069bf8d3d10b2204b1fb8f6ef7065407 # v3
+        with:
+          packages: platform-tools
+
+      - name: Android SDK 与 NDK
+        run: |
+          sdkmanager "platforms;android-36" "build-tools;36.0.0" "ndk;30.0.16248370"
+          echo "NDK_HOME=$ANDROID_HOME/ndk/30.0.16248370" >> "$GITHUB_ENV"
+
+      - uses: dtolnay/rust-toolchain@89b12181fb390509a0842a86cc55eeb8eb928c1d
+        with:
+          toolchain: stable
+          targets: aarch64-linux-android
+
+      - uses: swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+        with:
+          workspaces: src-tauri
+
+      - run: npm ci
+
+      - name: 签名边界回归
+        run: python3 -m unittest discover -s src-tauri/gen/android/tests -v
+
+      - name: 准备 Android 签名
+        id: signing
+        env:
+          ANDROID_KEY_BASE64: ${{ secrets.ANDROID_KEY_BASE64 }}
+          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: python3 src-tauri/gen/android/prepare_ci_signing.py
+
+      - name: Android APK
+        env:
+          BUILD_MODE: ${{ steps.signing.outputs.mode }}
+          RUSTFLAGS: -D warnings
+        run: |
+          if [[ "$BUILD_MODE" == "debug" ]]; then
+            npm run tauri android build -- --debug --apk --target aarch64 --ci
+          elif [[ "$BUILD_MODE" == "release" ]]; then
+            npm run tauri android build -- --apk --target aarch64 --ci
+          else
+            echo "Android 构建模式无效" >&2
+            exit 1
+          fi
+
+      - name: 校验并收集 Android 安装包
+        env:
+          BUILD_MODE: ${{ steps.signing.outputs.mode }}
+        run: |
+          VERSION=$(node -e 'const v=require("./package.json").version; if(!/^\d+\.\d+\.\d+$/.test(v))process.exit(1); process.stdout.write(v)')
+          mapfile -t APKS < <(find src-tauri/gen/android/app/build/outputs/apk -type f -path "*/$BUILD_MODE/*.apk")
+          if [[ "${#APKS[@]}" -ne 1 ]]; then
+            echo "预期恰好一个 Android APK" >&2
+            exit 1
+          fi
+          mkdir -p release-artifacts
+          APK="Sitzfleisch_${VERSION}_android-arm64.apk"
+          cp "${APKS[0]}" "release-artifacts/$APK"
+          "$ANDROID_HOME/build-tools/36.0.0/apksigner" verify --print-certs "release-artifacts/$APK"
+          (cd release-artifacts && sha256sum "$APK" > "$APK.sha256")
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: sitzfleisch-Android
+          path: release-artifacts/*
+          if-no-files-found: error
+
+      - name: 清理 Android 签名文件
+        if: always()
+        run: |
+          rm -f src-tauri/gen/android/keystore.properties
+          rm -rf "$RUNNER_TEMP/sitzfleisch-android-signing"
+
   release:
-    needs: build
-    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [build, android]
+    # 手动构建的调试回退包只留在 Artifacts，不能进入正式 Release。
+    if: startsWith(github.ref, 'refs/tags/v') && needs.android.outputs.build_mode == 'release'
     permissions:
       contents: write
     runs-on: ubuntu-latest
@@ -109,11 +201,22 @@ jobs:
             **Windows**：下载 `-setup.exe` 运行。SmartScreen 可能拦一下，点「更多信息 → 仍要运行」。
             **Windows 端从未在真机上验收过**，遇到问题请开 issue。
 
+            **Android（ARM64，Android 8.0 及以上）**：用手机浏览器下载 `…android-arm64.apk` 后打开。
+            按系统提示允许浏览器安装未知应用；确认来自本仓库并核对 `.sha256` 后再继续安装。
+            升级请覆盖安装，卸载会删除手机上的记录，换手机不会自动迁移。
+            首次「开始今天」时允许通知，并在「设置 → 提醒」开启横幅、响铃和后台运行。
+            荣耀手机关闭坐功的自动启动管理，允许自启动、关联启动和后台活动。
+            手机重启后需打开一次坐功，才能恢复未来提醒。
+
+            手机锁屏继续计时，不提供网站屏蔽；喝水提醒只在学习日内，暂停超过两小时后
+            不再发喝水和未开格提醒。手机与电脑的数据独立，不自动同步。
+
             ## 数据在哪
 
-            只存在你自己电脑上，不联网、不上传。
+            只存在当前设备上，不联网、不上传。
             macOS `~/Library/Application Support/com.snooze26h.sitzfleisch.x/state.json`，
             Windows `%APPDATA%\com.snooze26h.sitzfleisch.x\state.json`。
+            Android 保存在应用私有目录，卸载应用会删除。
 
             ## 网站屏蔽需要管理员密码
 
