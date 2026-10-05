@@ -13,6 +13,23 @@ val tauriProperties = Properties().apply {
     }
 }
 
+// 普通开发不要求发布密钥；配置文件存在时才启用签名，坏配置明确失败，避免误出未签名包。
+val releaseKeystorePropertiesFile = rootProject.file("keystore.properties")
+val releaseKeystoreProperties = if (releaseKeystorePropertiesFile.exists()) {
+    require(releaseKeystorePropertiesFile.isFile && releaseKeystorePropertiesFile.length() <= 65536) {
+        "发布签名配置文件格式或长度无效"
+    }
+    Properties().apply { releaseKeystorePropertiesFile.inputStream().use { load(it) } }
+} else null
+
+fun releaseSigningValue(name: String): String {
+    val value = releaseKeystoreProperties?.getProperty(name)
+    require(value != null && value.isNotEmpty() && value.length <= 4096 && '\u0000' !in value) {
+        "发布签名配置缺少有效的 $name；请检查本地 keystore.properties"
+    }
+    return value
+}
+
 android {
     compileSdk = 36
     buildToolsVersion = "36.0.0"
@@ -25,6 +42,18 @@ android {
         targetSdk = 36
         versionCode = tauriProperties.getProperty("tauri.android.versionCode", "1").toInt()
         versionName = tauriProperties.getProperty("tauri.android.versionName", "1.0")
+    }
+    if (releaseKeystoreProperties != null) {
+        signingConfigs {
+            create("release") {
+                keyAlias = releaseSigningValue("keyAlias")
+                keyPassword = releaseSigningValue("password")
+                storePassword = releaseSigningValue("password")
+                storeFile = rootProject.file(releaseSigningValue("storeFile")).also {
+                    require(it.isFile) { "发布签名 keystore 文件不存在" }
+                }
+            }
+        }
     }
     buildTypes {
         getByName("debug") {
@@ -40,6 +69,9 @@ android {
             }
         }
         getByName("release") {
+            if (releaseKeystoreProperties != null) {
+                signingConfig = signingConfigs.getByName("release")
+            }
             isMinifyEnabled = true
             proguardFiles(
                 *fileTree(".") { include("**/*.pro") }
