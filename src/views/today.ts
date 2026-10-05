@@ -115,15 +115,20 @@ function dayReadings(d: Day): string {
   // 核心心跳已经累计当前暂停段，界面直接使用总账，不能再叠加一次。
   // 休息也落在暂停里：这里拆开写，计划好的休息不算成「停下来」。不满一分钟的不写，免得冒出一个 0m。
   const rest = restSeconds(d);
+  // 手机的大字设置会让长时长超出月亮旁的窄列；在小时单位后留软换行，不缩小读数。
+  const displayMeter = (seconds: number) => {
+    const value = esc(meter(seconds));
+    return ui.platform?.os === "android" && ui.compact ? value.replace(/h(?=\d)/, "h<wbr>") : value;
+  };
   const secondary = (label: string, seconds: number) => seconds >= 60
-    ? `<div class="net secondary"><span class="engraved">${label}</span><div class="figure"><span class="val">${esc(meter(seconds))}</span></div></div>`
+    ? `<div class="net secondary"><span class="engraved">${label}</span><div class="figure"><span class="val">${displayMeter(seconds)}</span></div></div>`
     : "";
   const paused = secondary("已暂停", Math.max(0, d.paused_seconds - rest)) + secondary("已休息", rest);
   const moreItems = `${menuItem("复制今天的 Markdown 总结", "copy-today-md")}<div class="menu-sep"></div>${menuItem("返回开始页…", "discard-day", { danger: true })}${menuItem("收工归档…", "end-day", { danger: true })}`;
   if (ui.compact) {
     // 钟点与菜单通栏，给右侧的 40px / 28px 读数留足宽度。
     return `<div class="day-heading"><header class="section-head"><h2 class="section-title">从 ${esc(wallClock(d.started_at))} 坐下</h2><span class="trail">${menuButton("more", ui.menu, icon("ellipsis-vertical", 17), moreItems, { iconOnly: true, ariaLabel: "更多操作" })}</span></header></div>
-      <aside class="day-readings" id="day-readings"><div class="net"><span class="engraved">已学</span><div class="figure"><span class="val">${esc(meter(netSeconds(d)))}</span><span class="of">/ ${esc(meter(quotaSeconds(d)))}</span></div></div>${paused}</aside>`;
+      <aside class="day-readings" id="day-readings"><div class="net"><span class="engraved">已学</span><div class="figure"><span class="val">${displayMeter(netSeconds(d))}</span><span class="of">/ ${displayMeter(quotaSeconds(d))}</span></div></div>${paused}</aside>`;
   }
   return `<aside class="day-readings" id="day-readings">
     <header class="section-head"><h2 class="section-title">从 ${esc(wallClock(d.started_at))} 坐下</h2><span class="trail">${menuButton("more", ui.menu, icon("ellipsis-vertical", 17), moreItems, { iconOnly: true, ariaLabel: "更多操作" })}</span></header>
