@@ -127,6 +127,64 @@ cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings
 
 macOS 发布包是 Apple 芯片与 Intel 通用二进制。当前仅做 ad-hoc 签名，未做 Developer ID 签名与公证；Windows 构建成功不等同于真机验收通过。
 
+## Android 开发
+
+使用 Java 17、Android API 36、Build Tools 36.0.0、NDK 30.0.16248370，以及 Rust 的 `aarch64-linux-android` target。最低 API 为 26，只构建 ARM64；前端仍由系统 WebView 渲染。环境准备参见 [Tauri](https://v2.tauri.app/start/prerequisites/#android)；项目使用的组件版本以 Gradle 配置和 CI 为准。
+
+设置 `JAVA_HOME`、`ANDROID_HOME` 和 `NDK_HOME`，其中 `NDK_HOME` 指向 `$ANDROID_HOME/ndk/30.0.16248370`。在仓库根目录执行：
+
+```bash
+npm run tauri android build -- --debug --apk --target aarch64
+npm run tauri android build -- --apk --target aarch64 --ci
+python3 -m unittest discover -s src-tauri/gen/android/tests -v
+```
+
+第二条是 release 构建：启用 R8，只有配置了本地密钥时才签名；无配置时仍可构建，未签名产物不能用于正式安装或发布。调试包 ID 为 `com.snooze26h.sitzfleisch.x.debug`，正式包 ID 为 `com.snooze26h.sitzfleisch.x`，数据独立。
+
+### 真机调试
+
+手机允许 USB 调试后，先用 `adb devices` 确认连接。单台真机可以使用以下命令；多设备时改用 `adb -s <设备标识>`，不把标识或私人日志提交进仓库。
+
+```bash
+adb -d install -r path/to/sitzfleisch-debug.apk
+adb -d shell am start -n com.snooze26h.sitzfleisch.x.debug/com.snooze26h.sitzfleisch.x.MainActivity
+adb -d shell pidof com.snooze26h.sitzfleisch.x.debug
+adb -d shell logcat --pid <上一步返回的PID>
+mkdir -p .android-work/shots
+adb -d exec-out screencap -p > .android-work/shots/device.png
+```
+
+安装需按手机系统提示确认；不卸载旧应用、不清数据。Chrome 中打开 `chrome://inspect/#devices`，可调试已启动的 debug WebView。生产包不打开 WebView 调试。截图、日志、APK 和本机配置放在忽略的 `.android-work/` 中。
+
+### 发布签名
+
+发布者在自己的终端生成并备份密钥，密码不写入聊天、源码、命令参数或日志：
+
+```bash
+mkdir -p ~/.android-keys
+keytool -genkeypair -v -keystore ~/.android-keys/sitzfleisch-release.jks -keyalg RSA -keysize 4096 -validity 10000 -alias sitzfleisch
+```
+
+使用同一个密码作为 keystore 和该 key 的密码。由发布者在 `src-tauri/gen/android/keystore.properties` 中填写 `storeFile`、`keyAlias`、`password`；文件已忽略，使用绝对的密钥文件路径即可。配置文件不存在时不启用 release 签名；存在但字段无效或 keystore 缺失时明确失败。遵循 [Tauri 的 Android 签名格式](https://v2.tauri.app/distribute/sign/android/)，其中反斜线、换行、前导空格和 Unicode 密码按 Java Properties 规则转义。
+
+发布者自行设置仓库 Secrets，`gh` 未写 `--body` 时会交互询问，不把密码放进 shell 参数：
+
+```bash
+base64 -i ~/.android-keys/sitzfleisch-release.jks | gh secret set ANDROID_KEY_BASE64 --repo snooze26h/sitzfleisch
+gh secret set ANDROID_KEY_ALIAS --repo snooze26h/sitzfleisch
+gh secret set ANDROID_KEY_PASSWORD --repo snooze26h/sitzfleisch
+```
+
+alias 填 `sitzfleisch`，password 填生成密钥时的密码。这三项的管理方式见 [GitHub Secrets 文档](https://docs.github.com/en/actions/how-tos/write-workflows/choose-what-workflows-do/use-secrets)。密钥同时备份到密码管理器和离线介质；丢失后无法用新签名直接覆盖旧应用，卸载再安装会删除记录。
+
+### CI 产物与验收
+
+`build.yml` 的 Android job 沿用同一工具链。发布标签缺少完整的三个 Secrets 时失败；手动触发缺少密钥时产出 debug APK，仅保留在 Actions Artifacts。生成签名配置的脚本只从环境变量读取 Secrets，校验 Base64 和字段边界、转义属性值，并以私有权限写文件；作业结束清理签名文件，不上传 keystore。
+
+产物命名为 `Sitzfleisch_<版本>_android-arm64.apk` 和同名 `.sha256`，artifact 为 `sitzfleisch-Android`。CI 使用 [apksigner](https://developer.android.com/tools/apksigner) 校验签名后计算校验和；Release 等待桌面和 Android 两个构建，并且只接受 release 模式的 Android 产物。debug 验证不代表正式密钥签名、R8 或发布包真机验收通过。
+
+版本仍为 0.12.1；0.13.0、tag、合入 main 和正式发布均留到 A7 经发布者批准后执行。签名包准备好后，集中复测首次安装、锁屏到点、划掉、取消 / 重排、状态通知、返回与 Markdown 复制，再补当前暂缓的重启和实际提醒效果。当前不把未执行项标为通过。
+
 ## 已有验证记录
 
 以下承接整理前 README 的已有记录，并非本次文档更新重新执行的原生验收：
