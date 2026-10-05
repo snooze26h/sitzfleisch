@@ -1097,6 +1097,10 @@ button.day-cell:active { background: rgba(231, 223, 208, 0.1); }
   .plan-row { grid-template-columns: minmax(0, 1fr) auto 42px; gap: 8px; }
   .plan-row .who { grid-column: auto; gap: 8px; }
   .plan-input.field { width: 60px; }
+  /* 项目名独占一行，避免窄屏和大字体下被分钟控件挤成竖排。 */
+  [data-platform="android"] .plan-row { grid-template-columns: minmax(0, 1fr) auto; }
+  [data-platform="android"] .plan-row .who { grid-column: 1 / -1; }
+  [data-platform="android"] .plan-input.field { width: calc(5ch + 8px); }
 
   .wall-body { --wu: 5.5; --wall-gap: 4px; }
   .wall { overflow-x: visible; padding-bottom: 6px; justify-content: center; }
