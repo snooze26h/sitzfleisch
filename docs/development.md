@@ -179,11 +179,11 @@ alias 填 `sitzfleisch`，password 填生成密钥时的密码。这三项的管
 
 ### CI 产物与验收
 
-`build.yml` 的 Android job 沿用同一工具链。发布标签缺少完整的三个 Secrets 时失败；手动触发缺少密钥时产出 debug APK，仅保留在 Actions Artifacts。生成签名配置的脚本只从环境变量读取 Secrets，校验 Base64 和字段边界、转义属性值，并以私有权限写文件；作业结束清理签名文件，不上传 keystore。
+`build.yml` 的 Android job 沿用同一工具链。三个 Secrets 齐全时构建正式包，否则手动触发时产出 debug APK（文件名带 `-debug`），发布标签缺任何一项都会失败。构建期间磁盘上没有密钥：先产出未签名的 release APK，再由单独一步把 keystore 解码到临时目录、用 `apksigner` 签名（密码经环境变量传入），签完立即删除；不生成 `keystore.properties`，也不上传 keystore。
 
-产物命名为 `Sitzfleisch_<版本>_android-arm64.apk` 和同名 `.sha256`，artifact 为 `sitzfleisch-Android`。CI 使用 [apksigner](https://developer.android.com/tools/apksigner) 校验签名后计算校验和；Release 等待桌面和 Android 两个构建，并且只接受 release 模式的 Android 产物。debug 验证不代表正式密钥签名、R8 或发布包真机验收通过。
+产物命名为 `Sitzfleisch_<版本>_android-arm64.apk` 和同名 `.sha256`，artifact 为 `sitzfleisch-Android`。CI 用 `zipalign -c -P 16` 检查 16 KB 页对齐，用 [apksigner](https://developer.android.com/tools/apksigner) 校验签名，再计算校验和；Release 等待桌面和 Android 两个构建，并且只接受 release 模式的 Android 产物。
 
-版本仍为 0.12.1；0.13.0、tag、合入 main 和正式发布均留到 A7 经发布者批准后执行。签名包准备好后，集中复测首次安装、锁屏到点、划掉、取消 / 重排、状态通知、返回与 Markdown 复制，再补当前暂缓的重启和实际提醒效果。当前不把未执行项标为通过。
+发版前用签名包在真机上复测：首次安装与通知授权、锁屏到点提醒、从最近任务划掉后的提醒、延长或暂停后旧提醒被取消、常驻通知、返回键、复制 Markdown，以及用新版覆盖安装后记录保留。
 
 ## 已有验证记录
 

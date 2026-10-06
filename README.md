@@ -1,6 +1,6 @@
 # Sitzfleisch · 坐功
 
-一款面向 macOS、Windows 和 Android、按项目安排时间的专注计时器。设定今天的目标，一段一段完成，收工后回看时间花在哪里。Android 版正在完成发布准备，正式安装包以 Releases 中实际提供的文件为准。
+一款面向 macOS、Windows 和 Android、按项目安排时间的专注计时器。设定今天的目标，一段一段完成，收工后回看时间花在哪里。
 
 **一天从「开始今天」算起，跨过午夜也不会清零。**
 
@@ -48,7 +48,7 @@
 | --- | --- |
 | macOS（Apple 芯片 / Intel） | 下载通用版 `.dmg`，将应用拖入「应用程序」。 |
 | Windows（x64） | 下载 `-setup.exe`，运行安装程序。 |
-| Android（ARM64，8.0 及以上） | 正式 APK 待发布；现阶段可从 Actions 下载调试包，仅用于测试。首次设置与升级说明见[Android](docs/usage.md#android)。 |
+| Android（ARM64，8.0 及以上） | 用手机浏览器下载 `_android-arm64.apk` 并安装。首次设置与升级说明见 [Android](docs/usage.md#android)。 |
 
 macOS 版暂未做 Developer ID 签名与公证，首次打开若被系统拦截，请看[安装说明](docs/usage.md#安装)。Windows 版尚未完成真机验收。
 
