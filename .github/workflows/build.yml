@@ -74,8 +74,9 @@ jobs:
 
   android:
     runs-on: ubuntu-latest
+    timeout-minutes: 60
     outputs:
-      build_mode: ${{ steps.signing.outputs.mode }}
+      build_mode: ${{ steps.mode.outputs.mode }}
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
@@ -110,20 +111,26 @@ jobs:
 
       - run: npm ci
 
-      - name: 签名边界回归
-        run: python3 -m unittest discover -s src-tauri/gen/android/tests -v
-
-      - name: 准备 Android 签名
-        id: signing
+      # 只判断三项签名 Secrets 是否齐全，不写任何文件；发布标签缺任何一项都直接失败。
+      - name: 确定构建模式
+        id: mode
         env:
-          ANDROID_KEY_BASE64: ${{ secrets.ANDROID_KEY_BASE64 }}
-          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
-          ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
-        run: python3 src-tauri/gen/android/prepare_ci_signing.py
+          HAS_SIGNING: ${{ secrets.ANDROID_KEY_BASE64 != '' && secrets.ANDROID_KEY_ALIAS != '' && secrets.ANDROID_KEY_PASSWORD != '' }}
+        run: |
+          if [[ "$HAS_SIGNING" == "true" ]]; then
+            echo "mode=release" >> "$GITHUB_OUTPUT"
+          elif [[ "$GITHUB_REF" == refs/tags/v* ]]; then
+            echo "发布标签缺少完整的 Android 签名 Secrets" >&2
+            exit 1
+          else
+            echo "mode=debug" >> "$GITHUB_OUTPUT"
+          fi
 
+      # 构建期间磁盘上没有密钥：npm、Gradle 及其全部依赖都碰不到签名凭据。
+      # release 模式产出未签名的 APK，下一步再单独签名。
       - name: Android APK
         env:
-          BUILD_MODE: ${{ steps.signing.outputs.mode }}
+          BUILD_MODE: ${{ steps.mode.outputs.mode }}
           RUSTFLAGS: -D warnings
         run: |
           if [[ "$BUILD_MODE" == "debug" ]]; then
@@ -135,19 +142,54 @@ jobs:
             exit 1
           fi
 
-      - name: 校验并收集 Android 安装包
+      - name: 签名发布 APK
+        if: steps.mode.outputs.mode == 'release'
         env:
-          BUILD_MODE: ${{ steps.signing.outputs.mode }}
+          ANDROID_KEY_BASE64: ${{ secrets.ANDROID_KEY_BASE64 }}
+          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
         run: |
-          VERSION=$(node -e 'const v=require("./package.json").version; if(!/^\d+\.\d+\.\d+$/.test(v))process.exit(1); process.stdout.write(v)')
-          mapfile -t APKS < <(find src-tauri/gen/android/app/build/outputs/apk -type f -path "*/$BUILD_MODE/*.apk")
+          set -euo pipefail
+          umask 077
+          mapfile -t APKS < <(find src-tauri/gen/android/app/build/outputs/apk -type f -path "*/release/*.apk")
           if [[ "${#APKS[@]}" -ne 1 ]]; then
-            echo "预期恰好一个 Android APK" >&2
+            echo "预期恰好一个 release APK" >&2
             exit 1
           fi
+          KEYDIR="$RUNNER_TEMP/sitzfleisch-android-signing"
+          mkdir -p "$KEYDIR"
+          printf '%s' "$ANDROID_KEY_BASE64" | base64 -d > "$KEYDIR/release.jks"
+          SIGNED="$RUNNER_TEMP/sitzfleisch-signed.apk"
+          # 密码经环境变量交给 apksigner，不出现在命令行参数里。
+          "$ANDROID_HOME/build-tools/36.0.0/apksigner" sign \
+            --ks "$KEYDIR/release.jks" --ks-key-alias "$ANDROID_KEY_ALIAS" \
+            --ks-pass env:ANDROID_KEY_PASSWORD --key-pass env:ANDROID_KEY_PASSWORD \
+            --out "$SIGNED" "${APKS[0]}"
+          rm -rf "$KEYDIR"
+          echo "SIGNED_APK=$SIGNED" >> "$GITHUB_ENV"
+
+      - name: 校验并收集 Android 安装包
+        env:
+          BUILD_MODE: ${{ steps.mode.outputs.mode }}
+        run: |
+          set -euo pipefail
+          VERSION=$(node -e 'const v=require("./package.json").version; if(!/^\d+\.\d+\.\d+$/.test(v))process.exit(1); process.stdout.write(v)')
           mkdir -p release-artifacts
-          APK="Sitzfleisch_${VERSION}_android-arm64.apk"
-          cp "${APKS[0]}" "release-artifacts/$APK"
+          if [[ "$BUILD_MODE" == "release" ]]; then
+            SOURCE="$SIGNED_APK"
+            APK="Sitzfleisch_${VERSION}_android-arm64.apk"
+          else
+            mapfile -t APKS < <(find src-tauri/gen/android/app/build/outputs/apk -type f -path "*/debug/*.apk")
+            if [[ "${#APKS[@]}" -ne 1 ]]; then
+              echo "预期恰好一个 debug APK" >&2
+              exit 1
+            fi
+            SOURCE="${APKS[0]}"
+            # 调试包可调试、允许明文流量，名字上就要和正式包区分开，避免被误发。
+            APK="Sitzfleisch_${VERSION}_android-arm64-debug.apk"
+          fi
+          cp "$SOURCE" "release-artifacts/$APK"
+          "$ANDROID_HOME/build-tools/36.0.0/zipalign" -c -P 16 4 "release-artifacts/$APK"
           "$ANDROID_HOME/build-tools/36.0.0/apksigner" verify --print-certs "release-artifacts/$APK"
           (cd release-artifacts && sha256sum "$APK" > "$APK.sha256")
 
@@ -157,11 +199,9 @@ jobs:
           path: release-artifacts/*
           if-no-files-found: error
 
-      - name: 清理 Android 签名文件
+      - name: 清理签名临时文件
         if: always()
-        run: |
-          rm -f src-tauri/gen/android/keystore.properties
-          rm -rf "$RUNNER_TEMP/sitzfleisch-android-signing"
+        run: rm -rf "$RUNNER_TEMP/sitzfleisch-android-signing" "$RUNNER_TEMP/sitzfleisch-signed.apk"
 
   release:
     needs: [build, android]
@@ -203,13 +243,14 @@ jobs:
 
             **Android（ARM64，Android 8.0 及以上）**：用手机浏览器下载 `…android-arm64.apk` 后打开。
             按系统提示允许浏览器安装未知应用；确认来自本仓库并核对 `.sha256` 后再继续安装。
-            升级请覆盖安装，卸载会删除手机上的记录，换手机不会自动迁移。
-            首次「开始今天」时允许通知，并在「设置 → 提醒」开启横幅、响铃和后台运行。
-            荣耀手机关闭坐功的自动启动管理，允许自启动、关联启动和后台活动。
+            升级直接覆盖安装，记录保留；卸载会删除手机上的全部记录。
+            首次「开始今天」时允许通知，再按「设置 → 提醒」里的提示打开横幅和后台运行，
+            否则锁屏后的提醒可能只响不弹，或者不响。
+            荣耀手机在「应用启动管理」里关闭坐功的自动管理，允许自启动、关联启动和后台活动。
             手机重启后需打开一次坐功，才能恢复未来提醒。
 
-            手机锁屏继续计时，不提供网站屏蔽；喝水提醒只在学习日内，暂停超过两小时后
-            不再发喝水和未开格提醒。手机与电脑的数据独立，不自动同步。
+            手机锁屏继续计时，不提供网站屏蔽；喝水提醒只在学习日内，本次暂停满 2 小时后
+            不再发喝水和未开格提醒。手机与电脑的数据独立，不自动同步；首次需要在手机上设置项目和目标。
 
             ## 数据在哪
 
