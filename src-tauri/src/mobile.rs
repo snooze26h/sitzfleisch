@@ -1,6 +1,7 @@
+use std::fs;
 use std::panic::{catch_unwind, AssertUnwindSafe};
-use std::path::PathBuf;
-use std::sync::{atomic::{AtomicBool, Ordering}, Arc, Mutex};
+use std::path::{Path, PathBuf};
+use std::sync::{atomic::{AtomicBool, AtomicI64, Ordering}, Arc, Mutex};
 use std::thread::{self, JoinHandle, Thread};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -10,19 +11,26 @@ use tauri_plugin_sitzfleisch_android::SitzfleischAndroidExt;
 
 use crate::{alarm_store, alerts::{self, AppliedAlarm, StatusModel}, android_shutdown::HeartbeatShutdown, platform::{SettingsRequest, SystemStatus}, Shared};
 
+/// 同步失败后，在这段时间内只在状态真的变了（dirty）时才重试，不再每秒去敲原生接口。
+const RETRY_SECONDS: i64 = 30;
+
 struct SyncState {
     applied: Vec<AppliedAlarm>,
     status: Option<StatusModel>,
     cold: bool,
-    persist_dirty: bool,
-    persist_enabled: bool,
     last_error: Option<String>,
+    retry_after: i64,
 }
 
 /// 移动端状态独立；通知和闹钟共用一把专用锁，只由心跳执行原生同步。
 pub struct MobileShared {
     dirty: AtomicBool,
+    /// 回到前台时置位：常驻通知可能被用户划掉了，下一次同步要重新发一遍。
+    status_stale: AtomicBool,
     suspended: AtomicBool,
+    /// 心跳上一次真正运行的时刻。判断「这一轮到期的提醒是不是早该发过」只看它，
+    /// 不看会被命令和回前台取快照推进的 last_tick。
+    last_heartbeat: AtomicI64,
     heartbeat: Mutex<Option<Thread>>,
     shutdown: Arc<HeartbeatShutdown>,
     synchronizer: Mutex<SyncState>,
@@ -31,20 +39,41 @@ pub struct MobileShared {
 
 impl MobileShared {
     pub fn new(alarms_path: PathBuf) -> Self {
-        let (applied, persist_enabled) = match alarm_store::load(&alarms_path) {
-            Ok(applied) => (applied, true),
+        remove_stale_temporaries(&alarms_path);
+        let applied = match alarm_store::load(&alarms_path) {
+            Ok(applied) => applied,
             Err(_) => {
-                // 不覆盖损坏或链接到其他位置的记录；仍可从规则重建本次内存排程。
-                eprintln!("闹钟记录无法安全读取，保留原文件，本次仅在内存中重建排程。");
-                (Vec::new(), false)
+                // 账本只是本应用私有目录里的缓存：读不了（旧格式、损坏）就挪到一边，
+                // 从规则重建并继续记账；冷启动会按当前状态重新确认全部未来提醒。
+                let aside = alarms_path.with_extension("json.bad");
+                if fs::rename(&alarms_path, &aside).is_err() {
+                    eprintln!("闹钟记录无法读取，也无法移到一旁；本次按当前状态重建排程。");
+                }
+                Vec::new()
             },
         };
         Self {
-            dirty: AtomicBool::new(true), suspended: AtomicBool::new(false),
+            dirty: AtomicBool::new(true),
+            status_stale: AtomicBool::new(false),
+            suspended: AtomicBool::new(false),
+            last_heartbeat: AtomicI64::new(0),
             heartbeat: Mutex::new(None), alarms_path,
             shutdown: Arc::new(HeartbeatShutdown::new()),
             synchronizer: Mutex::new(SyncState { applied, status: None, cold: true,
-                persist_dirty: false, persist_enabled, last_error: None }),
+                last_error: None, retry_after: 0 }),
+        }
+    }
+}
+
+/// 进程在写临时文件和改名之间被杀时会留下 `.alarms.*.tmp`；启动时顺手清掉。
+fn remove_stale_temporaries(alarms_path: &Path) {
+    let Some(parent) = alarms_path.parent() else { return };
+    let Ok(entries) = fs::read_dir(parent) else { return };
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        if name.starts_with(".alarms.") && name.ends_with(".tmp") {
+            let _ = fs::remove_file(entry.path());
         }
     }
 }
@@ -84,9 +113,25 @@ pub fn is_suspended(app: &AppHandle) -> bool {
     app.state::<MobileShared>().suspended.load(Ordering::SeqCst)
 }
 
+/// 心跳每轮调用一次：返回距上一轮心跳的秒数，并记下这一轮。首轮返回一个很大的值。
+pub fn heartbeat_gap(app: &AppHandle, now: i64) -> i64 {
+    let previous = app.state::<MobileShared>().last_heartbeat.swap(now, Ordering::SeqCst);
+    now.saturating_sub(previous)
+}
+
+/// 命令推进时间时用：只读，不算作一次心跳。
+pub fn gap_since_heartbeat(app: &AppHandle, now: i64) -> i64 {
+    now.saturating_sub(app.state::<MobileShared>().last_heartbeat.load(Ordering::SeqCst))
+}
+
 pub fn on_lifecycle(app: &AppHandle, suspended: bool) {
-    app.state::<MobileShared>().suspended.store(suspended, Ordering::SeqCst);
-    if suspended { crate::save(&app.state::<Shared>()); }
+    let mobile = app.state::<MobileShared>();
+    mobile.suspended.store(suspended, Ordering::SeqCst);
+    if suspended {
+        crate::save(&app.state::<Shared>());
+    } else {
+        mobile.status_stale.store(true, Ordering::SeqCst);
+    }
     mark_dirty(app);
 }
 
@@ -94,22 +139,16 @@ fn wall_seconds() -> i64 {
     SystemTime::now().duration_since(UNIX_EPOCH).map(|value| value.as_secs() as i64).unwrap_or(0)
 }
 
-fn persist(mobile: &MobileShared, state: &mut SyncState) -> Result<(), String> {
-    if state.persist_dirty && state.persist_enabled {
-        alarm_store::save(&mobile.alarms_path, &state.applied)
-            .map_err(|_| "闹钟记录写入失败，将在下一轮重试。".to_owned())?;
-        state.persist_dirty = false;
-    }
-    Ok(())
+fn persist(mobile: &MobileShared, ledger: &[AppliedAlarm]) -> Result<(), String> {
+    alarm_store::save(&mobile.alarms_path, ledger).map_err(|_| "闹钟记录写入失败，将稍后重试。".to_owned())
 }
 
 fn sync_alarms(app: &AppHandle, mobile: &MobileShared, state: &mut SyncState,
     desired: &[AppliedAlarm], now: i64) -> Result<(), String> {
-    // 先退出已触发的本地项再补充 horizon 尾部，避免“170 个旧项 + 一个新项”超出存档上限。
+    // 先退出已触发的本地项再补充 horizon 尾部，避免「170 个旧项 + 一个新项」超出存档上限。
     let before = state.applied.len();
     state.applied.retain(|saved| saved.alert.at > now.saturating_add(1));
-    state.persist_dirty |= before != state.applied.len();
-    persist(mobile, state)?;
+    let pruned = before != state.applied.len();
     let mut delta = alerts::diff(&state.applied, desired, now);
     // force-stop 和重启清掉系统闹钟，却不清掉应用文件。冷启动保留旧账本用于精确取消，
     // 只重新确认未来项，不清空 ID，也不触碰已显示或一秒内即将显示的通知。
@@ -118,49 +157,64 @@ fn sync_alarms(app: &AppHandle, mobile: &MobileShared, state: &mut SyncState,
             if !delta.schedule.contains(item) { delta.schedule.push(item.clone()); }
         }
     }
+    if delta.cancel.is_empty() && delta.schedule.is_empty() {
+        if pruned { persist(mobile, &state.applied)?; }
+        state.cold = false;
+        return Ok(());
+    }
+    // 先记账再调原生：进程若在中途被杀，冷启动仍能凭账本取消多余的项、重新确认缺的项。
+    // 整批只落两次盘，不再每排一项就重写一次文件。
+    let mut ahead = state.applied.clone();
+    for item in &delta.schedule {
+        ahead.retain(|saved| saved.id != item.id);
+        ahead.push(item.clone());
+    }
+    persist(mobile, &ahead)?;
     for item in delta.cancel {
         // 原生调用可能排队；再次检查边界，不能把这期间刚弹出的横幅撤掉。
         if item.alert.at > wall_seconds().saturating_add(1) {
             plugin_call(|| app.notification().cancel(vec![item.id]))?;
         }
         state.applied.retain(|saved| saved != &item);
-        state.persist_dirty = true;
-        persist(mobile, state)?;
     }
+    let mut outcome = Ok(());
     if !delta.schedule.is_empty() {
         if plugin_call(|| app.notification().permission_state())? != PermissionState::Granted {
-            return Err("通知未开启，暂不预排系统提醒。".into());
-        }
-        let system: SystemStatus = plugin_call(|| app.sitzfleisch_android().system_status())?;
-        if !system.can_schedule_exact_alarms {
-            return Err("精确闹钟未开启，暂不退化为可能延迟的非精确提醒。".into());
+            outcome = Err("通知未开启，暂不预排系统提醒。".to_owned());
+        } else {
+            // 精确闹钟被关掉时照样排：通知插件会改用非精确的系统闹钟，可能晚到，但不会一条都不响。
+            // 今天页和「设置 → 提醒」会提示用户去打开。
+            for item in delta.schedule {
+                if item.alert.at <= wall_seconds().saturating_add(1) { continue; }
+                let Ok(date) = alerts::schedule_date(item.alert.at) else {
+                    outcome = Err("提醒时刻超出系统范围。".to_owned());
+                    break;
+                };
+                let shown = plugin_call(|| app.notification().builder().id(item.id).channel_id(&item.channel)
+                    .title(&item.title).body(&item.body).icon("ic_stat_zuogong").auto_cancel()
+                    .schedule(Schedule::At { date, repeating: false, allow_while_idle: true }).show());
+                if let Err(error) = shown { outcome = Err(error); break; }
+                state.applied.retain(|saved| saved.id != item.id);
+                state.applied.push(item);
+            }
         }
     }
-    for item in delta.schedule {
-        if item.alert.at <= wall_seconds().saturating_add(1) { continue; }
-        let date = alerts::schedule_date(item.alert.at).map_err(|_| "提醒时刻超出系统范围。".to_owned())?;
-        plugin_call(|| app.notification().builder().id(item.id).channel_id(&item.channel)
-            .title(&item.title).body(&item.body).icon("ic_stat_zuogong")
-            .schedule(Schedule::At { date, repeating: false, allow_while_idle: true }).show())?;
-        state.applied.retain(|saved| saved.id != item.id);
-        state.applied.push(item);
-        state.persist_dirty = true;
-        persist(mobile, state)?;
-    }
+    // 收尾：账本只留真正排上、而且还没到点的项。
     let cutoff = wall_seconds().saturating_add(1);
-    let before = state.applied.len();
     state.applied.retain(|saved| saved.alert.at > cutoff);
-    state.persist_dirty |= before != state.applied.len();
-    persist(mobile, state)?;
-    state.cold = false;
-    Ok(())
+    persist(mobile, &state.applied)?;
+    if outcome.is_ok() { state.cold = false; }
+    outcome
 }
 
 /// 所有参数在心跳的 take_due_* 之后计算；进入本函数前已释放 Shared 的全部锁。
 pub fn sync(app: &AppHandle, desired: Vec<AppliedAlarm>, desired_status: StatusModel, now: i64) {
     let mobile = app.state::<MobileShared>();
-    mobile.dirty.swap(false, Ordering::SeqCst);
+    let forced = mobile.dirty.swap(false, Ordering::SeqCst);
     let mut state = mobile.synchronizer.lock().unwrap();
+    if mobile.status_stale.swap(false, Ordering::SeqCst) { state.status = None; }
+    // 上次失败后先等一等；状态有变化（开格、回前台、刚授权）就立刻重试。
+    if !forced && now < state.retry_after { return; }
     let mut result = sync_alarms(app, &mobile, &mut state, &desired, now);
     if state.status.as_ref() != Some(&desired_status) {
         let now_ms = SystemTime::now().duration_since(UNIX_EPOCH)
@@ -170,11 +224,14 @@ pub fn sync(app: &AppHandle, desired: Vec<AppliedAlarm>, desired_status: StatusM
         if result.is_ok() { result = updated; }
     }
     match result {
-        Ok(()) => state.last_error = None,
+        Ok(()) => {
+            state.last_error = None;
+            state.retry_after = 0;
+        },
         Err(error) => {
             if state.last_error.as_ref() != Some(&error) { eprintln!("移动端提醒同步暂未完成：{error}"); }
             state.last_error = Some(error);
-            mobile.dirty.store(true, Ordering::SeqCst);
+            state.retry_after = now.saturating_add(RETRY_SECONDS);
         },
     }
 }
@@ -222,5 +279,5 @@ pub fn test_notification(app: &AppHandle, water: bool) -> Result<(), String> {
         (9100, "timer", "坐功 · 试一条", "看到这条横幅，说明系统通知这条路是通的。")
     };
     plugin_call(|| app.notification().builder().id(id).channel_id(channel)
-        .title(title).body(body).icon("ic_stat_zuogong").show())
+        .title(title).body(body).icon("ic_stat_zuogong").auto_cancel().show())
 }

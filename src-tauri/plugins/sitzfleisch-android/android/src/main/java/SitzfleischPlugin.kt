@@ -46,8 +46,18 @@ class SitzfleischPlugin(private val activity: Activity) : Plugin(activity) {
   private val manager = activity.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
   private val channelIds = listOf("timer", "body", "water", "status")
 
+  init {
+    // 插件一构造就建好渠道：心跳可能在页面加载完之前就要发常驻通知或预排提醒。
+    ensureChannels()
+  }
+
   override fun load(webView: WebView) {
     super.load(webView)
+    ensureChannels()
+  }
+
+  /** 重建同 ID 的渠道会保留用户在系统里选的声音、开关和重要性，所以可以放心重复调用。 */
+  private fun ensureChannels() {
     val attributes = AudioAttributes.Builder()
       .setUsage(AudioAttributes.USAGE_NOTIFICATION)
       .setContentType(AudioAttributes.CONTENT_TYPE_SONIFICATION)
@@ -65,7 +75,6 @@ class SitzfleischPlugin(private val activity: Activity) : Plugin(activity) {
       enableVibration(false)
       setSound(null, null)
     }
-    // 重建同 ID 的渠道会保留用户在系统里选的声音、开关和重要性。
     manager.createNotificationChannels(listOf(
       reminder("timer", "计时"), reminder("body", "身体提醒"), water, status
     ))
@@ -85,8 +94,6 @@ class SitzfleischPlugin(private val activity: Activity) : Plugin(activity) {
   private fun statusArgs(invoke: Invoke): StatusArgs {
     require(invoke.getRawArgs().length <= 4096)
     val raw = invoke.getArgs()
-    val keys = setOf("visible", "title", "text", "chronometerBaseMs", "countDown", "timeoutAfterMs")
-    require(raw.keys().asSequence().all { it in keys })
     require(raw.opt("visible") is Boolean && raw.opt("countDown") is Boolean)
     require(raw.opt("title") is String && raw.opt("text") is String)
     require(nullableInteger(raw, "chronometerBaseMs", 253402300799000L))
@@ -115,6 +122,7 @@ class SitzfleischPlugin(private val activity: Activity) : Plugin(activity) {
       invoke.reject("通知未开启，请先在系统设置中允许坐功通知。")
       return
     }
+    ensureChannels()
     val icon = activity.resources.getIdentifier("ic_stat_zuogong", "drawable", activity.packageName)
     if (icon == 0) {
       invoke.reject("通知小图标缺失。")
@@ -181,7 +189,6 @@ class SitzfleischPlugin(private val activity: Activity) : Plugin(activity) {
   private fun settingsArgs(invoke: Invoke): SettingsArgs {
     require(invoke.getRawArgs().length <= 256)
     val raw = invoke.getArgs()
-    require(raw.keys().asSequence().all { it == "target" || it == "channelId" })
     require(raw.opt("target") is String)
     val channelId = raw.opt("channelId")
     require(channelId == null || channelId == JSONObject.NULL || channelId is String)

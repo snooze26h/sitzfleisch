@@ -717,8 +717,10 @@ struct HeartbeatStep {
     now: i64,
 }
 
-fn advance_heartbeat(state: &mut core::State, now: i64) -> HeartbeatStep {
-    let show_banners = show_due_banners(time_policy(), now.saturating_sub(state.last_tick));
+/// `gap` 是距上一轮心跳的秒数：桌面就是 last_tick 的间隔；Android 另记心跳时刻，
+/// 因为命令和回前台取快照也会推进 last_tick，不能让它们把一段长空档「藏起来」。
+fn advance_heartbeat(state: &mut core::State, now: i64, gap: i64) -> HeartbeatStep {
+    let show_banners = show_due_banners(time_policy(), gap);
     let focus_done = tick_reporting_finish(state, now, time_policy());
     #[cfg(target_os = "android")]
     let local_seconds = local_reminder_seconds(state);
@@ -744,12 +746,19 @@ fn mutate(
 ) -> Result<Snapshot, String> {
     let shared = app.state::<Shared>();
     if shared.exiting.load(Ordering::SeqCst) {
+        #[cfg(desktop)]
         return Err("正在退出坐功，请等待网站屏蔽解除。".into());
+        #[cfg(mobile)]
+        return Err("坐功正在退出。".into());
     }
     let (outcome, finished, show_banners) = {
         let mut state = shared.state.lock().unwrap();
         let now = now_unix();
-        let show_banners = show_due_banners(time_policy(), now.saturating_sub(state.last_tick));
+        #[cfg(target_os = "android")]
+        let gap = mobile::gap_since_heartbeat(app, now);
+        #[cfg(not(target_os = "android"))]
+        let gap = now.saturating_sub(state.last_tick);
+        let show_banners = show_due_banners(time_policy(), gap);
         let finished = tick_reporting_finish(&mut state, now, time_policy());
         (op(&mut state), finished, show_banners)
     };
@@ -1051,7 +1060,17 @@ fn refresh_hosts_status(blocking: &mut BlockingStatus, current: &str, hosts: &[S
 // ---------- 命令 ----------
 
 #[tauri::command]
-fn get_snapshot(shared: State<'_, Shared>) -> Snapshot {
+fn get_snapshot(app: AppHandle) -> Snapshot {
+    let shared = app.state::<Shared>();
+    // 手机切回前台时界面会主动来取：先按墙钟推进到此刻，锁屏期间走完的格立刻结算并弹出完成记录，
+    // 不必等下一轮心跳。到期提醒仍交给心跳统一处理，系统通知早已按时发出，这里不补发。
+    #[cfg(target_os = "android")]
+    {
+        let mut state = shared.state.lock().unwrap();
+        advance_time(&mut state, now_unix(), time_policy());
+        drop(state);
+        mobile::mark_dirty(&app);
+    }
     snapshot(&shared, true)
 }
 
@@ -1380,7 +1399,10 @@ async fn notification_status(app: AppHandle) -> Result<String, String> {
 #[cfg(target_os = "android")]
 #[tauri::command]
 async fn request_notification_permission(app: AppHandle) -> Result<String, String> {
-    mobile::request_notification_permission(&app)
+    // 系统授权框开着时插件调用会一直等用户作答；放进阻塞线程池，不占异步运行时的工作线程。
+    tauri::async_runtime::spawn_blocking(move || mobile::request_notification_permission(&app))
+        .await
+        .map_err(|_| "通知授权请求没有完成，请重试。".to_owned())?
 }
 
 #[cfg(target_os = "android")]
@@ -1875,7 +1897,11 @@ pub fn run() {
                         let shared = handle.state::<Shared>();
                         let mut state = shared.state.lock().unwrap();
                         let now = now_unix();
-                        let step = advance_heartbeat(&mut state, now);
+                        #[cfg(target_os = "android")]
+                        let gap = mobile::heartbeat_gap(&handle, now);
+                        #[cfg(not(target_os = "android"))]
+                        let gap = now.saturating_sub(state.last_tick);
+                        let step = advance_heartbeat(&mut state, now, gap);
                         drop(state);
                         if ticks.is_multiple_of(30) {
                             save(&shared);

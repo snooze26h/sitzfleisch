@@ -19,28 +19,26 @@
 
 `SitzfleischPlugin.updateStatus` 参数为 `{ visible, title, text, chronometerBaseMs?, countDown, timeoutAfterMs? }`。通知 ID 固定 9000，单色半月小图标，点按打开应用，不带按钮，不设置强调色。PendingIntent 使用 FLAG_IMMUTABLE。chronometerBaseMs 是墙钟毫秒；timeoutAfterMs 是从投递起算的毫秒数。
 
-Rust 的 StatusModel 保存固定计时终点或暂停起点，以整体相等去重；超时也保存绝对终点，投递前才换成 duration，避免每秒重发。仅心跳线程调用 updateStatus，调用前释放 Shared 锁；Activity 不可用时捕获 panic，不写入已应用缓存，下一轮重试。MobileShared 独立保存缓存与心跳唤醒句柄。
+Rust 的 StatusModel 保存固定计时终点或暂停起点，以整体相等去重；超时也保存绝对终点，投递前才换成 duration，避免每秒重发。回到前台时清掉去重缓存重发一次，用户划掉的常驻通知会回来。仅心跳线程调用 updateStatus，调用前释放 Shared 锁；Activity 不可用时捕获 panic，下一轮重试。渠道在插件构造时就建好。
 
 ## 资源
 
-半月小图标位于 `src-tauri/gen/android/app/src/main/res/drawable/ic_stat_zuogong.xml`，需按计划由用户目视确认。
+半月小图标位于 `src-tauri/gen/android/app/src/main/res/drawable/ic_stat_zuogong.xml`。
 
-喝水音由标准库脚本生成：
+喝水音由标准库脚本生成，输出 `src-tauri/gen/android/app/src/main/res/raw/water.wav`（单声道、16 位 PCM、44100 Hz、0.2 秒），可以直接替换：
 
 ```bash
 python3 src-tauri/plugins/sitzfleisch-android/scripts/generate_water.py
 ```
 
-官方通知插件 2.4.0 的 Rust 初始化只接受空配置；不要向 `plugins.notification` 写入图标配置对象。测试通知以及后续 L1-3 的每条预排通知都应显式调用 `.icon("ic_stat_zuogong")`。
+官方通知插件 2.4.0 的 Rust 初始化只接受空配置，不要向 `plugins.notification` 写入图标配置；每条通知都显式调用 `.icon("ic_stat_zuogong")`。
 
-输出为 `src-tauri/gen/android/app/src/main/res/raw/water.wav`：单声道、16 位 PCM、44100 Hz、0.2 秒。脚本放在本插件内，以遵守并行模式线 ① 的目录边界；用户可替换 WAV。
+## 提醒排程
 
-## 当前范围
+心跳每轮取完 `take_due_*` 后，计算未来 12 小时的提醒并与已排的项做差分。应用内提示与系统排程共用文案和两条手机规则：喝水只在学习日内；本次暂停满 2 小时后不再排喝水和「还没开格」。只取消未来超过 1 秒且已不需要的项，已经弹出或即将弹出的项只退出本地账本。每条排程显式传 icon、channel_id、UTC 整秒时刻和 `allow_while_idle`，点开后自动消失。精确闹钟被关掉时照样排，由通知插件改用非精确闹钟。
 
-L1-2 已接入墙钟与前后台生命周期；L1-3 在每轮心跳取完 take_due_* 后计算未来 12 小时的提醒。应用内提示与系统排程共用文案和 D10/D11 过滤。仅取消未来超过 1 秒且已不需要的项，已经弹出与即将弹出的项只退出本地账本。所有排程显式传 icon / channel_id / UTC 整秒 date / allow_while_idle。
+已排的项记在应用数据目录的 `alarms.json`：先整批记账、再调原生接口、最后整理一次，进程中途被杀时冷启动仍能凭账本取消或补排。账本读不出来时移到 `alarms.json.bad`，从规则重建。同步失败后 30 秒内只在状态变化时重试。
 
-applied 原子保存到应用 data_dir/alarms.json，限制大小、数量、ID 与渠道；临时文件独占创建并刷盘后改名。冷启动读取旧账本，保留已显示通知，只重新确认未来排程以恢复 force-stop / 重启清掉的系统闹钟。损坏或链接到其他位置的账本保留原样，本次从规则构建内存排程。手机重启后、打开应用前不会提醒；强行停止期间也不会提醒，重开不补发已错过的通知。
-
-界面线已整合手机布局、权限说明和提醒设置。构建与单元检查不能代替真机锁屏、Doze、厂商菜单、字体和用户目视验收；这些按 PROGRESS.md 单列状态。
+手机重启后、打开应用前不会提醒；强行停止期间也不会提醒，重开后不补发已经错过的通知。
 
 依据：[Android 通知构建 API](https://developer.android.com/reference/androidx/core/app/NotificationCompat.Builder)、[系统设置 Intent](https://developer.android.com/reference/android/provider/Settings)、[通知渠道](https://developer.android.com/reference/android/app/NotificationChannel)。

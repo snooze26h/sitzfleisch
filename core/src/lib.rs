@@ -784,6 +784,8 @@ impl State {
         if max_gap.is_none() && delta > 1 && self.needs_wall_clock_boundary_step() {
             // 刚启用提醒或立刻开下一格时，旧计数可能已经到期；逐秒路径会在下一秒归零。
             // 最多拆出一秒，保留「先格结束、后取提醒」的顺序，其余空档仍一次折叠。
+            // 这一秒到期的提醒在这里直接消费、不再返回：它落在空档开头，已经过去了。
+            // 系统通知按预排时刻发出，应用内提示条对过期提醒本来就不补发。
             self.advance(self.last_tick + 1, None);
             self.take_due_reminders();
             self.advance(now, None);
