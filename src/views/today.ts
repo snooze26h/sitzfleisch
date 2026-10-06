@@ -103,11 +103,23 @@ function activeBoard(d: Day): string {
   // 四块排成两行两列：这一格 | 今天这一轮月，今日配额 | 今天的总读数。
   // 左右两列上下各自对齐，窗口第一屏里放得下「此刻」和「今天」两个尺度。
   const moon = `<div class="moon-cell moon-stage" id="day-moon">${dayMoon(d)}</div>`;
-  const notificationWarning = ui.platform?.mobile && ui.systemStatus?.notificationsEnabled === false
-    ? `<div class="notification-warning"><b>通知未开启，锁屏后到点不会提醒</b>${btn("去开启", { kind: "plate", action: "system-settings", data: { target: "app_notifications" } })}</div>` : "";
+  const notificationWarning = reminderWarning();
   return `<section class="today-top${ui.compact && suggestion ? " choosing" : ""}${ui.compact && notificationWarning ? " with-warning" : ""}" id="today-top">${focusPanel(d)}${moon}${quotaPanel(d, suggestion?.category ?? null)}${dayReadings(d)}${notificationWarning}</section>
     ${diagramBlock()}
     ${d.ledger.length ? logBlock(d) : ""}`;
+}
+
+/** 手机上提醒不能如期送达时，在今天页就说清楚，不让人锁屏后才发现没响。 */
+function reminderWarning(): string {
+  const s = ui.platform?.mobile ? ui.systemStatus : null;
+  if (!s) return "";
+  const warning = (text: string, label: string, target: string) =>
+    `<div class="notification-warning"><b>${text}</b>${btn(label, { kind: "plate", action: "system-settings", data: { target } })}</div>`;
+  if (!s.notificationsEnabled) return warning("通知未开启，锁屏后到点不会提醒", "去开启", "app_notifications");
+  // 「计时」渠道管一格走完和休息结束；它被关掉时，最要紧的提醒一条都不会响。
+  if (s.channels.some((c) => c.id === "timer" && !c.enabled)) return warning("计时提醒已关闭，到点不会提醒", "去设置", "app_notifications");
+  if (!s.canScheduleExactAlarms) return warning("精确闹钟未允许，锁屏后的提醒可能晚到", "去设置", "exact_alarm");
+  return "";
 }
 
 /** 月亮下面：「从几点坐下」这一天已学多少、停了多久、休息了多久，外加今天这一天的菜单。 */

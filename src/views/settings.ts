@@ -140,7 +140,7 @@ function rhythm(): string {
       `${uniform > 0 ? select({ change: "uniform-length", value: uniform, options: withValue(BLOCK_OPTIONS, uniform).map((n) => ({ value: n, label: `${n} 分` })), width: 104, label: "统一时长" }) : ""}${toggle({ change: "uniform-toggle", checked: uniform > 0, label: "统一时长" })}`
     )}
     ${uniform === 0 ? p.categories.map((c) => settingRow(c.name, "默认专注时长", select({ change: "block-length", value: c.default_block_minutes, options: withValue(BLOCK_OPTIONS, c.default_block_minutes).map((n) => ({ value: n, label: `${n} 分` })), width: 104, label: `${c.name}默认专注时长`, data: { id: c.id } }))).join("") : ""}
-    ${settingRow("暂停提醒", "未开格时定时提醒。", select({ change: "idle", value: idle, options: withValue(IDLE_OPTIONS, idle).map((n) => ({ value: n, label: n === 0 ? "关闭" : `${n} 分` })), width: 104, label: "暂停提醒间隔" }))}
+    ${settingRow("暂停提醒", ui.platform?.mobile ? "未开格时定时提醒；本次暂停满 2 小时后不再提醒。" : "未开格时定时提醒。", select({ change: "idle", value: idle, options: withValue(IDLE_OPTIONS, idle).map((n) => ({ value: n, label: n === 0 ? "关闭" : `${n} 分` })), width: 104, label: "暂停提醒间隔" }))}
     ${hasFeature("autostart") ? settingRow("登录时自动启动", ui.autostart === null ? "正在读取系统设置…" : "", toggle({ change: "autostart", checked: ui.autostart === true, disabled: ui.autostart === null, label: "登录时自动启动" })) : ""}
   </div>`;
 }
@@ -263,7 +263,7 @@ function bodyPanel(): string {
   const p = prefs();
   const water = `${hasFeature("in_app_sound_toggle") ? btn("试听", { kind: "quiet", action: "water-sound-test", disabled: !p.sound_enabled || !inTauri, title: inTauri ? "试听喝水提示音" : "请在桌面应用中试听" }) : ""}${toggle({ change: "water-on", checked: p.water_reminder_enabled, label: "喝水提醒" })}`;
   const waterDetail = ui.platform?.mobile
-    ? "学习日进行中，按本地时钟在整点和半点提醒。暂停、休息时也提醒；本次暂停满 2 小时后停止，开下一格后恢复。错过不补发，提示音由系统通知设置管理。"
+    ? "学习日进行中，按本地时钟在整点和半点提醒。暂停、休息时也提醒；本次暂停满 2 小时后停止，开下一格或继续这一格后恢复。错过不补发，提示音由系统通知设置管理。"
     : "按本地时钟，整点和半点提醒。暂停、休息时也提醒；休眠错过不补发。使用独立提示音。";
   const stretch = `${p.stretch_reminder_enabled ? stepper({ bind: "stretch-min", value: p.stretch_reminder_minutes, label: `${p.stretch_reminder_minutes} 分`, min: 15, max: 180, step: 5, ariaLabel: "起身提醒间隔" }) : ""}${toggle({ change: "stretch-on", checked: p.stretch_reminder_enabled, label: "起身护眼提醒" })}`;
   return `<div class="settings-panel rows">
@@ -300,34 +300,45 @@ function notificationPanel(): string {
   </div>`;
 }
 
+/** Android 的 IMPORTANCE_HIGH：到这一级才会从屏幕顶部弹出横幅。 */
+const BANNER_IMPORTANCE = 4;
+const ALERT_CHANNELS = new Set(["timer", "body", "water"]);
+
 function mobileNotificationPanel(): string {
   const s = ui.systemStatus;
   const open = (target: string, channel?: string) => btn("去设置", { kind: "plate", action: "system-settings", data: { target, ...(channel ? { channel } : {}) }, disabled: !hasFeature("system_settings") });
-  const state = (allowed: boolean | undefined, yes: string, no: string) => allowed === undefined ? "尚未读取" : allowed ? yes : no;
   const names = { timer: "计时", body: "身体提醒", water: "喝水", status: "进行中" };
-  // 渠道以系统开关为准；「进行中」本来就静音，不把无声误报成异常。
-  const channelIssues = s ? NOTIFICATION_CHANNELS.filter((id) => !s.channels.find((c) => c.id === id)?.enabled) : [];
-  const channelSummary = !s ? "尚未读取通知渠道状态。"
-    : channelIssues.length ? `${channelIssues.length} 个通知渠道需要处理。`
-    : "计时、身体提醒、喝水和进行中通知均已开启。";
-  const channels = settingRow("通知渠道", channelSummary, "") + channelIssues.map((id) => {
-    const channel = s!.channels.find((c) => c.id === id);
-    const detail = channel
-      ? `${channel.enabled ? "已开启" : "已关闭"} · ${channel.sound ? "有提示音" : "静音"} · ${channel.vibration ? "振动开启" : "振动关闭"}`
-      : "尚未创建，重新打开应用后再检查。";
-    return settingRow(names[id], detail, open("channel", id));
-  }).join("");
+  const rows: string[] = [];
+  // 只有需要处理的项才给「去设置」，正常的项只写一句状态，免得一页全是按钮。
+  rows.push(settingRow("通知权限", !s ? "尚未读取" : s.notificationsEnabled ? "已允许。" : "未开启；锁屏后到点不会提醒。", s && !s.notificationsEnabled ? open("app_notifications") : ""));
+  // 渠道以系统里的开关和重要性为准。荣耀等系统会把新应用的提醒渠道降一级，那样到点仍会响，
+  // 但不会从屏幕顶部弹出横幅；「进行中」本来就是静默常驻，不算问题。
+  const issues = s ? NOTIFICATION_CHANNELS.flatMap((id) => {
+    const channel = s.channels.find((c) => c.id === id);
+    if (!channel) return [{ id, detail: "尚未创建，重新打开应用后再检查。" }];
+    if (!channel.enabled) return [{ id, detail: id === "status" ? "已关闭，通知栏不再显示进行中的倒计时。" : "已关闭，到点不会提醒。" }];
+    if (ALERT_CHANNELS.has(id) && channel.importance < BANNER_IMPORTANCE) return [{ id, detail: "横幅未开启：到点会响铃，但不会从屏幕顶部弹出。打开「横幅通知」即可。" }];
+    return [];
+  }) : [];
+  rows.push(settingRow("通知渠道", !s ? "尚未读取通知渠道状态。"
+    : issues.length ? `${issues.length} 个通知渠道需要处理。`
+    : "计时、身体提醒和喝水会弹出横幅并响铃；进行中的状态静默常驻在通知栏。", ""));
+  for (const { id, detail } of issues) rows.push(settingRow(names[id], detail, open("channel", id)));
+  // Android 13 起安装即获得精确闹钟权限；只有被关掉时才出现这一项。
+  if (s && !s.canScheduleExactAlarms) rows.push(settingRow("精确闹钟", "未允许；锁屏后的提醒可能晚到。", open("exact_alarm")));
+  rows.push(settingRow("电池优化", !s ? "尚未读取"
+    : s.ignoringBatteryOptimizations ? "已设为不限制。"
+    : "未设为不限制。到点提醒不受它影响；如果坐功在后台常被清理，可以改为不限制。", s && !s.ignoringBatteryOptimizations ? open("battery") : ""));
   const honor = /honor|huawei|荣耀|华为/i.test(s?.manufacturer ?? "");
   const guidance = honor
     ? "在「设置 → 应用和服务 → 应用启动管理 → 坐功」中关闭自动管理，允许自启动、关联启动和后台活动。最近任务里下拉坐功卡片并锁定，避免一键清理。菜单名称以手机实际显示为准。"
     : "在系统的应用或电池设置中允许坐功后台活动。可在最近任务中锁定坐功，避免一键清理。菜单名称以手机实际显示为准。";
+  rows.push(settingRow("后台运行", guidance, open("app_details"), "background-guidance"));
   return `<div class="reminder-settings">
     <div class="reminder-check"><p role="status">${ui.systemStatusLoading ? "正在读取系统状态…" : ui.systemStatusError ? "暂时无法读取提醒状态，请重新检查。" : "从系统设置返回后，会自动重新检查。"}</p>${btn("重新检查", { kind: "quiet", action: "system-recheck", disabled: ui.systemStatusLoading })}</div>
-    <div class="settings-panel rows">${settingRow("通知权限", state(s?.notificationsEnabled, "已允许", "未开启；锁屏后到点不会提醒。"), open("app_notifications"))}</div>
-    <section class="reminder-section"><div class="settings-panel rows">${channels}</div></section>
-    <div class="settings-panel rows">${settingRow("精确闹钟", state(s?.canScheduleExactAlarms, "已允许", "未允许；到点提醒可能延迟。"), open("exact_alarm"))}${settingRow("系统电池优化", state(s?.ignoringBatteryOptimizations, "已豁免", "尚未豁免"), open("battery"))}${settingRow("后台运行", guidance, open("app_details"), "background-guidance")}</div>
+    <div class="settings-panel rows">${rows.join("")}</div>
     <div class="reminder-tests">${btn("发测试通知", { kind: "plate", action: "mobile-notif-test" })}${btn("试听喝水提醒", { kind: "plate", action: "mobile-water-test" })}</div>
-    <p class="t-note">在系统通知设置中，分别开启计时、身体提醒和喝水的横幅、锁屏通知与响铃。声音与振动由系统管理。</p>
+    <p class="t-note">提示音与振动由系统通知设置管理。</p>
   </div>`;
 }
 

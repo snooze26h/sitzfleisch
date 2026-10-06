@@ -19,23 +19,36 @@ export async function invoke<T>(command: string, args: Record<string, unknown> =
 }
 
 let platformPromise: Promise<PlatformInfo> | null = null;
-const PLATFORM_FEATURES: (keyof PlatformInfo["features"])[] = [
+type Feature = keyof PlatformInfo["features"];
+const DESKTOP_FEATURES: Feature[] = [
   "tray", "website_blocking", "browser_extension", "autostart", "reveal_state_file",
-  "window_title", "quit_flow", "in_app_sound_toggle", "system_settings", "exact_alarm_status",
+  "window_title", "quit_flow", "in_app_sound_toggle",
 ];
+const ANDROID_FEATURES: Feature[] = ["system_settings", "exact_alarm_status"];
 
-function validPlatformInfo(value: unknown): value is PlatformInfo {
-  if (value === null || typeof value !== "object") return false;
-  const info = value as Partial<PlatformInfo>;
-  return typeof info.os === "string" && /^[a-z][a-z0-9_-]{0,31}$/.test(info.os)
-    && typeof info.mobile === "boolean" && info.features !== null && typeof info.features === "object"
-    && PLATFORM_FEATURES.every((feature) => typeof info.features?.[feature] === "boolean");
+/**
+ * 外壳给的能力表缺键、格式不对或干脆取不到时，按平台推出与外壳一致的默认值，
+ * 而不是让整个界面停在「无法启动」：能力表只决定显示哪些入口，不值得为它拒绝启动。
+ */
+function normalizePlatformInfo(value: unknown): PlatformInfo {
+  const raw = (value !== null && typeof value === "object" ? value : {}) as Partial<PlatformInfo>;
+  const os = typeof raw.os === "string" && /^[a-z][a-z0-9_-]{0,31}$/.test(raw.os)
+    ? raw.os
+    : /Android/i.test(navigator.userAgent) ? "android" : "unknown";
+  const mobile = typeof raw.mobile === "boolean" ? raw.mobile : os === "android" || os === "ios";
+  const reported = raw.features !== null && typeof raw.features === "object" ? raw.features : undefined;
+  const fallback = (feature: Feature) => DESKTOP_FEATURES.includes(feature) ? !mobile : os === "android";
+  const features = Object.fromEntries([...DESKTOP_FEATURES, ...ANDROID_FEATURES].map((feature) => {
+    const value = reported?.[feature];
+    return [feature, typeof value === "boolean" ? value : fallback(feature)];
+  })) as PlatformInfo["features"];
+  return { os, mobile, features };
 }
 
 /** 能力跟着外壳走，窗口变窄不代表它变成了手机。 */
 export function platformInfo(): Promise<PlatformInfo> {
-  return (platformPromise ??= invoke<unknown>("platform_info").then((info) => {
-    if (!validPlatformInfo(info)) throw new Error("平台能力数据格式无效");
+  return (platformPromise ??= invoke<unknown>("platform_info").catch(() => null).then((value) => {
+    const info = normalizePlatformInfo(value);
     document.documentElement.dataset.platform = info.os;
     return info;
   }));

@@ -1,7 +1,7 @@
 // 浏览器里的模拟后台：把 core 的规则用 TS 复刻一遍，让界面能在没有 Tauri 的地方
 // 跑起来、点起来、截图验收。只在非 Tauri 环境被动态加载，不进正式包的主路径。
 // 场景通过 URL hash 选：#qa=start|fresh|chooser|completed|finishing|running|paused|suspended|resting|done|protected|savefail|nohistory
-// 可加 &platform=android 预览平台能力，&clock=<带时区的 ISO 时间> 固定截图时钟。
+// 可加 &platform=android 预览平台能力，&clock=<带时区的 ISO 时间> 固定截图时钟；手机下 &system=blocked|lowered 预览提醒受限。
 
 import type {
   AppState,
@@ -54,13 +54,15 @@ const platform: PlatformInfo = {
 let notificationPermission = mobile && params.get("permission") === "denied" ? "denied"
   : mobile && params.get("permission") === "unknown" ? "unknown" : "granted";
 const blockedSystem = params.get("system") === "blocked";
+// 荣耀等系统给新应用的提醒渠道降一级（不弹横幅）：#system=lowered。
+const loweredSystem = params.get("system") === "lowered";
 const systemFixture: SystemStatus = {
   sdkInt: 36,
   manufacturer: "HONOR",
   notificationsEnabled: notificationPermission === "granted",
   channels: NOTIFICATION_CHANNELS.map((id) => ({
     id, name: { timer: "计时", body: "身体提醒", water: "喝水", status: "进行中" }[id],
-    enabled: !blockedSystem, importance: blockedSystem ? 0 : id === "status" ? 2 : 4,
+    enabled: !blockedSystem, importance: blockedSystem ? 0 : id === "status" ? 2 : loweredSystem ? 3 : 4,
     vibration: !blockedSystem && id !== "status",
     sound: blockedSystem || id === "status" ? null : id === "water" ? "android.resource://com.snooze26h.sitzfleisch.x.debug/raw/water" : "content://settings/system/notification_sound",
   })),
@@ -604,9 +606,10 @@ function buildScenario(name: string): MockState {
       return base;
     case "suspended": {
       // 休眠 20 分钟：暂停段必须从合眼那一刻起算，运行图才不会把这 20 分钟画成在做事。
+      // 手机按墙钟计时，不会出现心跳中断的自动暂停；预览手机时按普通的按停处理。
       base.day = midDay(now, prefs);
-      attachTimer(base.day, { ...focusTimer(now), elapsed_seconds: 4 * 60 }, now, 20 * 60, true);
-      base.day.suspend_seconds = 20 * 60;
+      attachTimer(base.day, { ...focusTimer(now), elapsed_seconds: 4 * 60 }, now, 20 * 60, !mobile);
+      if (!mobile) base.day.suspend_seconds = 20 * 60;
       return base;
     }
     case "resting": {
@@ -663,7 +666,7 @@ function snapshot(withHistory = true): Snapshot {
     write_protected: writeProtected,
     blocking: structuredClone(blocking),
     save_error: saveError,
-    state_path: mobile ? "/data/user/0/com.snooze26h.sitzfleisch.x.debug/files/state.json" : "/Users/you/Library/Application Support/com.snooze26h.sitzfleisch.x/state.json",
+    state_path: mobile ? "/data/user/0/com.snooze26h.sitzfleisch.x.debug/state.json" : "/Users/you/Library/Application Support/com.snooze26h.sitzfleisch.x/state.json",
     initial_view: null,
     initial_scroll: 0,
   };

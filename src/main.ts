@@ -44,7 +44,6 @@ let pulseTimer = 0;
 let prevSnap: Snapshot | null = null;
 let historyRevision = -1;
 let lastView: View | null = null;
-let lastWindowTitle: string | null = null;
 let preferencesQueue: Promise<void> = Promise.resolve();
 let dialogToken = 0;
 let systemRequest = 0;
@@ -103,7 +102,11 @@ function render() {
       ? `<div class="protect-banner save-banner" id="save-banner"><b>上次保存失败，先别退出。</b><div class="banner-actions">${btn("立即重试", { kind: "plate", action: "retry-save" })}<details class="banner-detail" id="save-reason" data-preserve-open><summary>${icon("chevron-right", 14)}<span>查看原因</span></summary><p>上次保存失败：${esc(ui.snap.save_error)}。改动还在内存里，先别退出。</p></details></div></div>`
       : `<div class="protect-banner save-banner" id="save-banner"><b>上次保存失败：${esc(ui.snap.save_error)}。改动还在内存里，先别退出。</b>${btn("立即重试", { kind: "plate", action: "retry-save" })}</div>`
     : "";
-  const html = `<div id="app"><div class="shell" id="shell">${sidebar()}<main class="content" id="content" tabindex="-1" data-scroll>${protect}${saveFailed}${pageHtml()}${toastView()}</main>${mobileTabs()}</div>${overlays()}</div>`;
+  // 手机窄屏的侧栏本来就隐藏，不必每秒拼一遍它和里面的月亮。
+  const side = ui.platform?.mobile && ui.compact ? "" : sidebar();
+  // 弹层打开时给根节点一个标记，提示条据此让位；不依赖旧 WebView 不支持的 :has()。
+  const appClass = topOverlay() ? ` class="has-overlay"` : "";
+  const html = `<div id="app"${appClass}><div class="shell" id="shell">${side}<main class="content" id="content" tabindex="-1" data-scroll>${protect}${saveFailed}${pageHtml()}${toastView()}</main>${mobileTabs()}</div>${overlays()}</div>`;
   morphdom(app, html, {
     onBeforeElUpdated(from, to) {
       // 正在编辑的控件不动，免得打断输入；它的其它属性会在失焦后的下一次渲染补上。
@@ -142,10 +145,20 @@ function render() {
   if (canAutoFocus() && !hadCompletion && topOverlay() === "completion") app.querySelector<HTMLTextAreaElement>("#completion-note")?.focus({ preventScroll: true });
   drawDiagrams();
   paintMoons(app);
-  const title = TITLES[ui.view];
-  if (hasFeature("window_title") && (!ui.platform.mobile || title !== lastWindowTitle)) {
-    lastWindowTitle = title;
-    void setWindowTitle(title);
+  syncTabBarHeight();
+  // 只有桌面有窗口标题；手机的能力表里这一项为 false，这里不会发 IPC。
+  if (hasFeature("window_title")) void setWindowTitle(TITLES[ui.view]);
+}
+
+let tabBarHeight = 0;
+
+/** 提示条要停在底部标签栏上方；标签栏随系统字号变高，按实际高度写进 --tabbar-h。 */
+function syncTabBarHeight() {
+  if (!ui.platform?.mobile) return;
+  const height = app.querySelector<HTMLElement>(".mobile-tabs")?.offsetHeight ?? 0;
+  if (height > 0 && height !== tabBarHeight) {
+    tabBarHeight = height;
+    document.documentElement.style.setProperty("--tabbar-h", `${height}px`);
   }
 }
 
@@ -159,9 +172,11 @@ function drawDiagrams() {
 }
 
 document.addEventListener("visibilitychange", () => {
-  // 后台仍接纳快照；回来时立刻按最新状态补画，不必等下一次心跳。
+  // 手机切到后台时外壳不再推快照，手上这份停在离开的那一刻；回来先补画，
+  // 再主动取一份推进到此刻的快照：锁屏期间走完的格要马上弹出完成记录，不能等下一次心跳。
   if (ui.platform?.mobile && !document.hidden) {
     render();
+    void invoke<Snapshot>("get_snapshot").then(applySnapshot).catch(() => {});
     if (hasFeature("system_settings")) void refreshSystemStatus();
   }
 });
@@ -467,28 +482,53 @@ async function startDay(profileId: string) {
     if (await act("start_day", { profileId })) toast("开始了。这一天从现在算起，不看几点钟。");
     return;
   }
-  if (permissionChoiceMade) { await beginDay(profileId); return; }
+  if (permissionPrompted()) { await beginDay(profileId); return; }
+  // 查询期间保持「开始中」，按钮不可重入；查完再统一解除并重绘。
   ui.startingDay = true;
   render();
-  const status = await refreshSystemStatus();
-  ui.startingDay = false;
-  const granted = status?.notificationsEnabled ?? await invoke<string>("notification_status").then((value) => value === "granted").catch(() => false);
+  let granted = false;
+  try {
+    const status = await refreshSystemStatus();
+    granted = status?.notificationsEnabled
+      ?? await invoke<string>("notification_status").then((value) => value === "granted").catch(() => false);
+  } finally {
+    ui.startingDay = false;
+    render();
+  }
   if (granted) { await beginDay(profileId); return; }
   ask({
     id: "notification-start", title: "开启到点提醒", destructive: false,
     message: "允许坐功发送通知，锁屏后才能看到计时、休息和身体提醒。暂不开启也可以正常计时，之后可在「设置 → 提醒」中开启。",
     confirmLabel: "开启通知并开始", cancelLabel: "先开始",
     onConfirm: async () => {
-      permissionChoiceMade = true;
+      rememberPermissionPrompt();
       await invoke("request_notification_permission").catch((error) => toast(String(error)));
-      await refreshSystemStatus();
+      const after = await refreshSystemStatus();
       if (!await beginDay(profileId)) return "keep";
+      // 拒绝过两次（Android 13+）或在系统里关掉了通知时，系统不会再弹授权框：直接带去通知设置。
+      if (after && !after.notificationsEnabled) {
+        toast("系统没有弹出授权。请在通知设置里打开坐功的通知，返回后会自动检查。", 8000);
+        await openSystemSettings("app_notifications").catch(() => {});
+      }
     },
     onCancel: async () => {
-      permissionChoiceMade = true;
+      rememberPermissionPrompt();
       if (!await beginDay(profileId)) return "keep";
     },
   });
+}
+
+const PERMISSION_PROMPT_KEY = "sitzfleisch.notification-prompted";
+
+/** 首次开日只问一次通知；答过之后改在今天页的提示条和「设置 → 提醒」里处理，不每天追问。 */
+function permissionPrompted(): boolean {
+  try { return permissionChoiceMade || localStorage.getItem(PERMISSION_PROMPT_KEY) === "1"; }
+  catch { return permissionChoiceMade; }
+}
+
+function rememberPermissionPrompt() {
+  permissionChoiceMade = true;
+  try { localStorage.setItem(PERMISSION_PROMPT_KEY, "1"); } catch { /* 存不下就只在本次运行内记住 */ }
 }
 
 function uid(prefix: string): string {
@@ -986,7 +1026,7 @@ async function cancelCompletion() {
   if (ui.completion.automatic) {
     // 自动弹出的框按 Esc 等于「先跳过」；已经写了字的话不能就这么丢掉。
     if (ui.completion.draft.trim()) {
-      toast(ui.platform?.mobile ? "点「保存记录」保存，或点「先跳过」" : "按 ⌘↩ 保存这段记录，或点「先跳过」。");
+      toast(ui.platform?.mobile ? "点「保存记录」保存，或点「先跳过」。" : "按 ⌘↩ 保存这段记录，或点「先跳过」。");
       return;
     }
     await saveCompletion(true);

@@ -1030,13 +1030,15 @@ button.day-cell:active { background: rgba(231, 223, 208, 0.1); }
 /* 手机把此刻与今日进度放在首屏；分区仍只用细线和留白。 */
 @media (max-width: 700px) {
   :root { --page-x: 16px; --page-y: 20px; }
-  body { overscroll-behavior: none; }
+  body, .content { overscroll-behavior: none; }
   .shell { grid-template-columns: minmax(0, 1fr); grid-template-rows: minmax(0, 1fr) auto; }
   .sidebar { display: none; }
   .mobile-tabs { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; padding: 8px 12px; background: var(--bed); border-top: 1px solid var(--hair); }
-  .mobile-tab { position: relative; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 4px; min-height: 56px; border-radius: 8px; font-size: 14px; color: var(--ink-body); }
+  .mobile-tab { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 4px; min-height: 56px; border-radius: 8px; font-size: 14px; color: var(--ink-body); }
   .mobile-tab .ic { color: var(--ink-muted); }
-  .mobile-tab.on { background: var(--plate); }
+  /* 选中沿用侧栏导航项：plate 底、亮字、600。 */
+  .mobile-tab.on { background: var(--plate); color: var(--ink-high); font-weight: 600; }
+  .mobile-tab.on .ic { color: var(--ink-high); }
   .page { gap: 32px; padding-bottom: 32px; }
   .page-heading h1 { font-size: 26px; }
   .heading-copy p:empty { display: none; }
@@ -1104,8 +1106,7 @@ button.day-cell:active { background: rgba(231, 223, 208, 0.1); }
 
   .wall-body { --wu: 5.5; --wall-gap: 4px; }
   .wall { overflow-x: visible; padding-bottom: 6px; justify-content: center; }
-  .wall-key { width: 100%; max-width: none; }
-  .wall-key { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); column-gap: 16px; }
+  .wall-key { width: 100%; max-width: none; display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); column-gap: 16px; }
   .wall-key .k { gap: 8px; }
   .wall-key .k:nth-child(3) { grid-column: 1 / -1; }
   .wall-key .k:nth-child(n+4) .k-mark { display: none; }
@@ -1163,9 +1164,10 @@ button, select, summary, .switch { -webkit-tap-highlight-color: transparent; tou
   .dialog .btns { justify-content: stretch; }
   .dialog .btns .spacer { display: none; }
   .dialog .btns .btn { flex: 1 1 120px; white-space: normal; min-height: 48px; padding-inline: 12px; }
-  .toast { top: auto; bottom: 85px; left: 50%; width: max-content; max-width: calc(100% - 32px); z-index: 70; padding: 10px 12px; gap: 8px; }
+  /* --tabbar-h 由界面按标签栏的实际高度写入；系统大字体下标签栏会变高。 */
+  .toast { top: auto; bottom: calc(var(--tabbar-h, 73px) + 12px); left: 50%; width: max-content; max-width: calc(100% - 32px); z-index: 70; padding: 10px 12px; gap: 8px; }
   /* 底部弹层打开时，提示条放到上方空隙，不能盖住弹层里的输入和按钮。 */
-  #app:has(> .backdrop) .toast { top: 14px; bottom: auto; max-height: calc(15dvh - 28px); overflow-y: auto; overscroll-behavior: contain; }
+  #app.has-overlay .toast { top: 14px; bottom: auto; max-height: calc(15dvh - 28px); overflow-y: auto; overscroll-behavior: contain; }
 }
 
 .notification-warning { grid-column: 1 / -1; display: flex; align-items: center; gap: 12px; padding: 12px 14px; border-radius: 10px; background: rgba(198, 163, 103, 0.06); box-shadow: inset 0 0 0 1px rgba(198, 163, 103, 0.45); }
@@ -1174,7 +1176,6 @@ button, select, summary, .switch { -webkit-tap-highlight-color: transparent; tou
 .reminder-check { display: flex; align-items: center; flex-wrap: wrap; gap: 8px 16px; }
 .reminder-check p { flex: 1; min-width: 180px; font-size: 15px; color: var(--ink-muted); }
 .reminder-tests { display: flex; flex-wrap: wrap; gap: 10px; }
-.reminder-section .section-head { margin-bottom: 0; }
 @media (max-width: 700px) {
   .today-top.with-warning { grid-template-areas: "focus focus" "stamp stamp" "moon day" "notice notice" "quota quota"; }
   .today-top.choosing.with-warning { grid-template-areas: "pause pause" "stamp stamp" "moon day" "notice notice" "suggestion suggestion" "picker picker" "controls controls" "quota quota"; }
