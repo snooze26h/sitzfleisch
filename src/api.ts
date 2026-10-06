@@ -3,7 +3,8 @@
 
 import { invoke as tauriInvoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
-import type { Snapshot } from "./types";
+import type { PlatformInfo, Snapshot, SystemSettingsTarget, SystemStatus } from "./types";
+import { NOTIFICATION_CHANNELS, SYSTEM_SETTINGS_TARGETS } from "./types";
 
 export const inTauri = typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
 
@@ -15,6 +16,70 @@ function mock() {
 export async function invoke<T>(command: string, args: Record<string, unknown> = {}): Promise<T> {
   if (inTauri) return tauriInvoke<T>(command, args);
   return (await mock()).mockInvoke<T>(command, args);
+}
+
+let platformPromise: Promise<PlatformInfo> | null = null;
+type Feature = keyof PlatformInfo["features"];
+const DESKTOP_FEATURES: Feature[] = [
+  "tray", "website_blocking", "browser_extension", "autostart", "reveal_state_file",
+  "window_title", "quit_flow", "in_app_sound_toggle",
+];
+const ANDROID_FEATURES: Feature[] = ["system_settings", "exact_alarm_status"];
+
+/**
+ * 外壳给的能力表缺键、格式不对或干脆取不到时，按平台推出与外壳一致的默认值，
+ * 而不是让整个界面停在「无法启动」：能力表只决定显示哪些入口，不值得为它拒绝启动。
+ */
+function normalizePlatformInfo(value: unknown): PlatformInfo {
+  const raw = (value !== null && typeof value === "object" ? value : {}) as Partial<PlatformInfo>;
+  const os = typeof raw.os === "string" && /^[a-z][a-z0-9_-]{0,31}$/.test(raw.os)
+    ? raw.os
+    : /Android/i.test(navigator.userAgent) ? "android" : "unknown";
+  const mobile = typeof raw.mobile === "boolean" ? raw.mobile : os === "android" || os === "ios";
+  const reported = raw.features !== null && typeof raw.features === "object" ? raw.features : undefined;
+  const fallback = (feature: Feature) => DESKTOP_FEATURES.includes(feature) ? !mobile : os === "android";
+  const features = Object.fromEntries([...DESKTOP_FEATURES, ...ANDROID_FEATURES].map((feature) => {
+    const value = reported?.[feature];
+    return [feature, typeof value === "boolean" ? value : fallback(feature)];
+  })) as PlatformInfo["features"];
+  return { os, mobile, features };
+}
+
+/** 能力跟着外壳走，窗口变窄不代表它变成了手机。 */
+export function platformInfo(): Promise<PlatformInfo> {
+  return (platformPromise ??= invoke<unknown>("platform_info").catch(() => null).then((value) => {
+    const info = normalizePlatformInfo(value);
+    document.documentElement.dataset.platform = info.os;
+    return info;
+  }));
+}
+
+function validSystemStatus(value: unknown): value is SystemStatus {
+  if (value === null || typeof value !== "object") return false;
+  const s = value as Partial<SystemStatus>;
+  return Number.isInteger(s.sdkInt) && s.sdkInt! >= 1 && s.sdkInt! <= 1000
+    && typeof s.manufacturer === "string" && s.manufacturer.length <= 128
+    && typeof s.notificationsEnabled === "boolean" && typeof s.canScheduleExactAlarms === "boolean"
+    && typeof s.ignoringBatteryOptimizations === "boolean" && Array.isArray(s.channels) && s.channels.length <= 16
+    && s.channels.every((c) => c !== null && typeof c === "object" && NOTIFICATION_CHANNELS.includes(c.id)
+      && typeof c.name === "string" && c.name.length <= 128 && typeof c.enabled === "boolean"
+      && Number.isInteger(c.importance) && c.importance >= -1000 && c.importance <= 1000 && typeof c.vibration === "boolean"
+      && (c.sound === null || (typeof c.sound === "string" && c.sound.length <= 2048)))
+    && new Set(s.channels.map((c) => c.id)).size === s.channels.length;
+}
+
+export async function systemStatus(): Promise<SystemStatus> {
+  const status = await invoke<unknown>("system_status");
+  if (!validSystemStatus(status)) throw new Error("系统提醒状态数据格式无效");
+  return status;
+}
+
+export async function openSystemSettings(target: SystemSettingsTarget, channelId?: string): Promise<void> {
+  if (!SYSTEM_SETTINGS_TARGETS.includes(target)
+    || (target === "channel" ? !NOTIFICATION_CHANNELS.includes(channelId as typeof NOTIFICATION_CHANNELS[number]) : channelId !== undefined)) {
+    throw new Error("请选择有效的系统设置入口和通知渠道");
+  }
+  await invoke("open_system_settings", { target, channelId });
 }
 
 export async function onSnapshot(callback: (snapshot: Snapshot) => void): Promise<void> {
@@ -39,6 +104,16 @@ export async function onReminder(callback: (reminder: Reminder) => void): Promis
 
 export async function onExtendRequested(callback: () => void): Promise<void> {
   if (inTauri) await listen("timer://extend", callback);
+}
+
+export async function onBackRequested(callback: () => void | Promise<void>): Promise<void> {
+  if (inTauri) {
+    const { onBackButtonPress } = await import("@tauri-apps/api/app");
+    // 注册后原生会把返回键交给界面，按界面层级退回，不走 WebView 历史。
+    await onBackButtonPress(() => { void callback(); });
+    return;
+  }
+  (await mock()).mockBackButton(callback);
 }
 
 /**

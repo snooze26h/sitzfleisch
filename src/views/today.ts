@@ -81,7 +81,7 @@ function startBoard(): string {
       </div>
       <div class="plan-foot">
         <div class="plan-total"><span class="engraved">总目标</span><span class="num">${esc(meter(total * 60))}</span></div>
-        <div class="plan-go">${btn("开始今天", { kind: "primary", cls: "lg", action: "start-day", data: { id: plan.id } })}</div>
+        <div class="plan-go">${btn("开始今天", { kind: "primary", cls: "lg", action: "start-day", data: { id: plan.id }, disabled: ui.startingDay })}</div>
       </div>
       ${crescentArt("start-art")}
     </section>`;
@@ -103,9 +103,23 @@ function activeBoard(d: Day): string {
   // 四块排成两行两列：这一格 | 今天这一轮月，今日配额 | 今天的总读数。
   // 左右两列上下各自对齐，窗口第一屏里放得下「此刻」和「今天」两个尺度。
   const moon = `<div class="moon-cell moon-stage" id="day-moon">${dayMoon(d)}</div>`;
-  return `<section class="today-top" id="today-top">${focusPanel(d)}${moon}${quotaPanel(d, suggestion?.category ?? null)}${dayReadings(d)}</section>
+  const notificationWarning = reminderWarning();
+  return `<section class="today-top${ui.compact && suggestion ? " choosing" : ""}${ui.compact && notificationWarning ? " with-warning" : ""}" id="today-top">${focusPanel(d)}${moon}${quotaPanel(d, suggestion?.category ?? null)}${dayReadings(d)}${notificationWarning}</section>
     ${diagramBlock()}
     ${d.ledger.length ? logBlock(d) : ""}`;
+}
+
+/** 手机上提醒不能如期送达时，在今天页就说清楚，不让人锁屏后才发现没响。 */
+function reminderWarning(): string {
+  const s = ui.platform?.mobile ? ui.systemStatus : null;
+  if (!s) return "";
+  const warning = (text: string, label: string, target: string) =>
+    `<div class="notification-warning"><b>${text}</b>${btn(label, { kind: "plate", action: "system-settings", data: { target } })}</div>`;
+  if (!s.notificationsEnabled) return warning("通知未开启，锁屏后到点不会提醒", "去开启", "app_notifications");
+  // 「计时」渠道管一格走完和休息结束；它被关掉时，最要紧的提醒一条都不会响。
+  if (s.channels.some((c) => c.id === "timer" && !c.enabled)) return warning("计时提醒已关闭，到点不会提醒", "去设置", "app_notifications");
+  if (!s.canScheduleExactAlarms) return warning("精确闹钟未允许，锁屏后的提醒可能晚到", "去设置", "exact_alarm");
+  return "";
 }
 
 /** 月亮下面：「从几点坐下」这一天已学多少、停了多久、休息了多久，外加今天这一天的菜单。 */
@@ -113,11 +127,21 @@ function dayReadings(d: Day): string {
   // 核心心跳已经累计当前暂停段，界面直接使用总账，不能再叠加一次。
   // 休息也落在暂停里：这里拆开写，计划好的休息不算成「停下来」。不满一分钟的不写，免得冒出一个 0m。
   const rest = restSeconds(d);
+  // 手机的大字设置会让长时长超出月亮旁的窄列；在小时单位后留软换行，不缩小读数。
+  const displayMeter = (seconds: number) => {
+    const value = esc(meter(seconds));
+    return ui.platform?.os === "android" && ui.compact ? value.replace(/h(?=\d)/, "h<wbr>") : value;
+  };
   const secondary = (label: string, seconds: number) => seconds >= 60
-    ? `<div class="net secondary"><span class="engraved">${label}</span><div class="figure"><span class="val">${esc(meter(seconds))}</span></div></div>`
+    ? `<div class="net secondary"><span class="engraved">${label}</span><div class="figure"><span class="val">${displayMeter(seconds)}</span></div></div>`
     : "";
   const paused = secondary("已暂停", Math.max(0, d.paused_seconds - rest)) + secondary("已休息", rest);
   const moreItems = `${menuItem("复制今天的 Markdown 总结", "copy-today-md")}<div class="menu-sep"></div>${menuItem("返回开始页…", "discard-day", { danger: true })}${menuItem("收工归档…", "end-day", { danger: true })}`;
+  if (ui.compact) {
+    // 钟点与菜单通栏，给右侧的 40px / 28px 读数留足宽度。
+    return `<div class="day-heading"><header class="section-head"><h2 class="section-title">从 ${esc(wallClock(d.started_at))} 坐下</h2><span class="trail">${menuButton("more", ui.menu, icon("ellipsis-vertical", 17), moreItems, { iconOnly: true, ariaLabel: "更多操作" })}</span></header></div>
+      <aside class="day-readings" id="day-readings"><div class="net"><span class="engraved">已学</span><div class="figure"><span class="val">${displayMeter(netSeconds(d))}</span><span class="of">/ ${displayMeter(quotaSeconds(d))}</span></div></div>${paused}</aside>`;
+  }
   return `<aside class="day-readings" id="day-readings">
     <header class="section-head"><h2 class="section-title">从 ${esc(wallClock(d.started_at))} 坐下</h2><span class="trail">${menuButton("more", ui.menu, icon("ellipsis-vertical", 17), moreItems, { iconOnly: true, ariaLabel: "更多操作" })}</span></header>
     <div class="net"><span class="engraved">已学</span><div class="figure"><span class="val">${esc(meter(netSeconds(d)))}</span><span class="of">/ ${esc(meter(quotaSeconds(d)))}</span></div></div>

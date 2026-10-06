@@ -1,10 +1,10 @@
 // 主循环：快照进来 → 拼 HTML → morphdom 打补丁 → 画运行图。所有交互走事件委托。
 
 import morphdom from "morphdom";
-import { invoke, onExtendRequested, onQuitBlocked, onQuitBlockingFailed, onReminder, onSnapshot, setWindowTitle } from "./api";
+import { invoke, onBackRequested, onExtendRequested, onQuitBlocked, onQuitBlockingFailed, onReminder, onSnapshot, openSystemSettings, platformInfo, setWindowTitle, systemStatus } from "./api";
 import { conflictingHost, MAX_BLOCK_RULES, normalizeHost, normalizeUrl } from "./blocking";
 import type { Day, Preferences, Snapshot, View } from "./types";
-import { MAX_BLOCK_MINUTES, MIN_BLOCK_MINUTES, MAX_COMPLETION_NOTE_CHARS } from "./types";
+import { MAX_BLOCK_MINUTES, MIN_BLOCK_MINUTES, MAX_COMPLETION_NOTE_CHARS, SYSTEM_SETTINGS_TARGETS, type SystemSettingsTarget } from "./types";
 import { SHORT_NAME_WIDTH, dayLabel, displayWidth, duration, esc, nowUnix } from "./format";
 import {
   MAX_PROJECTS,
@@ -12,6 +12,7 @@ import {
   day,
   dialogIsBusy,
   history,
+  hasFeature,
   isPaused,
   nameOf,
   prefs,
@@ -22,18 +23,21 @@ import {
   type DialogOutcome,
 } from "./state";
 import { btn } from "./components";
+import { icon } from "./icons";
 import { blockMinutes, suggest } from "./scheduler";
 import { mergeSnapshot } from "./snapshots";
 import { markdownForDay } from "./markdown";
-import { sidebar } from "./views/shell";
+import { mobileTabs, sidebar } from "./views/shell";
 import { todayPage } from "./views/today";
 import { historyEmpty, historyPage } from "./views/history";
-import { blockState, settingsPage } from "./views/settings";
+import { blockState, settingsPage, settingsSections } from "./views/settings";
 import { overlays, toastView } from "./views/overlays";
 import { drawDiagram } from "./views/diagram";
 import { loadMoon, paintMoons } from "./moon";
 
 const app = document.getElementById("app")!;
+const compactQuery = window.matchMedia("(max-width: 700px)");
+const touchQuery = window.matchMedia("(pointer: coarse)");
 const TITLES: Record<View, string> = { today: "今天", history: "历史", settings: "设置" };
 let toastTimer = 0;
 let pulseTimer = 0;
@@ -42,6 +46,8 @@ let historyRevision = -1;
 let lastView: View | null = null;
 let preferencesQueue: Promise<void> = Promise.resolve();
 let dialogToken = 0;
+let systemRequest = 0;
+let permissionChoiceMade = false;
 /** 把框叫出来的那个元素；关框之后焦点还给它。 */
 let dialogOpener: HTMLElement | null = null;
 
@@ -68,21 +74,39 @@ function reconcileSelection() {
   ui.minutesDraft = null;
 }
 
+function renderSuspended(): boolean {
+  return ui.platform?.mobile === true && document.hidden;
+}
+
+function canAutoFocus(): boolean {
+  // 手机上的自动聚焦会先弹键盘，把用户还没读完的弹层推走。
+  return ui.platform?.mobile !== true && !touchQuery.matches;
+}
+
 function render() {
-  if (!ui.snap) return;
+  if (!ui.snap || !ui.platform || renderSuspended()) return;
+  ui.compact = compactQuery.matches;
   ui.now = nowUnix();
   reconcileSelection();
   const hadCompletion = !!ui.completion;
   promptPendingCompletion();
   // 状态文件损坏或来自更高版本时 App 不落盘：这件事必须在每一页都看得见。
   const protect = ui.snap.write_protected
-    ? `<div class="protect-banner" id="protect"><b>状态文件处于保护模式，本次运行不会保存任何改动。</b><span>${esc(ui.snap.write_protected)} 应用不会覆盖原文件：${esc(ui.snap.state_path)}</span></div>`
+    ? ui.compact
+      ? `<div class="protect-banner" id="protect"><b>状态文件处于保护模式，本次运行不会保存任何改动。</b><details class="banner-detail" id="protect-reason" data-preserve-open><summary>${icon("chevron-right", 14)}<span>查看原因</span></summary><p>${esc(ui.snap.write_protected)} 应用不会覆盖原文件：${esc(ui.snap.state_path)}</p></details></div>`
+      : `<div class="protect-banner" id="protect"><b>状态文件处于保护模式，本次运行不会保存任何改动。</b><span>${esc(ui.snap.write_protected)} 应用不会覆盖原文件：${esc(ui.snap.state_path)}</span></div>`
     : "";
   // 保护模式本来就不写盘，那不叫保存失败；只有真的写不进去才报这一条。
   const saveFailed = ui.snap.save_error && !ui.snap.write_protected
-    ? `<div class="protect-banner save-banner" id="save-banner"><b>上次保存失败：${esc(ui.snap.save_error)}。改动还在内存里，先别退出。</b>${btn("立即重试", { kind: "plate", action: "retry-save" })}</div>`
+    ? ui.compact
+      ? `<div class="protect-banner save-banner" id="save-banner"><b>上次保存失败，先别退出。</b><div class="banner-actions">${btn("立即重试", { kind: "plate", action: "retry-save" })}<details class="banner-detail" id="save-reason" data-preserve-open><summary>${icon("chevron-right", 14)}<span>查看原因</span></summary><p>上次保存失败：${esc(ui.snap.save_error)}。改动还在内存里，先别退出。</p></details></div></div>`
+      : `<div class="protect-banner save-banner" id="save-banner"><b>上次保存失败：${esc(ui.snap.save_error)}。改动还在内存里，先别退出。</b>${btn("立即重试", { kind: "plate", action: "retry-save" })}</div>`
     : "";
-  const html = `<div id="app"><div class="shell" id="shell">${sidebar()}<main class="content" id="content" tabindex="-1" data-scroll>${protect}${saveFailed}${pageHtml()}${toastView()}</main></div>${overlays()}</div>`;
+  // 手机窄屏的侧栏本来就隐藏，不必每秒拼一遍它和里面的月亮。
+  const side = ui.platform?.mobile && ui.compact ? "" : sidebar();
+  // 弹层打开时给根节点一个标记，提示条据此让位；不依赖旧 WebView 不支持的 :has()。
+  const appClass = topOverlay() ? ` class="has-overlay"` : "";
+  const html = `<div id="app"${appClass}><div class="shell" id="shell">${side}<main class="content" id="content" tabindex="-1" data-scroll>${protect}${saveFailed}${pageHtml()}${toastView()}</main>${mobileTabs()}</div>${overlays()}</div>`;
   morphdom(app, html, {
     onBeforeElUpdated(from, to) {
       // 正在编辑的控件不动，免得打断输入；它的其它属性会在失焦后的下一次渲染补上。
@@ -118,13 +142,28 @@ function render() {
     const main = app.querySelector<HTMLElement>("[data-scroll]");
     if (main) main.scrollTop = 0;
   }
-  if (!hadCompletion && topOverlay() === "completion") app.querySelector<HTMLTextAreaElement>("#completion-note")?.focus({ preventScroll: true });
+  if (canAutoFocus() && !hadCompletion && topOverlay() === "completion") app.querySelector<HTMLTextAreaElement>("#completion-note")?.focus({ preventScroll: true });
   drawDiagrams();
   paintMoons(app);
-  void setWindowTitle(TITLES[ui.view]);
+  syncTabBarHeight();
+  // 只有桌面有窗口标题；手机的能力表里这一项为 false，这里不会发 IPC。
+  if (hasFeature("window_title")) void setWindowTitle(TITLES[ui.view]);
+}
+
+let tabBarHeight = 0;
+
+/** 提示条要停在底部标签栏上方；标签栏随系统字号变高，按实际高度写进 --tabbar-h。 */
+function syncTabBarHeight() {
+  if (!ui.platform?.mobile) return;
+  const height = app.querySelector<HTMLElement>(".mobile-tabs")?.offsetHeight ?? 0;
+  if (height > 0 && height !== tabBarHeight) {
+    tabBarHeight = height;
+    document.documentElement.style.setProperty("--tabbar-h", `${height}px`);
+  }
 }
 
 function drawDiagrams() {
+  if (renderSuspended()) return;
   const d = day();
   if (!d) return;
   for (const canvas of app.querySelectorAll<HTMLCanvasElement>("canvas[data-diagram]")) {
@@ -132,12 +171,26 @@ function drawDiagrams() {
   }
 }
 
+document.addEventListener("visibilitychange", () => {
+  // 手机切到后台时外壳不再推快照，手上这份停在离开的那一刻；回来先补画，
+  // 再主动取一份推进到此刻的快照：锁屏期间走完的格要马上弹出完成记录，不能等下一次心跳。
+  if (ui.platform?.mobile && !document.hidden) {
+    render();
+    void invoke<Snapshot>("get_snapshot").then(applySnapshot).catch(() => {});
+    if (hasFeature("system_settings")) void refreshSystemStatus();
+  }
+});
+compactQuery.addEventListener("change", render);
+
 new ResizeObserver(() => requestAnimationFrame(() => {
+  if (renderSuspended()) return;
   drawDiagrams();
   paintMoons(app);
 })).observe(app);
 // 月面资料图读好之前，页面上的月亮是空的；读好后立刻补画一次。
-loadMoon(() => paintMoons(app));
+loadMoon(() => {
+  if (!renderSuspended()) paintMoons(app);
+});
 // 字体装载完成前 canvas 会用回退字体画刻度，装好后重画一次。
 void document.fonts.ready.then(() => drawDiagrams());
 
@@ -242,7 +295,7 @@ function ask(dialog: Omit<Dialog, "token">) {
 
 /** 打开或恢复可点状态之后，把焦点放回它自己指定的那个键。 */
 function focusDialog(dialog: Dialog) {
-  if (!dialog.focus) return;
+  if (!dialog.focus || !canAutoFocus()) return;
   if (dialog.focus === "input") {
     app.querySelector<HTMLInputElement>("#extension-minutes")?.focus();
     return;
@@ -263,8 +316,30 @@ function closeDialog() {
   if (topOverlay() === "completion") return;
   const opener = dialogOpener;
   dialogOpener = null;
-  if (opener?.isConnected) opener.focus();
-  else app.querySelector<HTMLElement>("#content")?.focus();
+  if (canAutoFocus()) {
+    if (opener?.isConnected) opener.focus();
+    else app.querySelector<HTMLElement>("#content")?.focus();
+  }
+}
+
+async function handleBack() {
+  const top = topOverlay();
+  if (top === "completion") { await cancelCompletion(); return; }
+  if (top === "dialog") { if (!dialogIsBusy()) closeDialog(); return; }
+  if (top === "removal") { ui.removal = null; render(); return; }
+  if (ui.menu) { ui.menu = null; render(); return; }
+  if (ui.view === "settings" && ui.compact && !ui.settingsIndex) {
+    ui.settingsIndex = true;
+    render();
+    document.getElementById("content")?.scrollTo({ top: 0 });
+    return;
+  }
+  if (ui.view !== "today") {
+    ui.view = "today";
+    render();
+    return;
+  }
+  await invoke("move_task_to_back").catch((error) => toast(String(error)));
 }
 
 /**
@@ -343,15 +418,18 @@ async function copyText(text: string): Promise<boolean> {
 }
 
 async function loadSettingsExtras() {
+  if (ui.platform?.mobile && hasFeature("system_settings")) await refreshSystemStatus();
   try {
     ui.notificationStatus = await invoke<string>("notification_status");
   } catch {
     ui.notificationStatus = "unknown";
   }
-  try {
-    ui.autostart = await invoke<boolean>("autostart_status");
-  } catch {
-    ui.autostart = false;
+  if (hasFeature("autostart")) {
+    try {
+      ui.autostart = await invoke<boolean>("autostart_status");
+    } catch {
+      ui.autostart = false;
+    }
   }
   try {
     ui.appVersion = await invoke<string>("app_version");
@@ -359,6 +437,98 @@ async function loadSettingsExtras() {
     ui.appVersion = null;
   }
   render();
+}
+
+async function refreshSystemStatus() {
+  const request = ++systemRequest;
+  ui.systemStatusLoading = true;
+  render();
+  try {
+    const status = await systemStatus();
+    if (request === systemRequest) {
+      ui.systemStatus = status;
+      ui.systemStatusError = "";
+      ui.notificationStatus = status.notificationsEnabled ? "granted" : "denied";
+    }
+    return status;
+  } catch (error) {
+    if (request === systemRequest) {
+      ui.systemStatus = null;
+      ui.systemStatusError = String(error).slice(0, 240);
+    }
+    return null;
+  } finally {
+    // 系统设置快速进出时，迟到的查询不能覆盖较新的结果。
+    if (request === systemRequest) {
+      ui.systemStatusLoading = false;
+      render();
+    }
+  }
+}
+
+async function beginDay(profileId: string) {
+  ui.startingDay = true;
+  render();
+  try {
+    const snap = await act("start_day", { profileId });
+    if (snap) toast("开始了。这一天从现在算起，不看几点钟。");
+    return !!snap;
+  } finally { ui.startingDay = false; render(); }
+}
+
+async function startDay(profileId: string) {
+  if (ui.startingDay || day() || !prefs().profiles.some((profile) => profile.id === profileId)) return;
+  if (!ui.platform?.mobile) {
+    if (await act("start_day", { profileId })) toast("开始了。这一天从现在算起，不看几点钟。");
+    return;
+  }
+  if (permissionPrompted()) { await beginDay(profileId); return; }
+  // 查询期间保持「开始中」，按钮不可重入；查完再统一解除并重绘。
+  ui.startingDay = true;
+  render();
+  let granted = false;
+  try {
+    const status = await refreshSystemStatus();
+    granted = status?.notificationsEnabled
+      ?? await invoke<string>("notification_status").then((value) => value === "granted").catch(() => false);
+  } finally {
+    ui.startingDay = false;
+    render();
+  }
+  if (granted) { await beginDay(profileId); return; }
+  ask({
+    id: "notification-start", title: "开启到点提醒", destructive: false,
+    message: "允许坐功发送通知，锁屏后才能看到计时、休息和身体提醒。暂不开启也可以正常计时，之后可在「设置 → 提醒」中开启。",
+    confirmLabel: "开启通知并开始", cancelLabel: "先开始",
+    onConfirm: async () => {
+      rememberPermissionPrompt();
+      await invoke("request_notification_permission").catch((error) => toast(String(error)));
+      const after = await refreshSystemStatus();
+      if (!await beginDay(profileId)) return "keep";
+      // 拒绝过两次（Android 13+）或在系统里关掉了通知时，系统不会再弹授权框：直接带去通知设置。
+      if (after && !after.notificationsEnabled) {
+        toast("系统没有弹出授权。请在通知设置里打开坐功的通知，返回后会自动检查。", 8000);
+        await openSystemSettings("app_notifications").catch(() => {});
+      }
+    },
+    onCancel: async () => {
+      rememberPermissionPrompt();
+      if (!await beginDay(profileId)) return "keep";
+    },
+  });
+}
+
+const PERMISSION_PROMPT_KEY = "sitzfleisch.notification-prompted";
+
+/** 首次开日只问一次通知；答过之后改在今天页的提示条和「设置 → 提醒」里处理，不每天追问。 */
+function permissionPrompted(): boolean {
+  try { return permissionChoiceMade || localStorage.getItem(PERMISSION_PROMPT_KEY) === "1"; }
+  catch { return permissionChoiceMade; }
+}
+
+function rememberPermissionPrompt() {
+  permissionChoiceMade = true;
+  try { localStorage.setItem(PERMISSION_PROMPT_KEY, "1"); } catch { /* 存不下就只在本次运行内记住 */ }
 }
 
 function uid(prefix: string): string {
@@ -373,6 +543,8 @@ async function handleAction(action: string, el: HTMLElement) {
   switch (action) {
     case "tab": {
       const view = el.dataset.view as View;
+      if (view !== "today" && view !== "history" && view !== "settings") break;
+      if (view === "settings" && (ui.compact || ui.view !== "settings")) ui.settingsIndex = true;
       ui.view = view;
       ui.menu = null;
       render();
@@ -391,7 +563,8 @@ async function handleAction(action: string, el: HTMLElement) {
     case "dialog-cancel":
       // 正在跑的那一下没结束前，取消、Esc、点背景都不算数。
       if (dialogIsBusy()) break;
-      closeDialog();
+      if (ui.dialog?.onCancel && el instanceof HTMLButtonElement) await runDialogAction(ui.dialog, ui.dialog.onCancel);
+      else closeDialog();
       break;
     case "dialog-confirm":
     case "dialog-alt": {
@@ -407,7 +580,7 @@ async function handleAction(action: string, el: HTMLElement) {
 
     // ----- 今天 -----
     case "start-day":
-      if (await act("start_day", { profileId: id })) toast("开始了。这一天从现在算起，不看几点钟。");
+      await startDay(id);
       break;
     case "discard-day":
       ask({
@@ -486,7 +659,7 @@ async function handleAction(action: string, el: HTMLElement) {
       if (recordDay && Number.isInteger(index) && recordDay.ledger[index]?.ended_at === Number(el.dataset.ended)) {
         openCompletion(recordDay, index, false);
         render();
-        app.querySelector<HTMLTextAreaElement>("#completion-note")?.focus();
+        if (canAutoFocus()) app.querySelector<HTMLTextAreaElement>("#completion-note")?.focus();
       }
       break;
     }
@@ -507,6 +680,11 @@ async function handleAction(action: string, el: HTMLElement) {
       break;
     }
     // ----- 历史 -----
+    case "history-gap": {
+      const at = Number(id);
+      if (Number.isSafeInteger(at) && at > 0 && at < ui.now) toast(`${dayLabel(at)}，没有记录。`);
+      break;
+    }
     case "open-chart-day": {
       const key = Number(id);
       if (!history().some((entry) => entry.day.started_at === key)) break;
@@ -514,7 +692,7 @@ async function handleAction(action: string, el: HTMLElement) {
       ui.expandedDays.add(key);
       render();
       const row = document.getElementById(`archive-${key}`);
-      row?.focus({ preventScroll: true });
+      if (canAutoFocus()) row?.focus({ preventScroll: true });
       row?.scrollIntoView({ block: "start" });
       break;
     }
@@ -551,14 +729,22 @@ async function handleAction(action: string, el: HTMLElement) {
     }
 
     // ----- 设置：项目 -----
+    case "settings-index":
+      ui.settingsIndex = true;
+      ui.menu = null;
+      render();
+      document.getElementById("content")?.scrollTo({ top: 0 });
+      break;
     case "jump-settings": {
+      if (!settingsSections().some(([section]) => section === id)) break;
       // 换分区＝换页：滚动条回顶，焦点落到新分区上，读屏也跟着走。
       ui.view = "settings";
       ui.settingsSection = id;
+      ui.settingsIndex = false;
       ui.expandedProject = null;
       render();
       document.getElementById("content")?.scrollTo({ top: 0 });
-      document.getElementById(`panel-${id}`)?.focus({ preventScroll: true });
+      if (canAutoFocus()) document.getElementById(`panel-${id}`)?.focus({ preventScroll: true });
       break;
     }
     case "add-project": {
@@ -627,7 +813,7 @@ async function handleAction(action: string, el: HTMLElement) {
     case "removal-next":
       if (ui.removal) ui.removal.step = 2;
       render();
-      setTimeout(() => app.querySelector<HTMLInputElement>("[data-input='removal']")?.focus(), 30);
+      if (canAutoFocus()) setTimeout(() => app.querySelector<HTMLInputElement>("[data-input='removal']")?.focus(), 30);
       break;
     case "removal-back":
       if (ui.removal) {
@@ -669,6 +855,22 @@ async function handleAction(action: string, el: HTMLElement) {
       break;
 
     // ----- 设置：提醒 / 关于 -----
+    case "system-recheck":
+      await refreshSystemStatus();
+      break;
+    case "system-settings": {
+      const target = el.dataset.target;
+      if (!SYSTEM_SETTINGS_TARGETS.includes(target as SystemSettingsTarget)) break;
+      await openSystemSettings(target as SystemSettingsTarget, el.dataset.channel).catch((error) => toast(String(error)));
+      break;
+    }
+    case "mobile-notif-test":
+    case "mobile-water-test":
+      try {
+        await invoke(action === "mobile-water-test" ? "test_water_sound" : "test_notification");
+        toast("已发送测试通知；是否显示和响铃由系统设置决定。", 8000);
+      } catch (error) { toast(String(error)); }
+      break;
     case "water-sound-test":
       await invoke("test_water_sound").catch((error) => toast(String(error)));
       break;
@@ -811,7 +1013,7 @@ async function saveCompletion(skip: boolean) {
     applySnapshot(snap);
     if (ui.completion === editor) ui.completion = null;
     render();
-    if (!topOverlay()) app.querySelector<HTMLElement>("#content")?.focus({ preventScroll: true });
+    if (canAutoFocus() && !topOverlay()) app.querySelector<HTMLElement>("#content")?.focus({ preventScroll: true });
   } catch (error) {
     editor.busy = false;
     editor.error = String(error);
@@ -824,7 +1026,7 @@ async function cancelCompletion() {
   if (ui.completion.automatic) {
     // 自动弹出的框按 Esc 等于「先跳过」；已经写了字的话不能就这么丢掉。
     if (ui.completion.draft.trim()) {
-      toast("按 ⌘↩ 保存这段记录，或点「先跳过」。");
+      toast(ui.platform?.mobile ? "点「保存记录」保存，或点「先跳过」。" : "按 ⌘↩ 保存这段记录，或点「先跳过」。");
       return;
     }
     await saveCompletion(true);
@@ -832,7 +1034,7 @@ async function cancelCompletion() {
   else {
     ui.completion = null;
     render();
-    if (!topOverlay()) app.querySelector<HTMLElement>("#content")?.focus({ preventScroll: true });
+    if (canAutoFocus() && !topOverlay()) app.querySelector<HTMLElement>("#content")?.focus({ preventScroll: true });
   }
 }
 
@@ -1176,73 +1378,80 @@ const params = new URLSearchParams(location.hash.replace(/^#/, ""));
 const initialView = params.get("view");
 if (initialView === "today" || initialView === "history" || initialView === "settings") ui.view = initialView;
 
-void onSnapshot(applySnapshot);
-void onExtendRequested(openExtensionDialog);
-// 退出前那次保存没写进去：外壳不退出，在这里问用户怎么办。
-void onQuitBlocked((reason) => {
-  ask({
-    id: QUIT_DIALOG_ID,
-    title: "退出前保存失败",
-    message: `${reason}。现在退出会丢掉自上次成功保存以来的改动。`,
-    confirmLabel: "重试并退出",
-    cancelLabel: "留在这里",
-    destructive: false,
-    focus: "confirm",
-    onConfirm: async (self): Promise<"keep"> => {
-      // 成功的话进程已经没了，走不到下一行；失败就把最新的原因换进正文，框留着。
-      try {
-        await invoke("quit_after_save");
-      } catch (error) {
-        // 认 token 不认 id：await 期间这个框若已被换掉，改的就是别人的正文了。
-        if (ui.dialog?.token === self.token) ui.dialog.message = `${String(error)}。现在退出会丢掉自上次成功保存以来的改动。`;
-      }
-      return "keep";
-    },
-    alt: {
-      label: "不保存退出",
-      onAlt: async () => {
-        try {
-          await invoke("quit_without_saving");
-        } catch (error) {
-          toast(String(error));
-        }
-      },
-    },
+async function start() {
+  // 先拿能力再渲染首屏，手机上不会闪过桌面入口。
+  ui.platform = await platformInfo();
+  if (ui.platform.mobile) await onBackRequested(handleBack);
+  await onSnapshot(applySnapshot);
+  void onExtendRequested(openExtensionDialog);
+  // 退出流程只属于桌面，手机不监听这些事件。
+  if (hasFeature("quit_flow")) {
+    void onQuitBlocked((reason) => {
+      ask({
+        id: QUIT_DIALOG_ID,
+        title: "退出前保存失败",
+        message: `${reason}。现在退出会丢掉自上次成功保存以来的改动。`,
+        confirmLabel: "重试并退出",
+        cancelLabel: "留在这里",
+        destructive: false,
+        focus: "confirm",
+        onConfirm: async (self): Promise<"keep"> => {
+          // 成功的话进程已经没了，走不到下一行；失败就把最新的原因换进正文，框留着。
+          try {
+            await invoke("quit_after_save");
+          } catch (error) {
+            // 认 token 不认 id：await 期间这个框若已被换掉，改的就是别人的正文了。
+            if (ui.dialog?.token === self.token) ui.dialog.message = `${String(error)}。现在退出会丢掉自上次成功保存以来的改动。`;
+          }
+          return "keep";
+        },
+        alt: {
+          label: "不保存退出",
+          onAlt: async () => {
+            try {
+              await invoke("quit_without_saving");
+            } catch (error) {
+              toast(String(error));
+            }
+          },
+        },
+      });
+    });
+    void onQuitBlockingFailed((reason) => {
+      const why = reason.replace(/[。.]\s*$/, "");
+      ask({
+        id: QUIT_DIALOG_ID,
+        title: "退出暂未完成",
+        message: `网站屏蔽还没有解除：${why}。重试并完成系统授权后会自动退出；也可以仍然退出，系统里的整站规则会留到下次打开坐功再解除。`,
+        confirmLabel: "重试并退出", cancelLabel: "留在这里", destructive: false, focus: "confirm",
+        onConfirm: async (self): Promise<"keep"> => {
+          try { await invoke("quit_after_save"); }
+          catch (error) {
+            if (ui.dialog?.token === self.token) ui.dialog.message = `退出暂未完成：${String(error)}`;
+          }
+          return "keep";
+        },
+        // 授权一再被拒或托管标记损坏时，重试永远不会成功，不能把人困在应用里。
+        alt: {
+          label: "仍然退出",
+          onAlt: async () => {
+            try { await invoke("quit_leaving_blocking"); }
+            catch (error) { toast(String(error)); }
+          },
+        },
+      });
+    });
+  }
+  // 系统通知发不出去时（未签名的本地构建很常见），至少界面里看得见。
+  void onReminder((reminder) => {
+    // 系统横幅显不显示由系统设置决定，App 判断不了，所以界面里这条一律也出。
+    toast(`${reminder.title}：${reminder.body}`, 8000);
   });
-});
-void onQuitBlockingFailed((reason) => {
-  const why = reason.replace(/[。.]\s*$/, "");
-  ask({
-    id: QUIT_DIALOG_ID,
-    title: "退出暂未完成",
-    message: `网站屏蔽还没有解除：${why}。重试并完成系统授权后会自动退出；也可以仍然退出，系统里的整站规则会留到下次打开坐功再解除。`,
-    confirmLabel: "重试并退出", cancelLabel: "留在这里", destructive: false, focus: "confirm",
-    onConfirm: async (self): Promise<"keep"> => {
-      try { await invoke("quit_after_save"); }
-      catch (error) {
-        if (ui.dialog?.token === self.token) ui.dialog.message = `退出暂未完成：${String(error)}`;
-      }
-      return "keep";
-    },
-    // 授权一再被拒或托管标记损坏时，重试永远不会成功，不能把人困在应用里。
-    alt: {
-      label: "仍然退出",
-      onAlt: async () => {
-        try { await invoke("quit_leaving_blocking"); }
-        catch (error) { toast(String(error)); }
-      },
-    },
-  });
-});
-// 系统通知发不出去时（未签名的本地构建很常见），至少界面里看得见。
-void onReminder((reminder) => {
-  // 系统横幅显不显示由系统设置决定，App 判断不了，所以界面里这条一律也出。
-  toast(`${reminder.title}：${reminder.body}`, 8000);
-});
-void invoke<Snapshot>("get_snapshot").then((snap) => {
+  const snap = await invoke<Snapshot>("get_snapshot");
   const qaView = snap.initial_view;
   if (!initialView && (qaView === "today" || qaView === "history" || qaView === "settings")) ui.view = qaView;
   applySnapshot(snap);
+  if (ui.platform.mobile && hasFeature("system_settings")) void refreshSystemStatus();
   if (ui.view === "settings") void loadSettingsExtras();
   if (snap.initial_scroll) {
     requestAnimationFrame(() => {
@@ -1250,4 +1459,8 @@ void invoke<Snapshot>("get_snapshot").then((snap) => {
       if (main) main.scrollTop = snap.initial_scroll ?? 0;
     });
   }
+}
+
+void start().catch((error) => {
+  app.innerHTML = `<p role="alert">无法启动坐功：${esc(String(error))}。请重新打开应用。</p>`;
 });

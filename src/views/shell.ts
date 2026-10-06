@@ -6,7 +6,7 @@ import { brandIcon, brandMark } from "../brand";
 import { dayMoon } from "../moon";
 import { suggest } from "../scheduler";
 import type { View } from "../types";
-import { SETTINGS_SECTIONS } from "./settings";
+import { settingsSections } from "./settings";
 import { breakRemaining, day, iconOf, isPaused, nameOf, netSeconds, pauseNowSeconds, prefs, quotaSeconds, resting, shortName, ui } from "../state";
 
 const NAV: [View, string][] = [
@@ -15,13 +15,20 @@ const NAV: [View, string][] = [
   ["settings", "设置"],
 ];
 
+export function mobileTabs(): string {
+  if (!ui.compact) return "";
+  return `<nav class="mobile-tabs" aria-label="主导航">${NAV.map(([view, label]) =>
+    `<button class="mobile-tab${ui.view === view ? " on" : ""}" data-action="tab" data-view="${view}" aria-current="${ui.view === view ? "page" : "false"}">${brandIcon(view)}<span>${label}</span></button>`
+  ).join("")}</nav>`;
+}
+
 export function sidebar(): string {
   // 进了设置，侧栏整个换成设置的分区：一区一页，不再一根滚动条到底。
   const inSettings = ui.view === "settings";
   const nav = inSettings
     ? `<button class="nav-item back" data-action="tab" data-view="today" aria-label="离开设置，回到今天">${icon("chevron-left", 16)}<span>返回</span></button>`
       + `<div class="nav-sep"></div>`
-      + SETTINGS_SECTIONS.map(
+      + settingsSections().map(
           ([id, label, ic]) =>
             `<button class="nav-item${ui.settingsSection === id ? " on" : ""}" data-action="jump-settings" data-id="${id}" aria-current="${ui.settingsSection === id ? "page" : "false"}"><i class="rail"></i>${icon(ic, 16)}<span>${label}</span></button>`
         ).join("")

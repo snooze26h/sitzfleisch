@@ -72,9 +72,141 @@ jobs:
           path: release-artifacts/*
           if-no-files-found: error
 
+  android:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    outputs:
+      build_mode: ${{ steps.mode.outputs.mode }}
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: 22
+
+      - uses: actions/setup-java@b6effb05e454b25005698d916606bdc6ffcbf961 # v5
+        with:
+          distribution: temurin
+          java-version: 17
+
+      - uses: android-actions/setup-android@9fc6c4e9069bf8d3d10b2204b1fb8f6ef7065407 # v3
+        with:
+          packages: platform-tools
+
+      - name: Android SDK 与 NDK
+        run: |
+          sdkmanager "platforms;android-36" "build-tools;36.0.0" "ndk;30.0.16248370"
+          echo "NDK_HOME=$ANDROID_HOME/ndk/30.0.16248370" >> "$GITHUB_ENV"
+
+      - uses: dtolnay/rust-toolchain@89b12181fb390509a0842a86cc55eeb8eb928c1d
+        with:
+          toolchain: stable
+          targets: aarch64-linux-android
+
+      - uses: swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+        with:
+          workspaces: src-tauri
+
+      - run: npm ci
+
+      # 只判断三项签名 Secrets 是否齐全，不写任何文件；发布标签缺任何一项都直接失败。
+      - name: 确定构建模式
+        id: mode
+        env:
+          HAS_SIGNING: ${{ secrets.ANDROID_KEY_BASE64 != '' && secrets.ANDROID_KEY_ALIAS != '' && secrets.ANDROID_KEY_PASSWORD != '' }}
+        run: |
+          if [[ "$HAS_SIGNING" == "true" ]]; then
+            echo "mode=release" >> "$GITHUB_OUTPUT"
+          elif [[ "$GITHUB_REF" == refs/tags/v* ]]; then
+            echo "发布标签缺少完整的 Android 签名 Secrets" >&2
+            exit 1
+          else
+            echo "mode=debug" >> "$GITHUB_OUTPUT"
+          fi
+
+      # 构建期间磁盘上没有密钥：npm、Gradle 及其全部依赖都碰不到签名凭据。
+      # release 模式产出未签名的 APK，下一步再单独签名。
+      - name: Android APK
+        env:
+          BUILD_MODE: ${{ steps.mode.outputs.mode }}
+          RUSTFLAGS: -D warnings
+        run: |
+          if [[ "$BUILD_MODE" == "debug" ]]; then
+            npm run tauri android build -- --debug --apk --target aarch64 --ci
+          elif [[ "$BUILD_MODE" == "release" ]]; then
+            npm run tauri android build -- --apk --target aarch64 --ci
+          else
+            echo "Android 构建模式无效" >&2
+            exit 1
+          fi
+
+      - name: 签名发布 APK
+        if: steps.mode.outputs.mode == 'release'
+        env:
+          ANDROID_KEY_BASE64: ${{ secrets.ANDROID_KEY_BASE64 }}
+          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: |
+          set -euo pipefail
+          umask 077
+          mapfile -t APKS < <(find src-tauri/gen/android/app/build/outputs/apk -type f -path "*/release/*.apk")
+          if [[ "${#APKS[@]}" -ne 1 ]]; then
+            echo "预期恰好一个 release APK" >&2
+            exit 1
+          fi
+          KEYDIR="$RUNNER_TEMP/sitzfleisch-android-signing"
+          mkdir -p "$KEYDIR"
+          printf '%s' "$ANDROID_KEY_BASE64" | base64 -d > "$KEYDIR/release.jks"
+          SIGNED="$RUNNER_TEMP/sitzfleisch-signed.apk"
+          # 密码经环境变量交给 apksigner，不出现在命令行参数里。
+          "$ANDROID_HOME/build-tools/36.0.0/apksigner" sign \
+            --ks "$KEYDIR/release.jks" --ks-key-alias "$ANDROID_KEY_ALIAS" \
+            --ks-pass env:ANDROID_KEY_PASSWORD --key-pass env:ANDROID_KEY_PASSWORD \
+            --out "$SIGNED" "${APKS[0]}"
+          rm -rf "$KEYDIR"
+          echo "SIGNED_APK=$SIGNED" >> "$GITHUB_ENV"
+
+      - name: 校验并收集 Android 安装包
+        env:
+          BUILD_MODE: ${{ steps.mode.outputs.mode }}
+        run: |
+          set -euo pipefail
+          VERSION=$(node -e 'const v=require("./package.json").version; if(!/^\d+\.\d+\.\d+$/.test(v))process.exit(1); process.stdout.write(v)')
+          mkdir -p release-artifacts
+          if [[ "$BUILD_MODE" == "release" ]]; then
+            SOURCE="$SIGNED_APK"
+            APK="Sitzfleisch_${VERSION}_android-arm64.apk"
+          else
+            mapfile -t APKS < <(find src-tauri/gen/android/app/build/outputs/apk -type f -path "*/debug/*.apk")
+            if [[ "${#APKS[@]}" -ne 1 ]]; then
+              echo "预期恰好一个 debug APK" >&2
+              exit 1
+            fi
+            SOURCE="${APKS[0]}"
+            # 调试包可调试、允许明文流量，名字上就要和正式包区分开，避免被误发。
+            APK="Sitzfleisch_${VERSION}_android-arm64-debug.apk"
+          fi
+          cp "$SOURCE" "release-artifacts/$APK"
+          "$ANDROID_HOME/build-tools/36.0.0/zipalign" -c -P 16 4 "release-artifacts/$APK"
+          "$ANDROID_HOME/build-tools/36.0.0/apksigner" verify --print-certs "release-artifacts/$APK"
+          (cd release-artifacts && sha256sum "$APK" > "$APK.sha256")
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: sitzfleisch-Android
+          path: release-artifacts/*
+          if-no-files-found: error
+
+      - name: 清理签名临时文件
+        if: always()
+        run: rm -rf "$RUNNER_TEMP/sitzfleisch-android-signing" "$RUNNER_TEMP/sitzfleisch-signed.apk"
+
   release:
-    needs: build
-    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [build, android]
+    # 手动构建的调试回退包只留在 Artifacts，不能进入正式 Release。
+    if: startsWith(github.ref, 'refs/tags/v') && needs.android.outputs.build_mode == 'release'
     permissions:
       contents: write
     runs-on: ubuntu-latest
@@ -109,11 +241,23 @@ jobs:
             **Windows**：下载 `-setup.exe` 运行。SmartScreen 可能拦一下，点「更多信息 → 仍要运行」。
             **Windows 端从未在真机上验收过**，遇到问题请开 issue。
 
+            **Android（ARM64，Android 8.0 及以上）**：用手机浏览器下载 `…android-arm64.apk` 后打开。
+            按系统提示允许浏览器安装未知应用；确认来自本仓库并核对 `.sha256` 后再继续安装。
+            升级直接覆盖安装，记录保留；卸载会删除手机上的全部记录。
+            首次「开始今天」时允许通知，再按「设置 → 提醒」里的提示打开横幅和后台运行，
+            否则锁屏后的提醒可能只响不弹，或者不响。
+            荣耀手机在「应用启动管理」里关闭坐功的自动管理，允许自启动、关联启动和后台活动。
+            手机重启后需打开一次坐功，才能恢复未来提醒。
+
+            手机锁屏继续计时，不提供网站屏蔽；喝水提醒只在学习日内，本次暂停满 2 小时后
+            不再发喝水和未开格提醒。手机与电脑的数据独立，不自动同步；首次需要在手机上设置项目和目标。
+
             ## 数据在哪
 
-            只存在你自己电脑上，不联网、不上传。
+            只存在当前设备上，不联网、不上传。
             macOS `~/Library/Application Support/com.snooze26h.sitzfleisch.x/state.json`，
             Windows `%APPDATA%\com.snooze26h.sitzfleisch.x\state.json`。
+            Android 保存在应用私有目录，卸载应用会删除。
 
             ## 网站屏蔽需要管理员密码
 

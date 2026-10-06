@@ -1,0 +1,8 @@
+<resources>
+    <!-- Android 12 起系统启动画面使用这里的底色；不设就是白底，冷启动会闪一下白。 -->
+    <style name="Theme.sitzfleisch_x" parent="Theme.MaterialComponents.NoActionBar">
+        <item name="android:windowBackground">@color/zuogong_bed</item>
+        <item name="android:colorBackground">@color/zuogong_bed</item>
+        <item name="android:windowSplashScreenBackground">@color/zuogong_bed</item>
+    </style>
+</resources>

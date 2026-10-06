@@ -1,0 +1,9 @@
+{
+  "bundle": {
+    "resources": null,
+    "android": {
+      "minSdkVersion": 26,
+      "debugApplicationIdSuffix": ".debug"
+    }
+  }
+}

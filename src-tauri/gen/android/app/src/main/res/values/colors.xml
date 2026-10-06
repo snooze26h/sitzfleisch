@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- 与界面 styles.css 中 bed 令牌的颜色相同。 -->
+    <color name="zuogong_bed">#141411</color>
+</resources>

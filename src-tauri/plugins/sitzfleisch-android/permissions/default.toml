@@ -1,0 +1,3 @@
+[default]
+description = "仅由 Rust 调用，不向 WebView 开放插件命令"
+permissions = []

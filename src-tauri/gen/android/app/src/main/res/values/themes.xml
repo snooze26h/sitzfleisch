@@ -1,0 +1,7 @@
+<resources>
+    <!-- 坐功只有深色界面：窗口底色与网页底色一致，冷启动和切回前台都不会先闪一下白。 -->
+    <style name="Theme.sitzfleisch_x" parent="Theme.MaterialComponents.NoActionBar">
+        <item name="android:windowBackground">@color/zuogong_bed</item>
+        <item name="android:colorBackground">@color/zuogong_bed</item>
+    </style>
+</resources>

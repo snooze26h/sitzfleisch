@@ -1,22 +1,75 @@
 // 浏览器里的模拟后台：把 core 的规则用 TS 复刻一遍，让界面能在没有 Tauri 的地方
 // 跑起来、点起来、截图验收。只在非 Tauri 环境被动态加载，不进正式包的主路径。
-// 场景通过 URL hash 选：#qa=start|fresh|chooser|running|paused|break|done|protected|savefail|nohistory
+// 场景通过 URL hash 选：#qa=start|fresh|chooser|completed|finishing|running|paused|suspended|resting|done|protected|savefail|nohistory
+// 可加 &platform=android 预览平台能力，&clock=<带时区的 ISO 时间> 固定截图时钟；手机下 &system=blocked|lowered 预览提醒受限。
 
 import type {
   AppState,
   ArchivedDay,
   CategoryState,
   Day,
+  PlatformInfo,
   Preferences,
   ProfileDef,
   Snapshot,
+  SystemStatus,
   TaskItem,
 } from "../types";
-import { MAX_BLOCK_MINUTES, MIN_BLOCK_MINUTES, SUSPEND_GAP_SECONDS, MAX_COMPLETION_NOTE_CHARS } from "../types";
+import { MAX_BLOCK_MINUTES, MIN_BLOCK_MINUTES, SUSPEND_GAP_SECONDS, MAX_COMPLETION_NOTE_CHARS, NOTIFICATION_CHANNELS, SYSTEM_SETTINGS_TARGETS, type SystemSettingsTarget } from "../types";
 import { version } from "../../package.json";
 import { MAX_BLOCK_RULES, normalizeHost, normalizeUrl } from "../blocking";
 
 const HISTORY_LIMIT = 60;
+const params = new URLSearchParams(location.hash.replace(/^#/, ""));
+const mobile = params.get("platform") === "android";
+
+// 只接受带时区的完整时间；非法日期不能被 Date.parse 悄悄滚到下个月。
+const clock = params.get("clock");
+if (clock !== null && clock.length <= 35
+  && /^\d{4}-(0[1-9]|1[0-2])-(0[1-9]|[12]\d|3[01])T([01]\d|2[0-3]):[0-5]\d:[0-5]\d(?:\.\d{1,3})?(?:Z|[+-]([01]\d|2[0-3]):[0-5]\d)$/.test(clock)) {
+  const date = new Date(`${clock.slice(0, 10)}T00:00:00Z`);
+  const fixedNow = Date.parse(clock);
+  if (Number.isFinite(fixedNow) && date.toISOString().slice(0, 10) === clock.slice(0, 10)) {
+    Date.now = () => fixedNow;
+  }
+}
+
+const platform: PlatformInfo = {
+  os: mobile ? "android" : "macos",
+  mobile,
+  features: {
+    tray: !mobile,
+    website_blocking: !mobile,
+    browser_extension: !mobile,
+    autostart: !mobile,
+    reveal_state_file: !mobile,
+    window_title: !mobile,
+    quit_flow: !mobile,
+    in_app_sound_toggle: !mobile,
+    system_settings: mobile,
+    exact_alarm_status: mobile,
+  },
+};
+
+let notificationPermission = mobile && params.get("permission") === "denied" ? "denied"
+  : mobile && params.get("permission") === "unknown" ? "unknown" : "granted";
+const blockedSystem = params.get("system") === "blocked";
+// 荣耀等系统给新应用的提醒渠道降一级（不弹横幅）：#system=lowered。
+const loweredSystem = params.get("system") === "lowered";
+const systemFixture: SystemStatus = {
+  sdkInt: 36,
+  manufacturer: "HONOR",
+  notificationsEnabled: notificationPermission === "granted",
+  channels: NOTIFICATION_CHANNELS.map((id) => ({
+    id, name: { timer: "计时", body: "身体提醒", water: "喝水", status: "进行中" }[id],
+    enabled: !blockedSystem, importance: blockedSystem ? 0 : id === "status" ? 2 : loweredSystem ? 3 : 4,
+    vibration: !blockedSystem && id !== "status",
+    sound: blockedSystem || id === "status" ? null : id === "water" ? "android.resource://com.snooze26h.sitzfleisch.x.debug/raw/water" : "content://settings/system/notification_sound",
+  })),
+  canScheduleExactAlarms: !blockedSystem,
+  ignoringBatteryOptimizations: false,
+};
+if (mobile) window.qaSystemStatus = structuredClone(systemFixture);
 
 function nowUnix(): number {
   return Math.floor(Date.now() / 1000);
@@ -70,6 +123,12 @@ declare global {
     /** QA：浏览器里没有「退出」这个动作，退出前保存失败的对话框从控制台叫出来。 */
     qaQuitBlocked?: () => void;
     qaQuitBlockingFailed?: () => void;
+    qaBackButton?: () => void | Promise<void>;
+    qaBackgrounded?: number;
+    qaSystemStatus?: SystemStatus;
+    qaSystemRequests?: { target: SystemSettingsTarget; channelId?: string }[];
+    qaPermissionRequests?: number;
+    qaTestNotifications?: string[];
   }
 }
 
@@ -167,7 +226,7 @@ function tick(now: number) {
   if (delta <= 0) return;
   const day = state.day;
   if (!day) return;
-  if (delta > SUSPEND_GAP_SECONDS) {
+  if (!mobile && delta > SUSPEND_GAP_SECONDS) {
     // 与 core 同一条规矩：空档一秒不补，但暂停段从空档开始那一刻起算。
     day.suspend_seconds += delta;
     day.paused_seconds += delta;
@@ -547,9 +606,10 @@ function buildScenario(name: string): MockState {
       return base;
     case "suspended": {
       // 休眠 20 分钟：暂停段必须从合眼那一刻起算，运行图才不会把这 20 分钟画成在做事。
+      // 手机按墙钟计时，不会出现心跳中断的自动暂停；预览手机时按普通的按停处理。
       base.day = midDay(now, prefs);
-      attachTimer(base.day, { ...focusTimer(now), elapsed_seconds: 4 * 60 }, now, 20 * 60, true);
-      base.day.suspend_seconds = 20 * 60;
+      attachTimer(base.day, { ...focusTimer(now), elapsed_seconds: 4 * 60 }, now, 20 * 60, !mobile);
+      if (!mobile) base.day.suspend_seconds = 20 * 60;
       return base;
     }
     case "resting": {
@@ -589,7 +649,6 @@ function buildScenario(name: string): MockState {
 }
 
 function scenarioName(): string {
-  const params = new URLSearchParams(location.hash.replace(/^#/, ""));
   return params.get("qa") ?? "start";
 }
 
@@ -607,7 +666,7 @@ function snapshot(withHistory = true): Snapshot {
     write_protected: writeProtected,
     blocking: structuredClone(blocking),
     save_error: saveError,
-    state_path: "/Users/you/Library/Application Support/com.snooze26h.sitzfleisch.x/state.json",
+    state_path: mobile ? "/data/user/0/com.snooze26h.sitzfleisch.x.debug/state.json" : "/Users/you/Library/Application Support/com.snooze26h.sitzfleisch.x/state.json",
     initial_view: null,
     initial_scroll: 0,
   };
@@ -630,6 +689,26 @@ export async function mockInvoke<T>(command: string, args: Record<string, unknow
   const a = args as Record<string, never>;
   await new Promise((resolve) => setTimeout(resolve, 8));
   switch (command) {
+    case "system_status":
+      if (!mobile) throw "系统状态查询仅支持 Android。";
+      return structuredClone(window.qaSystemStatus ?? systemFixture) as T;
+    case "open_system_settings": {
+      const target = args.target;
+      const channelId = args.channelId;
+      if (typeof target !== "string" || !SYSTEM_SETTINGS_TARGETS.includes(target as SystemSettingsTarget)
+        || (target === "channel" ? !NOTIFICATION_CHANNELS.includes(channelId as typeof NOTIFICATION_CHANNELS[number]) : channelId !== undefined)) {
+        throw "请选择有效的系统设置入口和通知渠道。";
+      }
+      if (!mobile) throw "此系统设置入口仅支持 Android。";
+      (window.qaSystemRequests ??= []).push({ target: target as SystemSettingsTarget, ...(typeof channelId === "string" ? { channelId } : {}) });
+      return undefined as T;
+    }
+    case "move_task_to_back":
+      if (!mobile) throw "退到后台仅支持 Android。";
+      window.qaBackgrounded = (window.qaBackgrounded ?? 0) + 1;
+      return undefined as T;
+    case "platform_info":
+      return structuredClone(platform) as T;
     case "get_snapshot":
       return snapshot() as T;
     case "start_day":
@@ -673,6 +752,7 @@ export async function mockInvoke<T>(command: string, args: Record<string, unknow
       // 浏览器里没有进程可退：写不进去就把失败原样端回对话框，写得进去就当已经退出。
       throw saveError ? "（mock）仍然写不进去" : "（mock）已退出";
     case "quit_without_saving":
+    case "quit_leaving_blocking":
       throw "（mock）已退出";
     case "reapply_blocking":
       blocking.busy = true;
@@ -690,13 +770,19 @@ export async function mockInvoke<T>(command: string, args: Record<string, unknow
       broadcast();
       return snapshot() as T;
     case "notification_status":
-      return "granted" as T;
+      return notificationPermission as T;
     case "request_notification_permission":
-      return "granted" as T;
+      if (mobile) {
+        window.qaPermissionRequests = (window.qaPermissionRequests ?? 0) + 1;
+        notificationPermission = params.get("permission") === "denied" ? "denied" : "granted";
+        (window.qaSystemStatus ??= structuredClone(systemFixture)).notificationsEnabled = notificationPermission === "granted";
+      }
+      return notificationPermission as T;
     case "open_notification_settings":
       return undefined as T;
     case "test_water_sound":
     case "test_notification":
+      if (mobile) (window.qaTestNotifications ??= []).push(command === "test_water_sound" ? "water" : "timer");
       return undefined as T;
     case "reveal_state_file":
       return undefined as T;
@@ -731,6 +817,10 @@ export function mockQuitBlocked(callback: (reason: string) => void) {
 
 export function mockQuitBlockingFailed(callback: (reason: string) => void) {
   window.qaQuitBlockingFailed = () => callback("（mock）系统授权被取消");
+}
+
+export function mockBackButton(callback: () => void | Promise<void>) {
+  window.qaBackButton = callback;
 }
 
 window.setInterval(() => {

@@ -4,7 +4,7 @@
 import type { Day, LedgerEntry } from "./types";
 import { esc, meter, duration, wallClock } from "./format";
 import { icon } from "./icons";
-import { iconOf, shortName, remainingOf, def } from "./state";
+import { iconOf, shortName, remainingOf, def, ui } from "./state";
 
 export function attrs(data: Record<string, string | number | boolean | undefined> = {}): string {
   return Object.entries(data)
@@ -32,8 +32,11 @@ export function reading(label: string, value: string, opts: { trailing?: boolean
 }
 
 export function bigReading(value: string, unit: string, opts: { tint?: "caution" | "muted" } = {}): string {
+  // 手机放大字体后，长暂停的时分秒可在小时后换行，完整保留读数和既有字号。
+  const hourClock = ui.platform?.os === "android" && ui.compact && /^(\d+):([0-9]{2}:[0-9]{2})$/.exec(value);
+  const displayValue = hourClock ? `${esc(hourClock[1])}:<wbr>${esc(hourClock[2])}` : esc(value);
   return `<div class="big-reading${opts.tint ? ` ${opts.tint}` : ""}">
-    <span class="val">${esc(value)}</span>
+    <span class="val">${displayValue}</span>
     <span class="unit">${esc(unit)}</span>
   </div>`;
 }

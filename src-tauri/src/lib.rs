@@ -1,5 +1,8 @@
 use std::fs;
-use std::path::{Path, PathBuf};
+#[cfg(desktop)]
+use std::path::Path;
+use std::path::PathBuf;
+#[cfg(desktop)]
 use std::process::Command;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Mutex;
@@ -9,19 +12,38 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use serde::Serialize;
 use chrono::{Local, TimeZone, Timelike};
 use sitzfleisch_core as core;
+#[cfg(desktop)]
 use tauri::menu::{Menu, MenuItem, PredefinedMenuItem};
+#[cfg(desktop)]
 use tauri::tray::TrayIconBuilder;
-use tauri::{AppHandle, Emitter, Manager, State, WindowEvent, Wry};
+#[cfg(desktop)]
+use tauri::Wry;
+#[cfg(any(desktop, target_os = "android"))]
+use tauri::WindowEvent;
+use tauri::{AppHandle, Emitter, Manager, State};
+#[cfg(desktop)]
 use tauri_plugin_autostart::ManagerExt;
+#[cfg(desktop)]
 use tauri_plugin_notification::NotificationExt;
+#[cfg(desktop)]
 use tauri_plugin_window_state::{AppHandleExt, StateFlags};
 
+#[cfg_attr(mobile, allow(dead_code))]
 mod browser_blocking;
+#[cfg_attr(mobile, allow(dead_code))]
 mod browser_auth;
 #[cfg(any(target_os = "windows", test))]
 mod windows_hosts;
 #[cfg(target_os = "macos")]
 mod space_preview;
+mod platform;
+mod alerts;
+mod alarm_store;
+mod clock_policy;
+mod android_shutdown;
+use clock_policy::{advance_time, resume_time, show_due_banners, TimePolicy};
+#[cfg(target_os = "android")]
+mod mobile;
 
 #[derive(Clone, Default, Serialize)]
 struct BlockingStatus {
@@ -31,6 +53,7 @@ struct BlockingStatus {
     browser: browser_blocking::Status,
 }
 
+#[cfg_attr(mobile, allow(dead_code))]
 struct Shared {
     state: Mutex<core::State>,
     /// 退出只改变运行时屏蔽状态，不结束学习日或清空用户配置。
@@ -68,12 +91,14 @@ struct Shared {
 }
 
 #[derive(Debug, PartialEq, Eq)]
+#[cfg_attr(mobile, allow(dead_code))]
 enum TrayMenuState {
     Day { line: String, paused: Option<bool>, totals: String },
     Idle { profile: Option<(String, String)> },
 }
 
 /// 托盘菜单主行的文字。菜单和 shape 都从这里取，两边不会分叉。
+#[cfg(desktop)]
 fn tray_menu_line(state: &core::State, day: &core::Day) -> String {
     let name_of = |id: &str| {
         day.categories
@@ -95,6 +120,7 @@ fn tray_menu_line(state: &core::State, day: &core::Day) -> String {
     }
 }
 
+#[cfg(desktop)]
 fn default_profile(state: &core::State) -> Option<&core::ProfileDef> {
     state
         .preferences
@@ -107,6 +133,7 @@ fn default_profile(state: &core::State) -> Option<&core::ProfileDef> {
 /// 菜单的「形状」。**里面绝不能放每秒都变的数字**——菜单一旦被重建，正打开的那份就会被
 /// 系统收走，表现出来就是「点开秒缩」。倒计时只放在菜单栏标题上，以等宽数字随文本变化更新。
 /// 它必须便宜：每秒都要算一次，用来决定要不要真的去造那一整套原生菜单项。
+#[cfg(desktop)]
 fn tray_shape(state: &core::State) -> TrayMenuState {
     match &state.day {
         Some(day) => TrayMenuState::Day {
@@ -121,6 +148,7 @@ fn tray_shape(state: &core::State) -> TrayMenuState {
 }
 
 /// 菜单栏菜单：跟着状态走。只在 `tray_shape` 变化时才需要重建。
+#[cfg(desktop)]
 fn build_tray_menu(app: &AppHandle, state: &TrayMenuState) -> tauri::Result<Menu<Wry>> {
     let mut items: Vec<Box<dyn tauri::menu::IsMenuItem<Wry>>> = Vec::new();
     let text = |app: &AppHandle, id: &str, text: &str| MenuItem::with_id(app, id, text, false, None::<&str>);
@@ -158,6 +186,7 @@ fn build_tray_menu(app: &AppHandle, state: &TrayMenuState) -> tauri::Result<Menu
     Menu::with_items(app, &refs)
 }
 
+#[cfg(desktop)]
 fn show_main_window(app: &AppHandle) {
     let Some(window) = app.get_webview_window("main") else { return };
     // 还原之前先问，问完再动手：下面那一轮补激活只在原本就最小化时才需要。
@@ -185,6 +214,7 @@ fn show_main_window(app: &AppHandle) {
     });
 }
 
+#[cfg(desktop)]
 fn handle_tray_menu(app: &AppHandle, id: &str) {
     match id {
         "show" => show_main_window(app),
@@ -239,6 +269,10 @@ struct Snapshot {
 
 fn now_unix() -> i64 {
     SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs() as i64).unwrap_or(0)
+}
+
+fn time_policy() -> TimePolicy {
+    if cfg!(mobile) { TimePolicy::WallClock } else { TimePolicy::Heartbeat }
 }
 
 fn snapshot(shared: &Shared, with_history: bool) -> Snapshot {
@@ -317,9 +351,11 @@ fn save(shared: &Shared) {
 }
 
 /// 短名放得下多宽：4 个汉字，或 8 个拉丁字符。
+#[cfg(desktop)]
 const SHORT_NAME_WIDTH: usize = 8;
 
 /// 一个字顶两个拉丁字符宽的那类字：汉字、假名、谚文、全角标点。
+#[cfg(desktop)]
 fn is_wide(c: char) -> bool {
     matches!(u32::from(c),
         0x1100..=0x115F      // 谚文字母
@@ -337,12 +373,14 @@ fn is_wide(c: char) -> bool {
     )
 }
 
+#[cfg(desktop)]
 fn display_width(text: &str) -> usize {
     text.chars().map(|c| if is_wide(c) { 2 } else { 1 }).sum()
 }
 
 /// `short_name` 为空时的自动回退。**与 `src/format.ts::shortNameFrom` 必须一模一样**。
 /// 取的是**前**两个字不是后两个：「深度工作」截成「工作」会丢掉是哪一种。
+#[cfg(desktop)]
 fn short_name_from(name: &str) -> String {
     let trimmed = name.trim();
     if display_width(trimmed) <= SHORT_NAME_WIDTH {
@@ -358,6 +396,7 @@ fn short_name_from(name: &str) -> String {
 
 /// 显示名：学习日进行中一律读当天**冻结**的名字，改名从下一个学习日起才生效。
 /// 前端的 `nameOf()` 就是这条规则，托盘必须同源，否则两处会喊出不同的名字。
+#[cfg(desktop)]
 fn display_name(state: &core::State, id: &str) -> String {
     if let Some(day) = &state.day {
         if let Some(c) = day.categories.iter().find(|c| c.id == id) {
@@ -370,6 +409,7 @@ fn display_name(state: &core::State, id: &str) -> String {
     }
 }
 
+#[cfg(desktop)]
 fn short_name(state: &core::State, id: &str) -> String {
     // 短名是显示偏好，改完立刻生效，不跟着学习日冻结——和图标一个待遇。
     if let Some(def) = state.preferences.categories.iter().find(|c| c.id == id) {
@@ -380,6 +420,7 @@ fn short_name(state: &core::State, id: &str) -> String {
     short_name_from(&display_name(state, id))
 }
 
+#[cfg(desktop)]
 fn clock_text(seconds: i64) -> String {
     let safe = seconds.max(0);
     if safe >= 3600 {
@@ -390,6 +431,7 @@ fn clock_text(seconds: i64) -> String {
 }
 
 /// 菜单栏的完整状态文字，供悬浮提示使用；紧凑标题由 `tray_display` 生成。
+#[cfg(desktop)]
 fn tray_text(state: &core::State) -> String {
     let Some(day) = &state.day else { return "坐功".into() };
     let now = state.last_tick;
@@ -416,6 +458,7 @@ fn tray_text(state: &core::State) -> String {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[cfg_attr(mobile, allow(dead_code))]
 struct TrayDisplay {
     title: String,
     tooltip: String,
@@ -423,6 +466,7 @@ struct TrayDisplay {
 }
 
 /// 菜单栏只占一小段：跨小时后省略秒数，完整时长仍在悬浮提示中。
+#[cfg(desktop)]
 fn compact_tray_clock(seconds: i64) -> String {
     let safe = seconds.max(0);
     match safe {
@@ -433,6 +477,7 @@ fn compact_tray_clock(seconds: i64) -> String {
     }
 }
 
+#[cfg(desktop)]
 fn tray_display(state: &core::State) -> TrayDisplay {
     let text = tray_text(state);
     let mut display = TrayDisplay { title: text.clone(), tooltip: format!("坐功 · {text}"), paused: false };
@@ -449,6 +494,7 @@ fn tray_display(state: &core::State) -> TrayDisplay {
 }
 
 /// 在原图标内部画暂停角标，保持画布尺寸与宽高比，菜单栏占位不会随暂停增加。
+#[cfg(desktop)]
 fn tray_icon(icon: &tauri::image::Image<'_>, paused: bool) -> tauri::image::Image<'static> {
     if !paused {
         return icon.clone().to_owned();
@@ -493,46 +539,51 @@ fn configure_tray_digits(tray: &tauri::tray::TrayIcon) -> tauri::Result<()> {
 }
 
 fn broadcast(app: &AppHandle) {
+    #[cfg(target_os = "android")]
+    if mobile::is_suspended(app) { return; }
     let shared = app.state::<Shared>();
     // 心跳推送不带历史：历史只在命令返回和首次拉取时随快照走一遍。
     let snap = snapshot(&shared, false);
     let _ = app.emit("state://update", &snap);
     // 原生菜单会同步等待主线程；带着应用锁调用会与主线程的命令互相等。
     // 到主线程后再取当前形状，排队的更新也不会把旧菜单装回去。
-    let handle = app.clone();
-    let _ = app.run_on_main_thread(move || {
-        let shared = handle.state::<Shared>();
-        let (display, shape) = {
-            let state = shared.state.lock().unwrap();
-            (tray_display(&state), tray_shape(&state))
-        };
-        let Some(tray) = handle.tray_by_id("main") else { return };
-        let previous = shared.tray_display.lock().unwrap().clone();
-        if previous.as_ref() != Some(&display) {
-            // 原生调用之前释放缓存锁；失败时不记为已应用，下次推送继续重试。
-            #[cfg(target_os = "macos")]
-            let title_applied = previous.as_ref().is_some_and(|p| p.title == display.title)
-                || tray.set_title(Some(&display.title)).is_ok();
-            #[cfg(not(target_os = "macos"))]
-            let title_applied = true;
-            let tooltip_applied = previous.as_ref().is_some_and(|p| p.tooltip == display.tooltip)
-                || tray.set_tooltip(Some(&display.tooltip)).is_ok();
-            let icon_applied = previous.as_ref().is_some_and(|p| p.paused == display.paused)
-                || handle.default_window_icon().is_some_and(|icon| tray.set_icon(Some(tray_icon(icon, display.paused))).is_ok());
-            if title_applied && tooltip_applied && icon_applied {
-                *shared.tray_display.lock().unwrap() = Some(display);
-            }
-        }
-        // shape 便宜，先算它：形状没变就不去造那一整套原生菜单项（这是每秒都会走的路径）。
-        let changed = shared.tray_shape.lock().unwrap().as_ref() != Some(&shape);
-        if changed {
-            if let Ok(menu) = build_tray_menu(&handle, &shape) {
-                if tray.set_menu(Some(menu)).is_ok() {
-                    *shared.tray_shape.lock().unwrap() = Some(shape);
+    #[cfg(desktop)]
+    {
+        let handle = app.clone();
+        let _ = app.run_on_main_thread(move || {
+            let shared = handle.state::<Shared>();
+            let (display, shape) = {
+                let state = shared.state.lock().unwrap();
+                (tray_display(&state), tray_shape(&state))
+            };
+            let Some(tray) = handle.tray_by_id("main") else { return };
+            let previous = shared.tray_display.lock().unwrap().clone();
+            if previous.as_ref() != Some(&display) {
+                // 原生调用之前释放缓存锁；失败时不记为已应用，下次推送继续重试。
+                #[cfg(target_os = "macos")]
+                let title_applied = previous.as_ref().is_some_and(|p| p.title == display.title)
+                    || tray.set_title(Some(&display.title)).is_ok();
+                #[cfg(not(target_os = "macos"))]
+                let title_applied = true;
+                let tooltip_applied = previous.as_ref().is_some_and(|p| p.tooltip == display.tooltip)
+                    || tray.set_tooltip(Some(&display.tooltip)).is_ok();
+                let icon_applied = previous.as_ref().is_some_and(|p| p.paused == display.paused)
+                    || handle.default_window_icon().is_some_and(|icon| tray.set_icon(Some(tray_icon(icon, display.paused))).is_ok());
+                if title_applied && tooltip_applied && icon_applied {
+                    *shared.tray_display.lock().unwrap() = Some(display);
                 }
             }
-        }
-    });
+            // shape 便宜，先算它：形状没变就不去造那一整套原生菜单项（这是每秒都会走的路径）。
+            let changed = shared.tray_shape.lock().unwrap().as_ref() != Some(&shape);
+            if changed {
+                if let Ok(menu) = build_tray_menu(&handle, &shape) {
+                    if tray.set_menu(Some(menu)).is_ok() {
+                        *shared.tray_shape.lock().unwrap() = Some(shape);
+                    }
+                }
+            }
+        });
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -559,28 +610,31 @@ impl AlertSound {
     }
 }
 
-fn take_due_reminder_notifications(state: &mut core::State) -> Vec<(&'static str, String, AlertSound)> {
+fn local_reminder_seconds(state: &core::State) -> u32 {
+    if cfg!(mobile) && !state.preferences.water_reminder_enabled { return 3600; }
     let local = Local.timestamp_opt(state.last_tick, 0).single();
-    let local_seconds = local.map(|time| time.minute() * 60 + time.second()).unwrap_or(3600);
+    local.map(|time| time.minute() * 60 + time.second()).unwrap_or(3600)
+}
+
+#[cfg(any(not(target_os = "android"), test))]
+fn take_due_reminder_notifications(state: &mut core::State) -> Vec<(&'static str, String, AlertSound)> {
+    let local_seconds = local_reminder_seconds(state);
+    take_due_reminder_notifications_at(state, local_seconds)
+}
+
+fn take_due_reminder_notifications_at(state: &mut core::State, local_seconds: u32) -> Vec<(&'static str, String, AlertSound)> {
     let water_due = state.take_due_water_reminder(local_seconds);
     let (_, stretch_due, idle_due) = state.take_due_reminders();
     let mut notifications = Vec::new();
-    if water_due {
-        notifications.push(("喝点水吧", "忙了一阵，喝几口水再继续。".into(), AlertSound::Water));
-    }
-    if stretch_due {
-        notifications.push((
-            "起来活动一下",
-            format!("已经连续在座 {} 分钟。", state.preferences.stretch_reminder_minutes),
-            AlertSound::Standard,
-        ));
-    }
-    if idle_due {
-        // 提醒计数器每次投递后归零，文案仍要从本次暂停的起点累计，包含休息和休眠。
-        let paused_minutes = state.day.as_ref()
-            .map(|day| day.current_pause_seconds(state.last_tick) / 60)
-            .unwrap_or(0);
-        notifications.push(("还没开格", format!("已经暂停 {paused_minutes} 分钟了。"), AlertSound::Standard));
+    for (due, kind) in [(water_due, core::AlertKind::Water), (stretch_due, core::AlertKind::Stretch), (idle_due, core::AlertKind::Idle)] {
+        if !due { continue; }
+        let pause_started_at = state.day.as_ref().filter(|day| day.is_paused())
+            .and_then(|day| day.pauses.last()).map(|pause| pause.started_at);
+        let alert = core::PlannedAlert { kind, at: state.last_tick, pause_started_at };
+        if cfg!(mobile) && !alerts::mobile_alert_allowed(state, &alert) { continue; }
+        let (title, body, _) = alerts::alert_copy(kind, state, &alert);
+        let sound = if kind == core::AlertKind::Water { AlertSound::Water } else { AlertSound::Standard };
+        notifications.push((title, body, sound));
     }
     notifications
 }
@@ -589,23 +643,34 @@ fn take_due_reminder_notifications(state: &mut core::State) -> Vec<(&'static str
 /// 所以提醒一次走四条路，任何一条都能让人察觉：
 /// 系统通知 · 界面提示条 · 一声响 · Dock 图标跳一下。
 fn notify(app: &AppHandle, title: &str, body: &str, sound: AlertSound) {
+    #[cfg(target_os = "android")]
+    if mobile::is_suspended(app) { return; }
+    #[cfg(desktop)]
     let delivered = app.notification().builder().title(title).body(body).show().is_ok();
+    // Android 系统通知由后续的移动端排程负责；A1 只保留应用内提示，避免同步插件阻塞主线程。
+    #[cfg(mobile)]
+    let delivered = false;
     let _ = app.emit("reminder://show", serde_json::json!({
         "title": title,
         "body": body,
         "system": delivered,
     }));
-    let sound_on = app.state::<Shared>().state.lock().unwrap().preferences.sound_enabled;
-    if sound_on {
-        play_alert_sound(sound);
+    #[cfg(desktop)]
+    {
+        let sound_on = app.state::<Shared>().state.lock().unwrap().preferences.sound_enabled;
+        if sound_on { play_alert_sound(sound); }
     }
+    #[cfg(mobile)]
+    let _ = sound;
     // 人多半在别的 App 里，Dock 上跳一下比什么都直接。
+    #[cfg(desktop)]
     if let Some(window) = app.get_webview_window("main") {
         let _ = window.request_user_attention(Some(tauri::UserAttentionType::Informational));
     }
 }
 
 /// 响一声。走系统自带的声音，不需要任何权限，窗口关着也听得见。
+#[cfg(desktop)]
 fn play_alert_sound(sound: AlertSound) {
     #[cfg(target_os = "macos")]
     let _ = Command::new("/usr/bin/afplay")
@@ -617,17 +682,62 @@ fn play_alert_sound(sound: AlertSound) {
     }
 }
 
+#[cfg(all(mobile, not(target_os = "android")))]
+fn play_alert_sound(_sound: AlertSound) {}
+
 /// 推进一次时间，并报告这一下是不是把格自然走完了（台账多了一条，格也不在了）。
 /// 心跳和命令都会推进时间：格恰好在某个命令那一下走完时，通知也得发，不能只看心跳。
-fn tick_reporting_finish(state: &mut core::State, now: i64) -> bool {
+fn tick_reporting_finish(state: &mut core::State, now: i64, policy: TimePolicy) -> bool {
     let had_timer = state.day.as_ref().is_some_and(|d| d.timer.is_some());
     let ledger_before = state.day.as_ref().map_or(0, |d| d.ledger.len());
-    state.tick(now);
+    advance_time(state, now, policy);
     had_timer && state.day.as_ref().is_some_and(|d| d.ledger.len() > ledger_before && d.timer.is_none())
 }
 
 fn notify_block_finished(app: &AppHandle) {
-    notify(app, "这一格走完了", "时间已计入。打开坐功，记录这段时间完成了什么。", AlertSound::Standard);
+    let (title, body, _) = {
+        let shared = app.state::<Shared>();
+        let state = shared.state.lock().unwrap();
+        let alert = core::PlannedAlert { kind: core::AlertKind::BlockFinished, at: state.last_tick, pause_started_at: None };
+        alerts::alert_copy(alert.kind, &state, &alert)
+    };
+    notify(app, title, &body, AlertSound::Standard);
+}
+
+struct HeartbeatStep {
+    focus_done: bool,
+    break_done: bool,
+    reminders: Vec<(&'static str, String, AlertSound)>,
+    show_banners: bool,
+    #[cfg(target_os = "android")]
+    desired: Vec<alerts::AppliedAlarm>,
+    #[cfg(target_os = "android")]
+    status: alerts::StatusModel,
+    #[cfg(target_os = "android")]
+    now: i64,
+}
+
+/// `gap` 是距上一轮心跳的秒数：桌面就是 last_tick 的间隔；Android 另记心跳时刻，
+/// 因为命令和回前台取快照也会推进 last_tick，不能让它们把一段长空档「藏起来」。
+fn advance_heartbeat(state: &mut core::State, now: i64, gap: i64) -> HeartbeatStep {
+    let show_banners = show_due_banners(time_policy(), gap);
+    let focus_done = tick_reporting_finish(state, now, time_policy());
+    #[cfg(target_os = "android")]
+    let local_seconds = local_reminder_seconds(state);
+    #[cfg(target_os = "android")]
+    let reminders = take_due_reminder_notifications_at(state, local_seconds);
+    #[cfg(not(target_os = "android"))]
+    let reminders = take_due_reminder_notifications(state);
+    let break_done = state.take_due_break(now);
+    HeartbeatStep {
+        focus_done, break_done, reminders, show_banners,
+        #[cfg(target_os = "android")]
+        desired: alerts::desired_alarms(state, local_seconds),
+        #[cfg(target_os = "android")]
+        status: alerts::status_model(state),
+        #[cfg(target_os = "android")]
+        now: state.last_tick,
+    }
 }
 
 fn mutate(
@@ -636,18 +746,29 @@ fn mutate(
 ) -> Result<Snapshot, String> {
     let shared = app.state::<Shared>();
     if shared.exiting.load(Ordering::SeqCst) {
+        #[cfg(desktop)]
         return Err("正在退出坐功，请等待网站屏蔽解除。".into());
+        #[cfg(mobile)]
+        return Err("坐功正在退出。".into());
     }
-    let (outcome, finished) = {
+    let (outcome, finished, show_banners) = {
         let mut state = shared.state.lock().unwrap();
-        let finished = tick_reporting_finish(&mut state, now_unix());
-        (op(&mut state), finished)
+        let now = now_unix();
+        #[cfg(target_os = "android")]
+        let gap = mobile::gap_since_heartbeat(app, now);
+        #[cfg(not(target_os = "android"))]
+        let gap = now.saturating_sub(state.last_tick);
+        let show_banners = show_due_banners(time_policy(), gap);
+        let finished = tick_reporting_finish(&mut state, now, time_policy());
+        (op(&mut state), finished, show_banners)
     };
-    if finished {
+    if finished && show_banners {
         notify_block_finished(app);
     }
     outcome.map_err(|e| e.to_string())?;
     save(&shared);
+    #[cfg(target_os = "android")]
+    mobile::mark_dirty(app);
     broadcast(app);
     Ok(snapshot(&shared, true))
 }
@@ -655,6 +776,7 @@ fn mutate(
 // ---------- 网站屏蔽（hosts；变换在 core，落盘与提权在这里） ----------
 
 /// 写入与退出清理共用同一条验证路径；只修改坐功托管段。
+#[cfg(desktop)]
 fn sync_hosts_file(
     path: &Path,
     hosts: &[String],
@@ -690,6 +812,7 @@ fn sync_hosts_file(
     Ok(core::hosts_section_present(&after))
 }
 
+#[cfg(desktop)]
 fn record_blocking_result(shared: &Shared, result: &Result<bool, String>) {
     let mut blocking = shared.blocking.lock().unwrap();
     blocking.busy = false;
@@ -703,6 +826,7 @@ fn record_blocking_result(shared: &Shared, result: &Result<bool, String>) {
     }
 }
 
+#[cfg(desktop)]
 fn release_system_blocking(shared: &Shared) -> Result<(), String> {
     if shared.isolated { return Ok(()); }
     // 必须等已在写 hosts 的线程完成；后续排队写入也会看到 exiting，只能清理。
@@ -713,6 +837,7 @@ fn release_system_blocking(shared: &Shared) -> Result<(), String> {
     result.map(|_| ())
 }
 
+#[cfg(desktop)]
 fn hosts_path() -> Result<PathBuf, String> {
     #[cfg(target_os = "windows")]
     {
@@ -722,6 +847,7 @@ fn hosts_path() -> Result<PathBuf, String> {
     Ok(PathBuf::from("/etc/hosts"))
 }
 
+#[cfg(desktop)]
 fn read_system_hosts() -> Result<String, String> {
     fs::read_to_string(hosts_path()?).map_err(|e| format!("读不到系统 hosts：{e}"))
 }
@@ -850,12 +976,13 @@ fn privileged_install(content: &str, data_dir: &Path) -> Result<(), String> {
     windows_hosts::install(content, data_dir)
 }
 
-#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+#[cfg(all(desktop, not(any(target_os = "macos", target_os = "windows"))))]
 fn privileged_install(_content: &str, _data_dir: &Path) -> Result<(), String> {
     Err("此平台暂不支持网站屏蔽。".into())
 }
 
 /// 在独立线程里应用/解除屏蔽；结果通过 blocking 状态广播回界面。
+#[cfg(desktop)]
 fn spawn_apply_blocking(app: &AppHandle) {
     let app = app.clone();
     thread::spawn(move || {
@@ -872,6 +999,7 @@ fn spawn_apply_blocking(app: &AppHandle) {
     });
 }
 
+#[cfg(desktop)]
 fn apply_latest_blocking(shared: &Shared, apply: impl FnOnce(&[String], bool)) {
     let _serial = shared.blocking_lock.lock().unwrap_or_else(|e| e.into_inner());
     // 先标忙再取状态，取完后即使最后一个域名被删，也会安排后续清理。
@@ -888,11 +1016,13 @@ fn apply_latest_blocking(shared: &Shared, apply: impl FnOnce(&[String], bool)) {
     apply(&hosts, enable);
 }
 
+#[cfg(desktop)]
 fn blocking_wanted(shared: &Shared) -> bool {
     let state = shared.state.lock().unwrap();
     state.day.is_some() && !state.preferences.blocked_hosts.is_empty() && !shared.exiting.load(Ordering::SeqCst)
 }
 
+#[cfg(desktop)]
 fn blocking_needs_sync(shared: &Shared) -> bool {
     let active_or_busy = {
         let blocking = shared.blocking.lock().unwrap();
@@ -901,6 +1031,20 @@ fn blocking_needs_sync(shared: &Shared) -> bool {
     active_or_busy || blocking_wanted(shared)
 }
 
+// 手机不接管系统 hosts，也不启动桌面扩展桥；保留共用调用点与快照结构。
+#[cfg(mobile)]
+fn spawn_apply_blocking(_app: &AppHandle) {}
+
+#[cfg(mobile)]
+fn release_system_blocking(_shared: &Shared) -> Result<(), String> { Ok(()) }
+
+#[cfg(mobile)]
+fn blocking_wanted(_shared: &Shared) -> bool { false }
+
+#[cfg(mobile)]
+fn blocking_needs_sync(_shared: &Shared) -> bool { false }
+
+#[cfg(desktop)]
 fn refresh_hosts_status(blocking: &mut BlockingStatus, current: &str, hosts: &[String], enable: bool) {
     // active 仍记录系统残留；是否与设置一致要逐条核对，不能用一个 BEGIN 标记代替。
     blocking.active = core::hosts_section_present(current);
@@ -916,7 +1060,17 @@ fn refresh_hosts_status(blocking: &mut BlockingStatus, current: &str, hosts: &[S
 // ---------- 命令 ----------
 
 #[tauri::command]
-fn get_snapshot(shared: State<'_, Shared>) -> Snapshot {
+fn get_snapshot(app: AppHandle) -> Snapshot {
+    let shared = app.state::<Shared>();
+    // 手机切回前台时界面会主动来取：先按墙钟推进到此刻，锁屏期间走完的格立刻结算并弹出完成记录，
+    // 不必等下一轮心跳。到期提醒仍交给心跳统一处理，系统通知早已按时发出，这里不补发。
+    #[cfg(target_os = "android")]
+    {
+        let mut state = shared.state.lock().unwrap();
+        advance_time(&mut state, now_unix(), time_policy());
+        drop(state);
+        mobile::mark_dirty(&app);
+    }
     snapshot(&shared, true)
 }
 
@@ -1047,6 +1201,7 @@ fn normalize_url(url: String) -> Result<String, String> {
 }
 
 /// 展示随应用附带的扩展目录，安装动作由用户在浏览器扩展页完成。
+#[cfg(desktop)]
 #[tauri::command]
 fn reveal_browser_extension(app: AppHandle) -> Result<(), String> {
     let path = app.path().resource_dir().map_err(|_| "找不到应用资源目录。")?
@@ -1080,6 +1235,7 @@ fn retry_save(app: AppHandle) -> Snapshot {
 }
 
 /// 只读核对：重新读系统 hosts，比对当前学习日应有的完整托管规则。不弹授权。
+#[cfg(desktop)]
 #[tauri::command]
 fn check_blocking(app: AppHandle) -> Snapshot {
     {
@@ -1099,8 +1255,9 @@ fn check_blocking(app: AppHandle) -> Snapshot {
 }
 
 /// 通知权限：granted / denied / unknown。
+#[cfg(desktop)]
 #[tauri::command]
-fn notification_status(app: AppHandle) -> String {
+async fn notification_status(app: AppHandle) -> String {
     use tauri_plugin_notification::PermissionState;
     match app.notification().permission_state() {
         Ok(PermissionState::Granted) => "granted".into(),
@@ -1110,8 +1267,9 @@ fn notification_status(app: AppHandle) -> String {
     }
 }
 
+#[cfg(desktop)]
 #[tauri::command]
-fn request_notification_permission(app: AppHandle) -> String {
+async fn request_notification_permission(app: AppHandle) -> String {
     use tauri_plugin_notification::PermissionState;
     match app.notification().request_permission() {
         Ok(PermissionState::Granted) => "granted".into(),
@@ -1122,20 +1280,23 @@ fn request_notification_permission(app: AppHandle) -> String {
 
 /// 打开系统的通知设置页。
 /// 设置页的「试一条」：立刻按完整链路发一条，看得见就说明这条路通。
+#[cfg(not(target_os = "android"))]
 #[tauri::command]
-fn test_notification(app: AppHandle) {
+async fn test_notification(app: AppHandle) {
     notify(&app, "坐功 · 试一条", "看到这条横幅，说明系统通知这条路是通的。", AlertSound::Standard);
 }
 
+#[cfg(not(target_os = "android"))]
 #[tauri::command]
-fn test_water_sound(app: AppHandle) {
+async fn test_water_sound(app: AppHandle) {
     if app.state::<Shared>().state.lock().unwrap().preferences.sound_enabled {
         play_alert_sound(AlertSound::Water);
     }
 }
 
+#[cfg(desktop)]
 #[tauri::command]
-fn open_notification_settings() -> Result<(), String> {
+async fn open_notification_settings() -> Result<(), String> {
     #[cfg(target_os = "macos")]
     let ok = Command::new("open")
         .arg("x-apple.systempreferences:com.apple.Notifications-Settings.extension")
@@ -1148,6 +1309,7 @@ fn open_notification_settings() -> Result<(), String> {
 }
 
 /// 手动重新同步屏蔽：有学习日则按列表应用，没有则解除残留。
+#[cfg(desktop)]
 #[tauri::command]
 fn reapply_blocking(app: AppHandle) -> Snapshot {
     spawn_apply_blocking(&app);
@@ -1155,6 +1317,7 @@ fn reapply_blocking(app: AppHandle) -> Snapshot {
 }
 
 /// 在 Finder / 资源管理器中显示状态文件。
+#[cfg(desktop)]
 #[tauri::command]
 fn reveal_state_file(shared: State<'_, Shared>) -> Result<(), String> {
     let path = shared.path.clone();
@@ -1174,17 +1337,159 @@ fn app_version() -> String {
     env!("CARGO_PKG_VERSION").to_string()
 }
 
+#[cfg(desktop)]
 #[tauri::command]
 fn autostart_status(app: AppHandle) -> bool {
     app.autolaunch().is_enabled().unwrap_or(false)
 }
 
+#[cfg(desktop)]
 #[tauri::command]
 fn set_autostart(enabled: bool, app: AppHandle) -> Result<bool, String> {
     let launcher = app.autolaunch();
     if enabled { launcher.enable() } else { launcher.disable() }
         .map_err(|e| e.to_string())?;
     Ok(launcher.is_enabled().unwrap_or(false))
+}
+
+// IPC 名称保持一致；桌面能力在手机上明确拒绝，能力入口由 A3 隐藏。
+#[cfg(mobile)]
+#[tauri::command]
+fn reveal_browser_extension(_app: AppHandle) -> Result<(), String> {
+    Err("移动端不支持安装桌面浏览器扩展。".into())
+}
+
+#[cfg(mobile)]
+fn unsupported_blocking_snapshot(app: &AppHandle) -> Snapshot {
+    app.state::<Shared>().blocking.lock().unwrap().error = Some("移动端不支持网站屏蔽。".into());
+    broadcast(app);
+    snapshot(&app.state::<Shared>(), true)
+}
+
+#[cfg(mobile)]
+#[tauri::command]
+fn check_blocking(app: AppHandle) -> Snapshot { unsupported_blocking_snapshot(&app) }
+
+#[cfg(mobile)]
+#[tauri::command]
+fn reapply_blocking(app: AppHandle) -> Snapshot { unsupported_blocking_snapshot(&app) }
+
+#[cfg(all(mobile, not(target_os = "android")))]
+#[tauri::command]
+async fn notification_status(_app: AppHandle) -> String { "unknown".into() }
+
+#[cfg(all(mobile, not(target_os = "android")))]
+#[tauri::command]
+async fn request_notification_permission(_app: AppHandle) -> Result<String, String> {
+    Err("移动端暂不支持请求通知权限。".into())
+}
+
+#[cfg(all(mobile, not(target_os = "android")))]
+#[tauri::command]
+async fn open_notification_settings() -> Result<(), String> {
+    Err("移动端暂不支持打开通知设置。".into())
+}
+
+#[cfg(target_os = "android")]
+#[tauri::command]
+async fn notification_status(app: AppHandle) -> Result<String, String> {
+    mobile::notification_status(&app)
+}
+
+#[cfg(target_os = "android")]
+#[tauri::command]
+async fn request_notification_permission(app: AppHandle) -> Result<String, String> {
+    // 系统授权框开着时插件调用会一直等用户作答；放进阻塞线程池，不占异步运行时的工作线程。
+    tauri::async_runtime::spawn_blocking(move || mobile::request_notification_permission(&app))
+        .await
+        .map_err(|_| "通知授权请求没有完成，请重试。".to_owned())?
+}
+
+#[cfg(target_os = "android")]
+#[tauri::command]
+async fn open_notification_settings(app: AppHandle) -> Result<(), String> {
+    mobile::open_settings(&app, platform::SettingsRequest::new(
+        platform::SettingsTarget::AppNotifications, None
+    )?)
+}
+
+#[cfg(target_os = "android")]
+#[tauri::command]
+async fn test_notification(app: AppHandle) -> Result<(), String> {
+    mobile::test_notification(&app, false)
+}
+
+#[cfg(target_os = "android")]
+#[tauri::command]
+async fn test_water_sound(app: AppHandle) -> Result<(), String> {
+    mobile::test_notification(&app, true)
+}
+
+#[tauri::command]
+fn platform_info() -> platform::PlatformInfo { platform::info() }
+
+#[tauri::command]
+async fn system_status(app: AppHandle) -> Result<platform::SystemStatus, String> {
+    #[cfg(target_os = "android")]
+    { mobile::system_status(&app) }
+    #[cfg(not(target_os = "android"))]
+    { let _ = app; Err("系统状态查询仅支持 Android。".into()) }
+}
+
+#[tauri::command]
+async fn open_system_settings(
+    target: platform::SettingsTarget,
+    channel_id: Option<String>,
+    app: AppHandle,
+) -> Result<(), String> {
+    let request = platform::SettingsRequest::new(target, channel_id)?;
+    #[cfg(target_os = "android")]
+    { mobile::open_settings(&app, request) }
+    #[cfg(not(target_os = "android"))]
+    { let _ = (app, request); Err("此系统设置入口仅支持 Android。".into()) }
+}
+
+#[tauri::command]
+async fn move_task_to_back(app: AppHandle) -> Result<(), String> {
+    #[cfg(target_os = "android")]
+    { mobile::move_task_to_back(&app) }
+    #[cfg(not(target_os = "android"))]
+    { let _ = app; Err("退到后台仅支持 Android。".into()) }
+}
+
+#[cfg(mobile)]
+#[tauri::command]
+fn reveal_state_file(_shared: State<'_, Shared>) -> Result<(), String> {
+    Err("移动端不支持在文件管理器中显示状态文件。".into())
+}
+
+#[cfg(mobile)]
+#[tauri::command]
+fn autostart_status(_app: AppHandle) -> bool { false }
+
+#[cfg(mobile)]
+#[tauri::command]
+fn set_autostart(enabled: bool, _app: AppHandle) -> Result<bool, String> {
+    let _ = enabled;
+    Err("移动端不支持桌面开机自启。".into())
+}
+
+#[cfg(mobile)]
+#[tauri::command]
+async fn quit_after_save(_app: AppHandle) -> Result<(), String> {
+    Err("移动端请使用系统返回键退到后台。".into())
+}
+
+#[cfg(mobile)]
+#[tauri::command]
+fn quit_leaving_blocking(_app: AppHandle) -> Result<(), String> {
+    Err("移动端请使用系统返回键退到后台。".into())
+}
+
+#[cfg(mobile)]
+#[tauri::command]
+fn quit_without_saving(_app: AppHandle) -> Result<(), String> {
+    Err("移动端请使用系统返回键退到后台。".into())
 }
 
 // ---------- 启动 ----------
@@ -1226,7 +1531,7 @@ fn load_initial(path: &PathBuf) -> (core::State, Option<String>) {
     match decide_initial(fs::read_to_string(path).map_err(|e| e.kind())) {
         InitialPlan::Loaded(state) => {
             let mut state = *state;
-            state.resume_after_restart(now_unix());
+            resume_time(&mut state, now_unix(), time_policy());
             (state, None)
         }
         InitialPlan::Protected(message) => (core::State::new(now_unix()), Some(message)),
@@ -1304,9 +1609,11 @@ fn install_chinese_menu(app: &tauri::App) -> tauri::Result<()> {
 
 /// 窗口位置与尺寸要记住：这个 App 常年开在副屏上，每次启动都跳回屏幕中央很烦。
 /// 只记 size 与 position——「关窗不退出」意味着窗口经常是隐藏的，记 visible 只会打架。
+#[cfg(desktop)]
 const WINDOW_STATE: StateFlags = StateFlags::SIZE.union(StateFlags::POSITION);
 
 /// 正常退出先在后台清理，授权取消或写入失败时保留应用供用户重试。
+#[cfg(desktop)]
 fn begin_exit_cleanup(app: &AppHandle) {
     let shared = app.state::<Shared>();
     if shared.exiting.swap(true, Ordering::SeqCst) { return; }
@@ -1314,6 +1621,7 @@ fn begin_exit_cleanup(app: &AppHandle) {
     thread::spawn(move || { let _ = complete_exit_cleanup(&app); });
 }
 
+#[cfg(desktop)]
 fn complete_exit_cleanup(app: &AppHandle) -> Result<(), String> {
     let shared = app.state::<Shared>();
     if let Err(reason) = release_system_blocking(&shared) {
@@ -1331,11 +1639,13 @@ fn complete_exit_cleanup(app: &AppHandle) -> Result<(), String> {
 }
 
 /// 退出前那次保存的结论。**纯函数**，好测；窗口与进程操作全留在调用方。
+#[cfg_attr(mobile, allow(dead_code))]
 enum QuitDecision {
     Exit,
     Stay(String),
 }
 
+#[cfg(desktop)]
 fn decide_quit(save_error: Option<String>) -> QuitDecision {
     match save_error {
         None => QuitDecision::Exit,
@@ -1344,6 +1654,7 @@ fn decide_quit(save_error: Option<String>) -> QuitDecision {
 }
 
 /// 存不下来就不退：内存里的改动原样留着，把主窗口叫回来问用户。
+#[cfg(desktop)]
 fn quit_saving(app: &AppHandle) {
     let shared = app.state::<Shared>();
     shared.state.lock().unwrap().tick(now_unix());
@@ -1364,6 +1675,7 @@ fn quit_saving(app: &AppHandle) {
 }
 
 /// 退出前保存失败后的「重试并退出」。成功就没有下文了；失败把最新原因端回对话框。
+#[cfg(desktop)]
 #[tauri::command]
 async fn quit_after_save(app: AppHandle) -> Result<(), String> {
     // 重试框必须等清理真正完成再恢复可点，避免授权仍在等待时出现“留在这里”按钮。
@@ -1385,6 +1697,7 @@ async fn quit_after_save(app: AppHandle) -> Result<(), String> {
 
 /// 「仍然退出」：系统 hosts 一直解除不了（授权一再被拒、托管标记损坏）时，不能把人困在应用里。
 /// 照常保存；系统 hosts 里坐功那一段先留着，下次打开坐功会核对并提示解除。
+#[cfg(desktop)]
 #[tauri::command]
 fn quit_leaving_blocking(app: AppHandle) -> Result<(), String> {
     let shared = app.state::<Shared>();
@@ -1401,6 +1714,7 @@ fn quit_leaving_blocking(app: AppHandle) -> Result<(), String> {
 }
 
 /// 「不保存退出」：磁盘上保持上一次成功写入的完整文件。
+#[cfg(desktop)]
 #[tauri::command]
 fn quit_without_saving(app: AppHandle) {
     // 先立标记再退出：`app.exit(0)` 之后还会走一次 `RunEvent::Exit`，
@@ -1425,7 +1739,7 @@ fn final_save_on_exit(shared: &Shared) {
     if !should_save_on_exit(*shared.declined_final_save.lock().unwrap()) {
         return;
     }
-    shared.state.lock().unwrap().tick(now_unix());
+    advance_time(&mut shared.state.lock().unwrap(), now_unix(), time_policy());
     save(shared);
 }
 
@@ -1452,7 +1766,9 @@ pub fn run() {
             std::process::exit(1);
         }
     };
-    tauri::Builder::default()
+    let builder = tauri::Builder::default();
+    #[cfg(desktop)]
+    let builder = builder
         .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
             // 第二个实例只负责把已有窗口叫出来。
             if let Some(window) = app.get_webview_window("main") {
@@ -1464,8 +1780,12 @@ pub fn run() {
             tauri_plugin_window_state::Builder::default()
                 .with_state_flags(WINDOW_STATE)
                 .build(),
-        )
-        .plugin(tauri_plugin_notification::init())
+        );
+    let builder = builder.plugin(tauri_plugin_notification::init());
+    #[cfg(target_os = "android")]
+    let builder = builder.plugin(tauri_plugin_sitzfleisch_android::init());
+    #[cfg(desktop)]
+    let builder = builder
         .plugin(tauri_plugin_autostart::init(
             tauri_plugin_autostart::MacosLauncher::LaunchAgent,
             None,
@@ -1474,8 +1794,8 @@ pub fn run() {
             if event.id.as_ref() == "app-quit" {
                 quit_saving(app);
             }
-        })
-        .setup(move |app| {
+        });
+    let builder = builder.setup(move |app| {
             // 没被挪走就用系统的应用数据目录；挪走了的那一份在建窗口之前就判过了。
             let isolated = data_dir_override.is_some();
             let dir = match data_dir_override {
@@ -1490,7 +1810,11 @@ pub fn run() {
             let (state, protection) = load_initial(&path);
 
             // 建窗前先只读体检；Ready 后按保留的学习日恢复规则或清理残留。
+            #[cfg(desktop)]
             let mut blocking = BlockingStatus::default();
+            #[cfg(mobile)]
+            let blocking = BlockingStatus::default();
+            #[cfg(desktop)]
             match read_system_hosts() {
                 Ok(current) => refresh_hosts_status(&mut blocking, &current, &state.preferences.blocked_hosts, state.day.is_some()),
                 Err(e) => blocking.error = Some(e),
@@ -1517,66 +1841,105 @@ pub fn run() {
                 tray_shape: Mutex::new(None),
                 tray_display: Mutex::new(None),
             });
+            #[cfg(target_os = "android")]
+            app.manage(mobile::MobileShared::new(dir.join("alarms.json")));
+            #[cfg(desktop)]
             browser_blocking::start(app.handle(), isolated);
             #[cfg(target_os = "macos")]
             install_chinese_menu(app)?;
 
-            let menu = {
-                let shared = app.state::<Shared>();
-                let shape = tray_shape(&shared.state.lock().unwrap());
-                let menu = build_tray_menu(app.handle(), &shape)?;
-                *shared.tray_shape.lock().unwrap() = Some(shape);
-                menu
-            };
-            let initial_display = tray_display(&app.state::<Shared>().state.lock().unwrap());
-            let tray_builder = TrayIconBuilder::with_id("main")
-                .icon(tray_icon(app.default_window_icon().unwrap(), initial_display.paused))
-                .tooltip(&initial_display.tooltip)
-                .menu(&menu)
-                .show_menu_on_left_click(true)
-                .on_menu_event(|app, event| handle_tray_menu(app, event.id.as_ref()));
-            #[cfg(target_os = "macos")]
-            let tray_builder = tray_builder.title(&initial_display.title);
-            let _tray = tray_builder.build(app)?;
-            #[cfg(target_os = "macos")]
-            configure_tray_digits(&_tray)?;
-            *app.state::<Shared>().tray_display.lock().unwrap() = Some(initial_display);
+            #[cfg(desktop)]
+            {
+                let menu = {
+                    let shared = app.state::<Shared>();
+                    let shape = tray_shape(&shared.state.lock().unwrap());
+                    let menu = build_tray_menu(app.handle(), &shape)?;
+                    *shared.tray_shape.lock().unwrap() = Some(shape);
+                    menu
+                };
+                let initial_display = tray_display(&app.state::<Shared>().state.lock().unwrap());
+                let tray_builder = TrayIconBuilder::with_id("main")
+                    .icon(tray_icon(app.default_window_icon().unwrap(), initial_display.paused))
+                    .tooltip(&initial_display.tooltip)
+                    .menu(&menu)
+                    .show_menu_on_left_click(true)
+                    .on_menu_event(|app, event| handle_tray_menu(app, event.id.as_ref()));
+                #[cfg(target_os = "macos")]
+                let tray_builder = tray_builder.title(&initial_display.title);
+                let _tray = tray_builder.build(app)?;
+                #[cfg(target_os = "macos")]
+                configure_tray_digits(&_tray)?;
+                *app.state::<Shared>().tray_display.lock().unwrap() = Some(initial_display);
+            }
 
             // 每秒走一格；只有「自然走完」的转变才配通知（用户手点的不用提醒自己）。
             let handle = app.handle().clone();
-            thread::spawn(move || {
+            let heartbeat_worker = thread::spawn(move || {
+                #[cfg(target_os = "android")]
+                {
+                    mobile::set_heartbeat_thread(&handle);
+                }
+                #[cfg(target_os = "android")]
+                let mut initial_sync = true;
                 let mut ticks: u64 = 0;
                 loop {
+                    #[cfg(not(target_os = "android"))]
                     thread::sleep(Duration::from_secs(1));
+                    #[cfg(target_os = "android")]
+                    {
+                        if initial_sync { initial_sync = false; }
+                        else { thread::park_timeout(Duration::from_secs(1)); }
+                    }
+                    #[cfg(target_os = "android")]
+                    if mobile::stop_requested(&handle) { break; }
                     ticks += 1;
-                    let (focus_done, break_done, reminders) = {
+                    let step = {
                         let shared = handle.state::<Shared>();
                         let mut state = shared.state.lock().unwrap();
                         let now = now_unix();
-                        let focus_done = tick_reporting_finish(&mut state, now);
-                        let reminders = take_due_reminder_notifications(&mut state);
-                        let break_done = state.take_due_break(now);
+                        #[cfg(target_os = "android")]
+                        let gap = mobile::heartbeat_gap(&handle, now);
+                        #[cfg(not(target_os = "android"))]
+                        let gap = now.saturating_sub(state.last_tick);
+                        let step = advance_heartbeat(&mut state, now, gap);
                         drop(state);
                         if ticks.is_multiple_of(30) {
                             save(&shared);
                         }
-                        (focus_done, break_done, reminders)
+                        step
                     };
-                    if focus_done {
+                    #[cfg(target_os = "android")]
+                    if mobile::stop_requested(&handle) { break; }
+                    if step.focus_done && step.show_banners {
                         notify_block_finished(&handle);
                     }
-                    if break_done {
-                        notify(&handle, "休息结束", "开下一格吧。", AlertSound::Standard);
+                    if step.break_done && step.show_banners {
+                        let (title, body, _) = {
+                            let shared = handle.state::<Shared>();
+                            let state = shared.state.lock().unwrap();
+                            let alert = core::PlannedAlert { kind: core::AlertKind::RestOver, at: state.last_tick, pause_started_at: None };
+                            alerts::alert_copy(alert.kind, &state, &alert)
+                        };
+                        notify(&handle, title, &body, AlertSound::Standard);
                     }
-                    for (title, body, sound) in reminders {
-                        notify(&handle, title, &body, sound);
+                    if step.show_banners {
+                        for (title, body, sound) in step.reminders {
+                            notify(&handle, title, &body, sound);
+                        }
                     }
+                    #[cfg(target_os = "android")]
+                    mobile::sync(&handle, step.desired, step.status, step.now);
                     broadcast(&handle);
                 }
             });
+            #[cfg(target_os = "android")]
+            mobile::register_heartbeat_worker(app.handle(), heartbeat_worker);
+            #[cfg(not(target_os = "android"))]
+            drop(heartbeat_worker);
 
             // 通知权限得主动要一次，否则 macOS 根本不会把这个 App 登记进通知中心，
             // 表现出来就是「设置里找不到它，也永远收不到提醒」。放后台线程，别挡住启动。
+            #[cfg(desktop)]
             {
                 use tauri_plugin_notification::PermissionState;
                 let handle = app.handle().clone();
@@ -1606,15 +1969,24 @@ pub fn run() {
 
             broadcast(app.handle());
             Ok(())
-        })
-        .on_window_event(|window, event| {
+        });
+    #[cfg(desktop)]
+    let builder = builder.on_window_event(|window, event| {
             // 关窗不退出：计时挂在托盘继续走，和 Mac 主程序一个规矩。
             if let WindowEvent::CloseRequested { api, .. } = event {
                 let _ = window.hide();
                 api.prevent_close();
             }
-        })
-        .invoke_handler(tauri::generate_handler![
+        });
+    #[cfg(target_os = "android")]
+    let builder = builder.on_window_event(|window, event| {
+        match event {
+            WindowEvent::Suspended => mobile::on_lifecycle(window.app_handle(), true),
+            WindowEvent::Resumed => mobile::on_lifecycle(window.app_handle(), false),
+            _ => {},
+        }
+    });
+    builder.invoke_handler(tauri::generate_handler![
             get_snapshot,
             browser_pairing_code,
             reset_browser_pairing,
@@ -1648,11 +2020,19 @@ pub fn run() {
             reveal_state_file,
             autostart_status,
             set_autostart,
-            app_version
+            app_version,
+            platform_info,
+            system_status,
+            open_system_settings,
+            move_task_to_back
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")
         .run(|app, event| {
+            #[cfg(target_os = "android")]
+            if let tauri::RunEvent::ExitRequested { api, .. } = &event {
+                if mobile::prevent_exit_until_heartbeat_stops(app) { api.prevent_exit(); }
+            }
             if matches!(&event, tauri::RunEvent::Ready) {
                 let shared = app.state::<Shared>();
                 // 再次打开未结束的学习日时恢复规则；上次异常退出的残留也按当前状态核对。
@@ -1661,6 +2041,7 @@ pub fn run() {
                     spawn_apply_blocking(app);
                 }
             }
+            #[cfg(desktop)]
             if let tauri::RunEvent::ExitRequested { api, .. } = &event {
                 if !app.state::<Shared>().blocking_released.load(Ordering::SeqCst) {
                     api.prevent_exit();
@@ -1689,6 +2070,8 @@ pub fn run() {
                         }
                     }
                 }
+                #[cfg(target_os = "android")]
+                android_shutdown::finish_android_process();
             }
         });
 }

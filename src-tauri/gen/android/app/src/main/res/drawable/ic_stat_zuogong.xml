@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="24dp"
+    android:height="24dp"
+    android:viewportWidth="24"
+    android:viewportHeight="24">
+    <!-- 与导航半月相同的右侧亮面；通知只使用单色剪影，不带强调色。 -->
+    <path android:fillColor="#FFFFFFFF"
+        android:pathData="M7.75,3.5 A8.5,8.5 0,0 1,7.75,20.5 Z" />
+</vector>
