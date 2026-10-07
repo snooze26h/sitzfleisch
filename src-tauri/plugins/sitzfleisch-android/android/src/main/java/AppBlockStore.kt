@@ -22,6 +22,8 @@ object AppBlockStore {
   const val MAX_PACKAGES = 200
   /** 被送回坐功之后，界面在这段时间内回到前台才说明原因；再晚就是旧事了。 */
   private const val NOTICE_TTL_MS = 60_000L
+  /** 送回坐功后这段时间内收到的「离开坐功」，是上一次离开迟到的回调，不算数。 */
+  private const val LEAVE_GRACE_MS = 2_000L
   private val PACKAGE_NAME = Regex("[A-Za-z][A-Za-z0-9_]*(\\.[A-Za-z][A-Za-z0-9_]*)+")
 
   class Rules(val enabled: Boolean, val packages: Set<String>)
@@ -30,6 +32,11 @@ object AppBlockStore {
 
   @Volatile private var cached: Rules? = null
   @Volatile private var notice: Notice? = null
+  /**
+   * 屏蔽服务把坐功叫到前台的时刻（0 表示没有）。这时坐功下面可能还压着刚被拦下的应用：
+   * 荣耀上实测，送回后在坐功里按返回只退到后台，坐功会又被送回前台。
+   */
+  @Volatile private var coveringSince = 0L
 
   fun validPackageName(name: String): Boolean = name.length <= 255 && PACKAGE_NAME.matches(name)
 
@@ -50,8 +57,24 @@ object AppBlockStore {
     return saved
   }
 
-  fun recordNotice(packageName: String) {
-    notice = Notice(packageName, SystemClock.elapsedRealtime())
+  /** 屏蔽服务送人回坐功之前调用：记下拦的是谁，也记下坐功此刻正压在它上面。 */
+  fun recordSentBack(packageName: String) {
+    val now = SystemClock.elapsedRealtime()
+    notice = Notice(packageName, now)
+    coveringSince = now
+  }
+
+  /** 返回键用：坐功是不是正压在刚被拦下的应用上面。读一次就清掉。 */
+  fun takeCoveringBlockedApp(): Boolean {
+    val covering = coveringSince != 0L
+    coveringSince = 0L
+    return covering
+  }
+
+  /** 用户自己离开了坐功（回桌面、切到别的应用），之后坐功下面是什么就不再确定。 */
+  fun leftForeground() {
+    val since = coveringSince
+    if (since != 0L && SystemClock.elapsedRealtime() - since > LEAVE_GRACE_MS) coveringSince = 0L
   }
 
   fun takeNotice(): String? {

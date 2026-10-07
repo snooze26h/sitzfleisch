@@ -253,8 +253,27 @@ class SitzfleischPlugin(private val activity: Activity) : Plugin(activity) {
     }
   }
 
+  override fun onStop() {
+    super.onStop()
+    // 只在亮屏时算「离开」：锁屏再解锁，坐功下面压着的还是刚被拦下的应用。
+    val power = activity.getSystemService(Context.POWER_SERVICE) as PowerManager
+    if (power.isInteractive) AppBlockStore.leftForeground()
+  }
+
   @Command
   fun moveTaskToBack(invoke: Invoke) {
+    if (AppBlockStore.takeCoveringBlockedApp()) {
+      // 屏蔽服务刚送回来的：只退到后台的话，坐功会又被送回前台（荣耀实测），所以直接回到桌面。
+      val home = Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_HOME)
+        .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+      try {
+        activity.startActivity(home)
+        invoke.resolve()
+        return
+      } catch (_: RuntimeException) {
+        // 叫不出桌面时，退回到普通的退到后台。
+      }
+    }
     if (activity.moveTaskToBack(true)) invoke.resolve()
     else invoke.reject("无法把当前任务移到后台。")
   }

@@ -100,11 +100,12 @@ class AppBlockService : AccessibilityService() {
   }
 
   /**
-   * 先把桌面叫到前台、再把坐功放在它上面：在坐功里按返回退到后台时回到桌面，
-   * 而不是又露出刚才那个应用。无障碍服务由系统绑定，允许从后台打开界面。
+   * 先把桌面叫到前台、再把坐功放在它上面，免得在坐功里按返回又露出刚才那个应用。有的系统（荣耀）
+   * 上光靠这一步不够，所以返回键另外照 [AppBlockStore.takeCoveringBlockedApp] 直接回桌面。
+   * 无障碍服务由系统绑定，允许从后台打开界面。
    */
   private fun sendBack(packageName: String) {
-    AppBlockStore.recordNotice(packageName)
+    AppBlockStore.recordSentBack(packageName)
     val home = Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_HOME)
       .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
     val zuogong = packageManager.getLaunchIntentForPackage(this.packageName)

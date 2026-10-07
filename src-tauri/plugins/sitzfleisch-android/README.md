@@ -26,7 +26,7 @@ Rust 的 StatusModel 保存固定计时终点或暂停起点，以整体相等�
 
 开关和名单存在偏好的 `app_blocking` 里（`{ enabled, apps: [{ package_name, label }] }`，从没开过时不写入存档），由 core 校验。心跳在每轮同步时把 `{ enabled, packages }` 推给 `setBlockRules`，按整体相等去重，失败与提醒同步一起退避重试；保护模式下不推，免得出厂偏好覆盖原生侧的规则。插件把规则同步写进 SharedPreferences：系统只为无障碍服务拉起进程、Rust 还没运行时，服务照样读得到。
 
-`AppBlockService` 是只订阅 `typeWindowStateChanged` 的无障碍服务，`canRetrieveWindowContent=false`，组件不导出、只许系统绑定。名单里的应用有界面到前台时（事件的类名能在该应用里解析为 Activity；悬浮窗、输入法等窗口不算），先打开桌面、再把坐功放到上面，并记下包名供界面提示；同一应用 1.5 秒内只拦一次。桌面、系统界面、设置、拨号和坐功自己永远不拦。选择单的应用列表来自 `<queries>` 声明的 LAUNCHER 意图，不申请 `QUERY_ALL_PACKAGES`；荣耀、小米等系统另有 `com.android.permission.GET_INSTALLED_APPS`，只在用户点「允许读取」时申请。
+`AppBlockService` 是只订阅 `typeWindowStateChanged` 的无障碍服务，`canRetrieveWindowContent=false`，组件不导出、只许系统绑定。名单里的应用有界面到前台时（事件的类名能在该应用里解析为 Activity；悬浮窗、输入法等窗口不算），先打开桌面、再把坐功放到上面，并记下包名供界面提示；同一应用 1.5 秒内只拦一次。荣耀上实测，送回后按返回若只退到后台，坐功会又被送回前台，所以 `moveTaskToBack` 在坐功刚被送回、可能压着被拦下的应用时，改为直接打开桌面；用户亮屏离开坐功（送回后 2 秒内迟到的离开回调不算）就清掉这个标记。桌面、系统界面、设置、拨号和坐功自己永远不拦。选择单的应用列表来自 `<queries>` 声明的 LAUNCHER 意图，不申请 `QUERY_ALL_PACKAGES`；荣耀、小米等系统另有 `com.android.permission.GET_INSTALLED_APPS`，只在用户点「允许读取」时申请。
 
 ## 资源
 
