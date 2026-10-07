@@ -1,8 +1,9 @@
 // 主循环：快照进来 → 拼 HTML → morphdom 打补丁 → 画运行图。所有交互走事件委托。
 
 import morphdom from "morphdom";
-import { invoke, onBackRequested, onExtendRequested, onQuitBlocked, onQuitBlockingFailed, onReminder, onSnapshot, openSystemSettings, platformInfo, setWindowTitle, systemStatus } from "./api";
+import { installedApps, invoke, onBackRequested, onExtendRequested, onQuitBlocked, onQuitBlockingFailed, onReminder, onSnapshot, openSystemSettings, platformInfo, setWindowTitle, systemStatus, takeBlockNotice } from "./api";
 import { conflictingHost, MAX_BLOCK_RULES, normalizeHost, normalizeUrl } from "./blocking";
+import { appBlocking, DISABLE_PHRASE, MAX_BLOCKED_APPS, sameText } from "./app-blocking";
 import type { Day, Preferences, Snapshot, View } from "./types";
 import { MAX_BLOCK_MINUTES, MIN_BLOCK_MINUTES, MAX_COMPLETION_NOTE_CHARS, SYSTEM_SETTINGS_TARGETS, type SystemSettingsTarget } from "./types";
 import { SHORT_NAME_WIDTH, dayLabel, displayWidth, duration, esc, nowUnix } from "./format";
@@ -47,6 +48,9 @@ let lastView: View | null = null;
 let preferencesQueue: Promise<void> = Promise.resolve();
 let dialogToken = 0;
 let systemRequest = 0;
+let pickerRequest = 0;
+/** 选择单里的应用按中文拼音排；英文名和数字混在一起时按自然顺序。 */
+const appOrder = new Intl.Collator("zh-Hans-CN", { numeric: true, sensitivity: "base" });
 let permissionChoiceMade = false;
 /** 把框叫出来的那个元素；关框之后焦点还给它。 */
 let dialogOpener: HTMLElement | null = null;
@@ -178,6 +182,11 @@ document.addEventListener("visibilitychange", () => {
     render();
     void invoke<Snapshot>("get_snapshot").then(applySnapshot).catch(() => {});
     if (hasFeature("system_settings")) void refreshSystemStatus();
+    if (hasFeature("app_blocking")) {
+      void showBlockNotice();
+      // 从系统设置里允许了「获取应用列表」回来，选择单要换成完整的列表。
+      if (ui.appPicker?.limited) void loadPickerApps();
+    }
   }
 });
 compactQuery.addEventListener("change", render);
@@ -327,6 +336,7 @@ async function handleBack() {
   if (top === "completion") { await cancelCompletion(); return; }
   if (top === "dialog") { if (!dialogIsBusy()) closeDialog(); return; }
   if (top === "removal") { ui.removal = null; render(); return; }
+  if (top === "picker") { closeAppPicker(); return; }
   if (ui.menu) { ui.menu = null; render(); return; }
   if (ui.view === "settings" && ui.compact && !ui.settingsIndex) {
     ui.settingsIndex = true;
@@ -463,6 +473,156 @@ async function refreshSystemStatus() {
       ui.systemStatusLoading = false;
       render();
     }
+  }
+}
+
+// ---------- 应用屏蔽（手机） ----------
+
+/** 屏蔽服务刚把人送回坐功的话，说一声是哪个应用。 */
+async function showBlockNotice() {
+  // 取一次就清掉：快照还没到时先不取，免得应用名对不上、提示白白丢掉。
+  if (!ui.snap) return;
+  const name = await takeBlockNotice().catch(() => null);
+  if (!name) return;
+  const label = appBlocking(prefs()).apps.find((app) => app.package_name === name)?.label ?? name;
+  toast(`「${label}」在屏蔽名单里，已送回坐功。`);
+}
+
+function askForAccessibility() {
+  ask({
+    id: "app-block-service", title: "还差一步：打开无障碍服务", destructive: false,
+    message: "坐功要靠系统的无障碍服务才知道你打开了哪个应用。在无障碍设置里找到「坐功应用屏蔽」并打开；它只读取前台应用的包名，不读屏幕内容。开关是灰的，就按「设置 → 应用屏蔽」里的提示先允许受限制的设置。",
+    confirmLabel: "去打开", cancelLabel: "稍后",
+    onConfirm: async () => { await openSystemSettings("accessibility").catch((error) => toast(String(error))); },
+  });
+}
+
+async function setAppBlocking(checked: boolean, el: HTMLInputElement) {
+  const current = appBlocking(prefs());
+  if (checked === current.enabled) return;
+  if (!checked) {
+    // 关掉要两步确认：开关先拨回去，确认单走完才真的关。
+    el.checked = true;
+    ui.removal = { kind: "app-blocking", value: "", confirm: DISABLE_PHRASE, step: 1, typed: "" };
+    render();
+    return;
+  }
+  const ok = await savePrefs((x) => { x.app_blocking = { enabled: true, apps: appBlocking(x).apps }; });
+  if (!ok) return;
+  // 服务可能在上次读取之后被系统关掉了（强行停止会关掉它），以这一刻的状态为准。
+  const status = await refreshSystemStatus();
+  if (status && !status.appBlockServiceEnabled) askForAccessibility();
+  else toast(current.apps.length ? "应用屏蔽已打开：打开名单里的应用会被送回坐功。" : "应用屏蔽已打开。添加应用后生效。");
+}
+
+async function confirmAppRemoval(r: NonNullable<typeof ui.removal>) {
+  if (!sameText(r.typed, r.confirm)) return;
+  const ok = await savePrefs((x) => {
+    const current = appBlocking(x);
+    x.app_blocking = r.kind === "app"
+      ? { enabled: current.enabled, apps: current.apps.filter((app) => app.package_name !== r.value) }
+      : { enabled: false, apps: current.apps };
+  }, r.kind === "app" ? `已把「${r.confirm}」移出名单。` : "应用屏蔽已关闭。名单还在，随时可以再打开。");
+  if (ok && ui.removal === r) ui.removal = null;
+  render();
+}
+
+async function removeBlockedApp(name: string) {
+  const b = appBlocking(prefs());
+  const target = b.apps.find((app) => app.package_name === name);
+  if (!target || ui.pendingPrefs > 0) return;
+  if (b.enabled) {
+    ui.removal = { kind: "app", value: target.package_name, confirm: target.label, step: 1, typed: "" };
+    render();
+    return;
+  }
+  await savePrefs((x) => {
+    const current = appBlocking(x);
+    // 排队期间屏蔽可能被打开了：那就不能绕过两步确认。
+    if (current.enabled) return "屏蔽已打开，移出名单需要两步确认，请再点一次「移出」。";
+    x.app_blocking = { enabled: false, apps: current.apps.filter((app) => app.package_name !== name) };
+  }, `已把「${target.label}」移出名单。`);
+}
+
+async function openAppPicker() {
+  if (!hasFeature("app_blocking") || ui.appPicker) return;
+  ui.appPicker = { loading: true, error: "", apps: [], limited: false, canRequestFullList: false, query: "", chosen: [] };
+  ui.menu = null;
+  render();
+  await loadPickerApps();
+  if (canAutoFocus()) app.querySelector<HTMLInputElement>("#picker-query")?.focus();
+}
+
+function closeAppPicker() {
+  pickerRequest++;
+  ui.appPicker = null;
+  render();
+}
+
+async function loadPickerApps() {
+  const picker = ui.appPicker;
+  if (!picker) return;
+  const request = ++pickerRequest;
+  picker.loading = true;
+  picker.error = "";
+  render();
+  try {
+    const list = await installedApps();
+    if (request !== pickerRequest || ui.appPicker !== picker) return;
+    picker.apps = [...list.apps].sort((a, b) => appOrder.compare(a.label, b.label) || a.packageName.localeCompare(b.packageName));
+    picker.limited = list.limited;
+    picker.canRequestFullList = list.canRequestFullList;
+    // 列表变了（比如刚卸载了某个应用）：不再存在的勾选一并去掉。
+    picker.chosen = picker.chosen.filter((name) => picker.apps.some((app) => app.packageName === name));
+  } catch (error) {
+    if (request === pickerRequest && ui.appPicker === picker) picker.error = String(error).slice(0, 240);
+  } finally {
+    if (request === pickerRequest && ui.appPicker === picker) {
+      picker.loading = false;
+      render();
+    }
+  }
+}
+
+function togglePickedApp(name: string) {
+  const picker = ui.appPicker;
+  if (!picker || picker.loading || !picker.apps.some((app) => app.packageName === name)) return;
+  const listed = appBlocking(prefs()).apps;
+  if (listed.some((app) => app.package_name === name)) return;
+  if (picker.chosen.includes(name)) picker.chosen = picker.chosen.filter((chosen) => chosen !== name);
+  else if (picker.chosen.length < MAX_BLOCKED_APPS - listed.length) picker.chosen = [...picker.chosen, name];
+  render();
+}
+
+async function addPickedApps() {
+  const picker = ui.appPicker;
+  if (!picker || !picker.chosen.length || ui.pendingPrefs > 0) return;
+  const chosen = picker.chosen.flatMap((name) => picker.apps.filter((app) => app.packageName === name));
+  const before = appBlocking(prefs());
+  const message = !before.enabled ? "已加入名单。打开「屏蔽名单里的应用」后生效。"
+    : ui.systemStatus && !ui.systemStatus.appBlockServiceEnabled ? "已加入名单。无障碍服务打开后生效。"
+    : "已加入名单，现在打开它们会被送回坐功。";
+  const ok = await savePrefs((x) => {
+    const current = appBlocking(x);
+    const known = new Set(current.apps.map((app) => app.package_name));
+    const added = chosen.filter((app) => !known.has(app.packageName)).map((app) => ({ package_name: app.packageName, label: app.label }));
+    if (current.apps.length + added.length > MAX_BLOCKED_APPS) return `名单最多 ${MAX_BLOCKED_APPS} 个应用。`;
+    x.app_blocking = { enabled: current.enabled, apps: [...current.apps, ...added] };
+  }, message);
+  if (ok && ui.appPicker === picker) closeAppPicker();
+}
+
+async function requestFullAppList() {
+  try {
+    const granted = (await invoke<unknown>("request_app_list_permission")) === true;
+    if (granted) {
+      await loadPickerApps();
+      return;
+    }
+    toast("系统没有允许。请在应用信息的权限里打开「获取应用列表」，返回后列表会自动刷新。", 8000);
+    await openSystemSettings("app_details").catch(() => {});
+  } catch (error) {
+    toast(String(error));
   }
 }
 
@@ -807,7 +967,7 @@ async function handleAction(action: string, el: HTMLElement) {
       await addBlockingRule("url");
       break;
     case "remove-rule":
-      ui.removal = { kind: el.dataset.kind === "url" ? "url" : "host", value: el.dataset.value ?? "", step: 1, typed: "" };
+      ui.removal = { kind: el.dataset.kind === "url" ? "url" : "host", value: el.dataset.value ?? "", confirm: el.dataset.value ?? "", step: 1, typed: "" };
       render();
       break;
     case "removal-next":
@@ -828,7 +988,12 @@ async function handleAction(action: string, el: HTMLElement) {
       break;
     case "removal-confirm": {
       const r = ui.removal;
-      if (!r || r.typed.trim() !== r.value || ui.pendingPrefs > 0) break;
+      if (!r || ui.pendingPrefs > 0) break;
+      if (r.kind === "app" || r.kind === "app-blocking") {
+        await confirmAppRemoval(r);
+        break;
+      }
+      if (r.typed.trim() !== r.value) break;
       const ok = await savePrefs((x) => {
         if (r.kind === "url") x.blocked_urls = x.blocked_urls.filter((url) => url !== r.value);
         else x.blocked_hosts = x.blocked_hosts.filter((host) => host !== r.value);
@@ -852,6 +1017,26 @@ async function handleAction(action: string, el: HTMLElement) {
       break;
     case "reapply-blocking":
       await act("reapply_blocking");
+      break;
+
+    // ----- 设置：应用屏蔽（手机） -----
+    case "open-app-picker":
+      await openAppPicker();
+      break;
+    case "picker-toggle":
+      togglePickedApp(el.dataset.package ?? "");
+      break;
+    case "picker-cancel":
+      closeAppPicker();
+      break;
+    case "picker-confirm":
+      await addPickedApps();
+      break;
+    case "picker-full-list":
+      await requestFullAppList();
+      break;
+    case "remove-blocked-app":
+      await removeBlockedApp(el.dataset.package ?? "");
       break;
 
     // ----- 设置：提醒 / 关于 -----
@@ -1191,6 +1376,9 @@ async function handleChange(key: string, el: HTMLInputElement | HTMLSelectElemen
     case "water-on":
       await savePrefs((x) => { x.water_reminder_enabled = checked; });
       break;
+    case "app-blocking":
+      await setAppBlocking(checked, el as HTMLInputElement);
+      break;
     case "stretch-on":
       await savePrefs((x) => { x.stretch_reminder_enabled = checked; });
       break;
@@ -1286,6 +1474,10 @@ document.addEventListener("input", (event) => {
       if (ui.removal) ui.removal.typed = el.value;
       render();
       break;
+    case "picker-query":
+      if (ui.appPicker) ui.appPicker.query = el.value;
+      render();
+      break;
     default:
       break;
   }
@@ -1324,7 +1516,10 @@ document.addEventListener("keydown", (event) => {
       return;
     }
     if (top === "removal") ui.removal = null;
-    else if (top === "dialog") {
+    else if (top === "picker") {
+      closeAppPicker();
+      return;
+    } else if (top === "dialog") {
       if (dialogIsBusy()) return;
       closeDialog();
       return;
@@ -1452,6 +1647,8 @@ async function start() {
   if (!initialView && (qaView === "today" || qaView === "history" || qaView === "settings")) ui.view = qaView;
   applySnapshot(snap);
   if (ui.platform.mobile && hasFeature("system_settings")) void refreshSystemStatus();
+  // 冷启动也可能是屏蔽服务把人送回来的：进程只为服务活着时，这是界面第一次出现。
+  if (hasFeature("app_blocking")) void showBlockNotice();
   if (ui.view === "settings") void loadSettingsExtras();
   if (snap.initial_scroll) {
     requestAnimationFrame(() => {

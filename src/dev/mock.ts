@@ -2,14 +2,18 @@
 // 跑起来、点起来、截图验收。只在非 Tauri 环境被动态加载，不进正式包的主路径。
 // 场景通过 URL hash 选：#qa=start|fresh|chooser|completed|finishing|running|paused|suspended|resting|done|protected|savefail|nohistory
 // 可加 &platform=android 预览平台能力，&clock=<带时区的 ISO 时间> 固定截图时钟；手机下 &system=blocked|lowered 预览提醒受限。
+// 应用屏蔽（手机）：&apps=off|none 预览开关关着或从没设置过，&a11y=off 预览无障碍服务没开，
+// &applist=limited 预览系统只给部分应用，&notice=<包名> 预览刚被送回坐功的提示（也可在控制台设 qaBlockNotice）。
 
 import type {
+  AppBlocking,
   AppState,
   ArchivedDay,
   CategoryState,
   Day,
   PlatformInfo,
   Preferences,
+  InstalledApp,
   ProfileDef,
   Snapshot,
   SystemStatus,
@@ -18,6 +22,7 @@ import type {
 import { MAX_BLOCK_MINUTES, MIN_BLOCK_MINUTES, SUSPEND_GAP_SECONDS, MAX_COMPLETION_NOTE_CHARS, NOTIFICATION_CHANNELS, SYSTEM_SETTINGS_TARGETS, type SystemSettingsTarget } from "../types";
 import { version } from "../../package.json";
 import { MAX_BLOCK_RULES, normalizeHost, normalizeUrl } from "../blocking";
+import { MAX_BLOCKED_APPS, validPackageName } from "../app-blocking";
 
 const HISTORY_LIMIT = 60;
 const params = new URLSearchParams(location.hash.replace(/^#/, ""));
@@ -48,6 +53,7 @@ const platform: PlatformInfo = {
     in_app_sound_toggle: !mobile,
     system_settings: mobile,
     exact_alarm_status: mobile,
+    app_blocking: mobile,
   },
 };
 
@@ -68,7 +74,23 @@ const systemFixture: SystemStatus = {
   })),
   canScheduleExactAlarms: !blockedSystem,
   ignoringBatteryOptimizations: false,
+  appBlockServiceEnabled: params.get("a11y") !== "off",
 };
+
+// 预览用的手机应用；名字只为看排版和搜索，不读取任何真实设备。
+const installedFixture: InstalledApp[] = [
+  ["com.ss.android.ugc.aweme", "抖音"], ["tv.danmaku.bili", "哔哩哔哩"], ["com.xingin.xhs", "小红书"],
+  ["com.tencent.mm", "微信"], ["com.tencent.mobileqq", "QQ"], ["com.sina.weibo", "微博"],
+  ["com.zhihu.android", "知乎"], ["com.smile.gifmaker", "快手"], ["com.taobao.taobao", "淘宝"],
+  ["com.jingdong.app.mall", "京东"], ["com.netease.cloudmusic", "网易云音乐"], ["com.tencent.qqmusic", "QQ音乐"],
+  ["com.dragon.read", "番茄免费小说"], ["com.ss.android.article.news", "今日头条"], ["com.baidu.searchbox", "百度"],
+  ["com.eg.android.AlipayGphone", "支付宝"], ["com.sankuai.meituan", "美团"], ["com.autonavi.minimap", "高德地图"],
+  ["com.douban.frodo", "豆瓣"], ["com.tencent.tmgp.sgame", "王者荣耀"], ["com.miHoYo.Yuanshen", "原神"],
+  ["com.hihonor.camera", "相机"], ["com.hihonor.photos", "图库"], ["com.android.calendar", "日历"],
+  ["com.hihonor.notepad", "备忘录"], ["com.google.android.youtube", "YouTube"], ["com.twitter.android", "X"],
+].map(([packageName, label]) => ({ packageName, label }));
+let appListGranted = params.get("applist") !== "limited";
+if (mobile && params.get("notice")) window.qaBlockNotice = params.get("notice") ?? undefined;
 if (mobile) window.qaSystemStatus = structuredClone(systemFixture);
 
 function nowUnix(): number {
@@ -102,6 +124,14 @@ function prefsFixture(): Preferences {
     uniform_block_minutes: 0,
     default_profile_id: "standard",
     sound_enabled: true,
+    ...(mobile && params.get("apps") !== "none" ? { app_blocking: appBlockingFixture() } : {}),
+  };
+}
+
+function appBlockingFixture(): AppBlocking {
+  return {
+    enabled: params.get("apps") !== "off",
+    apps: [{ package_name: "com.ss.android.ugc.aweme", label: "抖音" }, { package_name: "tv.danmaku.bili", label: "哔哩哔哩" }],
   };
 }
 
@@ -129,6 +159,8 @@ declare global {
     qaSystemRequests?: { target: SystemSettingsTarget; channelId?: string }[];
     qaPermissionRequests?: number;
     qaTestNotifications?: string[];
+    /** QA：下一次回到前台时，「被送回坐功」的是哪个应用（包名）。 */
+    qaBlockNotice?: string;
   }
 }
 
@@ -431,6 +463,15 @@ const ops = {
         if (x.minutes < 0 || x.minutes > 24 * 60) throw "配额要在 0–24 小时之间";
       }
     }
+    if (prefs.app_blocking) {
+      const { apps } = prefs.app_blocking;
+      if (apps.length > MAX_BLOCKED_APPS) throw "屏蔽的应用不能超过 200 个";
+      if (apps.some((app) => !validPackageName(app.package_name))) throw "屏蔽名单里有不合法的应用包名";
+      if (new Set(apps.map((app) => app.package_name)).size !== apps.length) throw "屏蔽名单里有重复的应用";
+      if (apps.some((app) => !app.label.trim() || [...app.label.trim()].length > 80)) throw "屏蔽名单里的应用名为空、过长或含控制字符";
+      // 与 core 一致：从没开过（关着、名单为空）就不出现在快照里。
+      if (!prefs.app_blocking.enabled && !apps.length) delete prefs.app_blocking;
+    }
     if (state.day && prefs.water_reminder_enabled !== state.preferences.water_reminder_enabled) state.day.seated_since_water = 0;
     state.preferences = structuredClone(prefs);
   },
@@ -702,6 +743,22 @@ export async function mockInvoke<T>(command: string, args: Record<string, unknow
       if (!mobile) throw "此系统设置入口仅支持 Android。";
       (window.qaSystemRequests ??= []).push({ target: target as SystemSettingsTarget, ...(typeof channelId === "string" ? { channelId } : {}) });
       return undefined as T;
+    }
+    case "installed_apps":
+      if (!mobile) throw "应用屏蔽仅支持 Android。";
+      await new Promise((resolve) => setTimeout(resolve, 400));
+      return {
+        apps: structuredClone(appListGranted ? installedFixture : installedFixture.slice(20)),
+        limited: !appListGranted, canRequestFullList: true,
+      } as T;
+    case "request_app_list_permission":
+      if (!mobile) throw "应用屏蔽仅支持 Android。";
+      appListGranted = true;
+      return true as T;
+    case "take_block_notice": {
+      const notice = mobile ? window.qaBlockNotice ?? null : null;
+      window.qaBlockNotice = undefined;
+      return notice as T;
     }
     case "move_task_to_back":
       if (!mobile) throw "退到后台仅支持 Android。";

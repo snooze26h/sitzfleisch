@@ -1,4 +1,4 @@
-// 覆盖层：提示条、确认对话框、两步确认的网站解除单。
+// 覆盖层：提示条、确认对话框、两步确认的解除单（网站规则与应用屏蔽）、选择屏蔽应用。
 
 import { duration, esc } from "../format";
 import { MAX_COMPLETION_NOTE_CHARS } from "../types";
@@ -6,6 +6,7 @@ import { icon } from "../icons";
 import { btn } from "../components";
 import { day, dialogIsBusy, prefs, topOverlay, ui } from "../state";
 import { conflictingHost } from "../blocking";
+import { appBlocking, MAX_BLOCKED_APPS, sameText } from "../app-blocking";
 import { inTauri } from "../api";
 
 export function toastView(): string {
@@ -20,6 +21,8 @@ export function overlays(): string {
       return dialogView();
     case "removal":
       return removalSheet();
+    case "picker":
+      return appPickerSheet();
     case "completion":
       return completionSheet();
     default:
@@ -66,8 +69,11 @@ function removalSheet(): string {
   const blocking = ui.snap!.blocking;
   const busy = ui.pendingPrefs > 0;
   const guardrail = "这个动作是为了防止你在想刷的时候顺手删掉规则。";
+  const forApps = r.kind === "app" || r.kind === "app-blocking";
   let warning: string;
-  if (r.kind === "url") {
+  if (r.kind === "app") warning = `确认后，「${r.confirm}」会移出屏蔽名单，马上就能打开。这一步是为了防止你在想刷的时候顺手放开它。`;
+  else if (r.kind === "app-blocking") warning = `确认后，屏蔽名单里的 ${appBlocking(prefs()).apps.length} 个应用马上都能打开。名单会留着，下次打开开关就恢复屏蔽。这一步是为了防止你在想刷的时候顺手关掉屏蔽。`;
+  else if (r.kind === "url") {
     const conflict = conflictingHost(r.value, prefs().blocked_hosts);
     warning = `确认后会移除这条精确网址规则，浏览器扩展将在下次同步时解除。${conflict ? `整站规则 ${conflict} 仍然会屏蔽这个页面。` : ""}${guardrail}`;
   } else if (!inTauri) warning = `预览模式：确认后会从模拟设置中移除这条整站规则。${guardrail}`;
@@ -79,6 +85,13 @@ function removalSheet(): string {
     body = `<h2 id="removal-title">先停一下</h2>
       <p>${esc(warning)}</p>
       <div class="btns">${btn("保留屏蔽", { kind: "primary", action: "removal-cancel" })}<span class="spacer"></span>${btn("我仍要解除", { kind: "danger", action: "removal-next" })}</div>`;
+  } else if (forApps) {
+    // 应用名多是中文，比较时不分英文大小写；要输入的字放在框外面，照着打就行。
+    const matches = sameText(r.typed, r.confirm);
+    const what = r.kind === "app" ? "应用名" : "这句话";
+    body = `<h2 id="removal-title">${r.kind === "app" ? "手动确认应用名" : "手动确认关闭"}</h2>
+      <div class="confirm-field"><label for="removal-input">输入${what} <span class="rule-value sel">${esc(r.confirm)}</span></label><input id="removal-input" class="field md" data-input="removal" value="${esc(r.typed)}" aria-label="输入${what}以确认" placeholder="${esc(r.confirm)}" autocomplete="off" spellcheck="false" ${busy ? "disabled" : ""} /></div>
+      <div class="btns">${btn("返回", { kind: "plate", action: "removal-back", disabled: busy })}${btn("取消", { kind: "quiet", action: "removal-cancel", disabled: busy })}<span class="spacer"></span>${btn(busy ? "正在保存…" : r.kind === "app" ? "确认移出" : "确认关闭", { kind: "danger", action: "removal-confirm", disabled: !matches || busy })}</div>`;
   } else {
     const matches = r.typed.trim() === r.value;
     const label = r.kind === "url" ? "完整网址" : "完整域名";
@@ -87,4 +100,41 @@ function removalSheet(): string {
       <div class="btns">${btn("返回", { kind: "plate", action: "removal-back", disabled: busy })}${btn("取消", { kind: "quiet", action: "removal-cancel", disabled: busy })}<span class="spacer"></span>${btn(busy ? "正在解除…" : "确认解除", { kind: "danger", action: "removal-confirm", disabled: !matches || busy })}</div>`;
   }
   return `<div class="backdrop" id="removal"><div class="dialog sheet" role="dialog" aria-modal="true" aria-labelledby="removal-title" data-stop>${body}</div></div>`;
+}
+
+function appPickerSheet(): string {
+  const picker = ui.appPicker!;
+  const listed = new Set(appBlocking(prefs()).apps.map((app) => app.package_name));
+  const room = MAX_BLOCKED_APPS - listed.size;
+  const query = picker.query.trim().toLocaleLowerCase();
+  const visible = picker.apps
+    .filter((app) => !query || app.label.toLocaleLowerCase().includes(query) || app.packageName.toLowerCase().includes(query));
+  const full = picker.chosen.length >= room;
+  const rows = visible.map((app) => {
+    const inList = listed.has(app.packageName);
+    const chosen = picker.chosen.includes(app.packageName);
+    const on = inList || chosen;
+    return `<button class="picker-app${on ? " on" : ""}" data-action="picker-toggle" data-package="${esc(app.packageName)}" aria-pressed="${on}" ${inList || (full && !chosen) ? "disabled" : ""}>
+      <span class="picker-check" aria-hidden="true">${on ? icon("check", 14) : ""}</span>
+      <span class="picker-name"><b>${esc(app.label)}</b><span class="mono">${esc(app.packageName)}</span></span>
+      ${inList ? `<span class="picker-tag">已在名单</span>` : ""}
+    </button>`;
+  }).join("");
+  const status = picker.loading ? "正在读取手机上的应用…"
+    : picker.error ? picker.error
+    : !picker.apps.length ? "没有读到可以屏蔽的应用。"
+    : !visible.length ? "没有找到这个应用。" : "";
+  const limited = picker.limited && !picker.loading
+    ? `<div class="picker-limited"><p>系统只交出了系统自带的应用。允许坐功读取应用列表，才能看到你装的应用。</p>${btn("允许读取", { kind: "plate", action: "picker-full-list" })}</div>`
+    : "";
+  const count = picker.chosen.length;
+  return `<div class="backdrop" id="app-picker"><div class="dialog sheet app-picker" role="dialog" aria-modal="true" aria-labelledby="picker-title" data-stop>
+    <h2 id="picker-title">添加要屏蔽的应用</h2>
+    <label class="sr-only" for="picker-query">搜索应用</label>
+    <input id="picker-query" class="field" data-input="picker-query" value="${esc(picker.query)}" placeholder="搜索应用名" autocomplete="off" spellcheck="false" ${picker.loading ? "disabled" : ""} />
+    ${limited}
+    <div class="picker-list" role="group" aria-label="手机上的应用">${status ? `<p class="picker-status" role="status">${esc(status)}</p>` : rows}</div>
+    ${full && room > 0 ? `<p class="t-note">名单最多 ${MAX_BLOCKED_APPS} 个应用。</p>` : ""}
+    <div class="btns">${btn("取消", { kind: "plate", action: "picker-cancel" })}<span class="spacer"></span>${btn(count ? `添加 ${count} 个` : "添加", { kind: "primary", action: "picker-confirm", disabled: !count || ui.pendingPrefs > 0 })}</div>
+  </div></div>`;
 }

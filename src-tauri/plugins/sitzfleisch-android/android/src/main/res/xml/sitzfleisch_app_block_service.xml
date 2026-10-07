@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 只订阅窗口切换，不读取窗口内容；屏蔽判断只用事件里的包名和界面类名。 -->
+<accessibility-service xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools"
+    android:accessibilityEventTypes="typeWindowStateChanged"
+    android:accessibilityFeedbackType="feedbackGeneric"
+    android:accessibilityFlags="flagDefault"
+    android:canRetrieveWindowContent="false"
+    android:notificationTimeout="0"
+    android:description="@string/sitzfleisch_app_block_description"
+    android:summary="@string/sitzfleisch_app_block_summary"
+    android:isAccessibilityTool="false"
+    tools:targetApi="31" />

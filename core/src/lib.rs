@@ -19,6 +19,11 @@ pub const MAX_COMPLETION_NOTE_CHARS: usize = 2000;
 pub const HISTORY_LIMIT: usize = 60;
 pub const MAX_BLOCK_RULES: usize = 64;
 pub const MAX_BLOCK_URL_BYTES: usize = 4096;
+/// 手机应用屏蔽名单的上限。手机上可启动的应用通常一两百个，再多就是坏数据。
+pub const MAX_BLOCKED_APPS: usize = 200;
+/// Android 包名的长度上限（与系统对包名长度的限制一致）。
+const MAX_PACKAGE_NAME_BYTES: usize = 255;
+const MAX_APP_LABEL_CHARS: usize = 80;
 /// 两格之间停够这么久，就当起来活动过，起身提醒从头数。
 pub const RELIEF_PAUSE_SECONDS: i64 = 5 * 60;
 /// 界面传进来的计划与任务的上限。都比界面上实际能填的宽得多，只为挡住离谱的输入：
@@ -139,6 +144,31 @@ pub struct Preferences {
     /// 提醒时播放声音；喝水使用独立提示音。
     #[serde(default = "default_true")]
     pub sound_enabled: bool,
+    /// 手机上的应用屏蔽。没开过的话不写进存档：桌面存档和快照保持原样。
+    #[serde(default, skip_serializing_if = "AppBlocking::is_unset")]
+    pub app_blocking: AppBlocking,
+}
+
+/// 手机上手动开关的应用屏蔽，与学习日无关：开着就屏蔽，关掉就放开，没有临时放行。
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AppBlocking {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default)]
+    pub apps: Vec<BlockedApp>,
+}
+
+impl AppBlocking {
+    pub fn is_unset(&self) -> bool {
+        !self.enabled && self.apps.is_empty()
+    }
+}
+
+/// 屏蔽名单里的一个应用：按包名屏蔽；应用名是选中那一刻系统给的，只用来显示。
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BlockedApp {
+    pub package_name: String,
+    pub label: String,
 }
 
 impl Default for Preferences {
@@ -192,6 +222,7 @@ pub fn builtin_preferences() -> Preferences {
         uniform_block_minutes: 0,
         default_profile_id: String::new(),
         sound_enabled: true,
+        app_blocking: AppBlocking::default(),
     }
 }
 
@@ -266,6 +297,39 @@ pub fn validate_url(raw: &str) -> Result<String, &'static str> {
     Ok(normalized)
 }
 
+/// Android 包名：至少两段，每段以字母开头，只含字母、数字和下划线。
+/// 名单会原样交给系统侧的屏蔽服务，入库前只认这种形态。
+pub fn valid_package_name(name: &str) -> bool {
+    name.len() <= MAX_PACKAGE_NAME_BYTES
+        && name.split('.').count() >= 2
+        && name.split('.').all(|segment| {
+            let mut chars = segment.chars();
+            chars.next().is_some_and(|c| c.is_ascii_alphabetic())
+                && chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
+        })
+}
+
+fn validate_app_blocking(blocking: &AppBlocking) -> RuleResult {
+    if blocking.apps.len() > MAX_BLOCKED_APPS {
+        return Err("屏蔽的应用不能超过 200 个");
+    }
+    let mut seen: Vec<&str> = Vec::new();
+    for app in &blocking.apps {
+        if !valid_package_name(&app.package_name) {
+            return Err("屏蔽名单里有不合法的应用包名");
+        }
+        if seen.contains(&app.package_name.as_str()) {
+            return Err("屏蔽名单里有重复的应用");
+        }
+        seen.push(&app.package_name);
+        let label = app.label.trim();
+        if label.is_empty() || label.chars().count() > MAX_APP_LABEL_CHARS || label.chars().any(char::is_control) {
+            return Err("屏蔽名单里的应用名为空、过长或含控制字符");
+        }
+    }
+    Ok(())
+}
+
 /// 计划编辑的准入检查：空名、空计划、幽灵引用、离谱数值一律拒绝。
 pub fn validate_preferences(prefs: &Preferences) -> RuleResult {
     if prefs.categories.is_empty() {
@@ -308,6 +372,7 @@ pub fn validate_preferences(prefs: &Preferences) -> RuleResult {
             return Err("屏蔽列表里有不合法或未规范化的完整网址");
         }
     }
+    validate_app_blocking(&prefs.app_blocking)?;
     let mut ids = Vec::new();
     let too_long = |text: &str, limit: usize| text.chars().count() > limit;
     for category in &prefs.categories {
@@ -2338,6 +2403,60 @@ mod tests {
         assert!(validate_preferences(&prefs).is_ok());
         prefs.blocked_hosts = vec!["https://example.com/".into()];
         assert!(validate_preferences(&prefs).is_err(), "页面不能误存为整站规则");
+    }
+
+    fn blocked(package_name: &str, label: &str) -> BlockedApp {
+        BlockedApp { package_name: package_name.into(), label: label.into() }
+    }
+
+    #[test]
+    fn app_blocking_accepts_only_android_package_names_and_sane_labels() {
+        let mut prefs = builtin_preferences();
+        prefs.app_blocking.enabled = true;
+        assert!(validate_preferences(&prefs).is_ok(), "开着但名单为空也合法");
+        prefs.app_blocking.apps = vec![blocked("com.ss.android.ugc.aweme", "抖音"), blocked("tv.danmaku.bili", "哔哩哔哩"), blocked("com.Tencent_2.mm", "微信")];
+        assert!(validate_preferences(&prefs).is_ok());
+        for bad in ["", "aweme", "com.", ".com.a", "com..a", "1com.a", "com.1a", "com.a-b", "com.a b", "com.a/b", "com.a\nb", "com.抖音"] {
+            prefs.app_blocking.apps = vec![blocked(bad, "抖音")];
+            assert!(validate_preferences(&prefs).is_err(), "{bad:?}");
+        }
+        let longest = format!("a.{}", "b".repeat(MAX_PACKAGE_NAME_BYTES - 2));
+        prefs.app_blocking.apps = vec![blocked(&longest, "长包名")];
+        assert!(validate_preferences(&prefs).is_ok());
+        prefs.app_blocking.apps = vec![blocked(&format!("{longest}c"), "长包名")];
+        assert!(validate_preferences(&prefs).is_err());
+        for bad in ["", "   ", "抖\u{0}音", "抖\n音", &"字".repeat(MAX_APP_LABEL_CHARS + 1)] {
+            prefs.app_blocking.apps = vec![blocked("com.ss.android.ugc.aweme", bad)];
+            assert!(validate_preferences(&prefs).is_err(), "{bad:?}");
+        }
+        prefs.app_blocking.apps = vec![blocked("com.ss.android.ugc.aweme", "抖音"), blocked("com.ss.android.ugc.aweme", "抖音极速版")];
+        assert_eq!(validate_preferences(&prefs), Err("屏蔽名单里有重复的应用"));
+        prefs.app_blocking.apps = (0..=MAX_BLOCKED_APPS).map(|i| blocked(&format!("com.example.app{i}"), "应用")).collect();
+        assert_eq!(validate_preferences(&prefs), Err("屏蔽的应用不能超过 200 个"));
+        prefs.app_blocking.apps.pop();
+        assert!(validate_preferences(&prefs).is_ok());
+    }
+
+    #[test]
+    fn untouched_app_blocking_stays_out_of_saves_and_set_values_roundtrip() {
+        let mut state = State::new(1_000);
+        let saved = to_json(&state);
+        assert!(!saved.contains("app_blocking"), "没开过应用屏蔽的存档与旧版逐字一致");
+        assert_eq!(from_json(&saved).unwrap().preferences.app_blocking, AppBlocking::default());
+        state.preferences.app_blocking = AppBlocking { enabled: true, apps: vec![blocked("com.ss.android.ugc.aweme", "抖音")] };
+        let restored = from_json(&to_json(&state)).unwrap();
+        assert_eq!(restored.preferences.app_blocking, state.preferences.app_blocking);
+        // 关掉但留着名单：下次打开不用重选。
+        state.preferences.app_blocking.enabled = false;
+        let restored = from_json(&to_json(&state)).unwrap();
+        assert_eq!(restored.preferences.app_blocking, state.preferences.app_blocking);
+        let mut value = serde_json::to_value(&state).unwrap();
+        value["preferences"]["app_blocking"]["apps"][0]["package_name"] = serde_json::json!("com.evil;rm -rf");
+        assert!(from_json(&value.to_string()).unwrap_err().starts_with("invalid preferences:"));
+        let mut update = state.preferences.clone();
+        update.app_blocking.apps.push(blocked("not-a-package", "坏数据"));
+        assert!(state.update_preferences(update).is_err());
+        assert_eq!(state.preferences.app_blocking.apps.len(), 1, "被拒的修改不落到状态上");
     }
 
     #[test]

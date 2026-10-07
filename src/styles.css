@@ -1171,7 +1171,8 @@ button, select, summary, .switch { -webkit-tap-highlight-color: transparent; tou
 }
 
 .notification-warning { grid-column: 1 / -1; display: flex; align-items: center; gap: 12px; padding: 12px 14px; border-radius: 10px; background: rgba(198, 163, 103, 0.06); box-shadow: inset 0 0 0 1px rgba(198, 163, 103, 0.45); }
-.notification-warning b { flex: 1; font-size: 15px; font-weight: 600; color: var(--caution); }
+/* 提示是「哪里不对，所以会怎样」两截：只在标点处换行，窄到放不下再随处断开。 */
+.notification-warning b { flex: 1; font-size: 15px; font-weight: 600; color: var(--caution); word-break: keep-all; overflow-wrap: anywhere; }
 .reminder-settings { display: flex; flex-direction: column; gap: 28px; }
 .reminder-check { display: flex; align-items: center; flex-wrap: wrap; gap: 8px 16px; }
 .reminder-check p { flex: 1; min-width: 180px; font-size: 15px; color: var(--ink-muted); }
@@ -1185,4 +1186,45 @@ button, select, summary, .switch { -webkit-tap-highlight-color: transparent; tou
   .reminder-settings .setting-row.background-guidance { display: flex; flex-direction: column; }
   .reminder-settings .background-guidance .ctl { align-self: flex-start; }
   .reminder-settings .setting-row:last-child .titles span { overflow-wrap: anywhere; }
+}
+
+/* 应用屏蔽（只在 Android 出现）：开始页上没生效的提示、设置分区、选择单。 */
+.start-board.with-warning { grid-template-areas: "head art" "notice art" "plan art" "foot art"; grid-template-rows: auto auto auto auto; }
+.start-board > .notification-warning { grid-area: notice; margin-bottom: 28px; }
+.app-block-settings { display: flex; flex-direction: column; gap: 28px; }
+.app-block-list .blocking-group-heading { align-items: center; padding-top: 0; }
+.app-block-list .blocking-note { padding-top: 14px; font-size: 15px; line-height: 1.6; color: var(--ink-muted); }
+.app-block-list .blocking-rule { align-items: center; }
+.app-block-list .blocking-rule .rule-value { font-size: 16px; }
+.app-block-list .blocking-rule .rule-kind { overflow-wrap: anywhere; }
+.dialog.app-picker { max-height: min(720px, 85vh); max-height: min(720px, 85dvh); overflow: hidden; }
+.app-picker .picker-list { flex: 1 1 auto; min-height: 120px; overflow-y: auto; overscroll-behavior: contain; border-block: 1px solid var(--hair); }
+.picker-app { display: flex; align-items: center; gap: 12px; width: 100%; min-height: 56px; padding: 8px 2px; border-bottom: 1px solid var(--hair); text-align: left; }
+.picker-app:last-child { border-bottom: 0; }
+.picker-app:disabled { cursor: default; }
+.picker-app:disabled:not(.on) { opacity: 0.45; }
+.picker-check { flex: none; display: inline-flex; align-items: center; justify-content: center; width: 22px; height: 22px; border-radius: 6px; background: var(--groove); box-shadow: inset 0 0 0 1px var(--control-border); color: var(--bed); }
+.picker-app.on .picker-check { background: var(--stroke); box-shadow: none; }
+.picker-name { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+.picker-name b { font-size: 16px; font-weight: 500; color: var(--ink-high); overflow-wrap: anywhere; }
+.picker-name .mono { font-size: 12px; color: var(--ink-faint); overflow-wrap: anywhere; }
+.picker-tag { flex: none; font-size: 13px; color: var(--ink-muted); }
+.picker-status { padding: 24px 2px; font-size: 15px; color: var(--ink-muted); }
+.picker-limited { display: flex; align-items: center; flex-wrap: wrap; gap: 8px 12px; }
+.app-picker .picker-limited p { flex: 1; min-width: 180px; font-size: 14px; line-height: 1.6; color: var(--caution); }
+@media (hover: hover) {
+  .picker-app:not(:disabled):hover { background: rgba(231, 223, 208, 0.04); }
+}
+@media (max-width: 960px) {
+  .start-board.with-warning { grid-template-areas: "head art" "notice notice" "plan plan" "foot foot"; }
+}
+@media (max-width: 700px) {
+  .start-board.with-warning { grid-template-areas: "head head" "notice notice" "plan plan" "art foot"; }
+  .start-board > .notification-warning { margin-bottom: 0; }
+  .app-block-settings .setting-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 10px 16px; align-items: start; }
+  .app-block-settings .setting-row .ctl { align-self: center; }
+  .app-block-settings .setting-row.guidance { display: flex; flex-direction: column; }
+  .app-block-settings .setting-row.guidance .ctl { align-self: flex-start; }
+  /* 搜索时结果变少，弹层不跟着一下一下变矮。 */
+  .dialog.app-picker { height: 85vh; height: 85dvh; }
 }

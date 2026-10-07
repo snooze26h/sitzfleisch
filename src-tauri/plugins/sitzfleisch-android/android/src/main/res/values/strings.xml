@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="sitzfleisch_app_block_label">坐功应用屏蔽</string>
+    <string name="sitzfleisch_app_block_summary">打开屏蔽名单里的应用时，把你送回坐功。</string>
+    <string name="sitzfleisch_app_block_description">在坐功「设置 → 应用屏蔽」里打开屏蔽后，打开名单里的应用会被送回坐功。它只读取前台应用的包名，不读取屏幕内容，不代你点按，也不联网。关掉坐功里的屏蔽开关或这里的服务，名单里的应用就能正常打开。</string>
+</resources>

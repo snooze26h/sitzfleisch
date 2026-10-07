@@ -713,6 +713,9 @@ struct HeartbeatStep {
     desired: Vec<alerts::AppliedAlarm>,
     #[cfg(target_os = "android")]
     status: alerts::StatusModel,
+    /// 心跳在知道是否处于保护模式之后才填；None 表示这一轮不推屏蔽规则。
+    #[cfg(target_os = "android")]
+    block_rules: Option<platform::AppBlockRules>,
     #[cfg(target_os = "android")]
     now: i64,
 }
@@ -735,6 +738,8 @@ fn advance_heartbeat(state: &mut core::State, now: i64, gap: i64) -> HeartbeatSt
         desired: alerts::desired_alarms(state, local_seconds),
         #[cfg(target_os = "android")]
         status: alerts::status_model(state),
+        #[cfg(target_os = "android")]
+        block_rules: None,
         #[cfg(target_os = "android")]
         now: state.last_tick,
     }
@@ -1457,6 +1462,42 @@ async fn move_task_to_back(app: AppHandle) -> Result<(), String> {
     { let _ = app; Err("退到后台仅支持 Android。".into()) }
 }
 
+// ---------- 应用屏蔽（Android；开关和名单在偏好里，由心跳推给原生屏蔽服务） ----------
+
+#[tauri::command]
+async fn installed_apps(app: AppHandle) -> Result<platform::InstalledApps, String> {
+    #[cfg(target_os = "android")]
+    {
+        // 原生侧要逐个读应用名，放进阻塞线程池，不占异步运行时的工作线程。
+        tauri::async_runtime::spawn_blocking(move || mobile::installed_apps(&app))
+            .await
+            .map_err(|_| "读取应用列表没有完成，请重试。".to_owned())?
+    }
+    #[cfg(not(target_os = "android"))]
+    { let _ = app; Err("应用屏蔽仅支持 Android。".into()) }
+}
+
+#[tauri::command]
+async fn request_app_list_permission(app: AppHandle) -> Result<bool, String> {
+    #[cfg(target_os = "android")]
+    {
+        // 系统授权框开着时会一直等用户作答。
+        tauri::async_runtime::spawn_blocking(move || mobile::request_app_list_permission(&app))
+            .await
+            .map_err(|_| "授权请求没有完成，请重试。".to_owned())?
+    }
+    #[cfg(not(target_os = "android"))]
+    { let _ = app; Err("应用屏蔽仅支持 Android。".into()) }
+}
+
+#[tauri::command]
+async fn take_block_notice(app: AppHandle) -> Result<Option<String>, String> {
+    #[cfg(target_os = "android")]
+    { mobile::take_block_notice(&app) }
+    #[cfg(not(target_os = "android"))]
+    { let _ = app; Ok(None) }
+}
+
 #[cfg(mobile)]
 #[tauri::command]
 fn reveal_state_file(_shared: State<'_, Shared>) -> Result<(), String> {
@@ -1901,7 +1942,13 @@ pub fn run() {
                         let gap = mobile::heartbeat_gap(&handle, now);
                         #[cfg(not(target_os = "android"))]
                         let gap = now.saturating_sub(state.last_tick);
-                        let step = advance_heartbeat(&mut state, now, gap);
+                        #[cfg_attr(not(target_os = "android"), allow(unused_mut))]
+                        let mut step = advance_heartbeat(&mut state, now, gap);
+                        // 保护模式下内存里是出厂偏好，不是用户的设置：不拿它去覆盖原生侧的屏蔽规则。
+                        #[cfg(target_os = "android")]
+                        if shared.write_protected.lock().unwrap().is_none() {
+                            step.block_rules = Some(platform::AppBlockRules::from_preferences(&state.preferences.app_blocking));
+                        }
                         drop(state);
                         if ticks.is_multiple_of(30) {
                             save(&shared);
@@ -1928,7 +1975,7 @@ pub fn run() {
                         }
                     }
                     #[cfg(target_os = "android")]
-                    mobile::sync(&handle, step.desired, step.status, step.now);
+                    mobile::sync(&handle, step.desired, step.status, step.block_rules, step.now);
                     broadcast(&handle);
                 }
             });
@@ -2024,7 +2071,10 @@ pub fn run() {
             platform_info,
             system_status,
             open_system_settings,
-            move_task_to_back
+            move_task_to_back,
+            installed_apps,
+            request_app_list_permission,
+            take_block_notice
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")

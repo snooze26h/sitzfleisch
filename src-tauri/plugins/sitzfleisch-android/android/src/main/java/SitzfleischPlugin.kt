@@ -8,6 +8,8 @@ import android.app.PendingIntent
 import android.content.ActivityNotFoundException
 import android.content.Context
 import android.content.Intent
+import android.content.pm.ApplicationInfo
+import android.content.pm.PackageManager
 import android.media.AudioAttributes
 import android.net.Uri
 import android.os.Build
@@ -16,14 +18,22 @@ import android.provider.Settings
 import android.webkit.WebView
 import androidx.core.app.NotificationCompat
 import androidx.core.app.NotificationManagerCompat
+import androidx.core.content.ContextCompat
 import app.tauri.annotation.Command
 import app.tauri.annotation.InvokeArg
+import app.tauri.annotation.Permission
+import app.tauri.annotation.PermissionCallback
 import app.tauri.annotation.TauriPlugin
 import app.tauri.plugin.Invoke
 import app.tauri.plugin.JSArray
 import app.tauri.plugin.JSObject
 import app.tauri.plugin.Plugin
+import org.json.JSONArray
 import org.json.JSONObject
+
+/** 荣耀、小米等系统自带的「获取应用列表」权限；没给时系统可能只交出一部分应用。 */
+private const val APP_LIST_PERMISSION = "com.android.permission.GET_INSTALLED_APPS"
+private const val MAX_APP_LABEL_CHARS = 80
 
 @InvokeArg
 class StatusArgs {
@@ -41,7 +51,7 @@ class SettingsArgs {
   var channelId: String? = null
 }
 
-@TauriPlugin
+@TauriPlugin(permissions = [Permission(strings = [APP_LIST_PERMISSION], alias = "appList")])
 class SitzfleischPlugin(private val activity: Activity) : Plugin(activity) {
   private val manager = activity.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
   private val channelIds = listOf("timer", "body", "water", "status")
@@ -183,6 +193,7 @@ class SitzfleischPlugin(private val activity: Activity) : Plugin(activity) {
     result.put("canScheduleExactAlarms",
       Build.VERSION.SDK_INT < Build.VERSION_CODES.S || alarmManager.canScheduleExactAlarms())
     result.put("ignoringBatteryOptimizations", powerManager.isIgnoringBatteryOptimizations(activity.packageName))
+    result.put("appBlockServiceEnabled", AppBlockStore.serviceEnabled(activity))
     invoke.resolve(result)
   }
 
@@ -193,7 +204,7 @@ class SitzfleischPlugin(private val activity: Activity) : Plugin(activity) {
     val channelId = raw.opt("channelId")
     require(channelId == null || channelId == JSONObject.NULL || channelId is String)
     val args = invoke.parseArgs(SettingsArgs::class.java)
-    require(args.target in setOf("app_notifications", "channel", "exact_alarm", "battery", "app_details"))
+    require(args.target in setOf("app_notifications", "channel", "exact_alarm", "battery", "app_details", "accessibility"))
     if (args.target == "channel") require(args.channelId in channelIds)
     else require(args.channelId == null)
     return args
@@ -222,6 +233,8 @@ class SitzfleischPlugin(private val activity: Activity) : Plugin(activity) {
           .setData(Uri.parse("package:${activity.packageName}"))
       }
       "battery" -> Intent(Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS)
+      // 系统不让普通应用直接跳到某个无障碍服务的详情页，只能打开无障碍设置首页。
+      "accessibility" -> Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS)
       else -> details
     }
     try {
@@ -244,5 +257,115 @@ class SitzfleischPlugin(private val activity: Activity) : Plugin(activity) {
   fun moveTaskToBack(invoke: Invoke) {
     if (activity.moveTaskToBack(true)) invoke.resolve()
     else invoke.reject("无法把当前任务移到后台。")
+  }
+
+  // ---------- 应用屏蔽 ----------
+
+  private fun blockRules(invoke: Invoke): Pair<Boolean, Set<String>> {
+    require(invoke.getRawArgs().length <= 64 * 1024)
+    val raw = invoke.getArgs()
+    val enabled = raw.opt("enabled") as? Boolean ?: throw IllegalArgumentException("enabled")
+    val list = raw.opt("packages") as? JSONArray ?: throw IllegalArgumentException("packages")
+    require(list.length() <= AppBlockStore.MAX_PACKAGES)
+    val packages = (0 until list.length()).map { list.opt(it) as? String ?: throw IllegalArgumentException("package") }.toSet()
+    require(packages.all(AppBlockStore::validPackageName))
+    return enabled to packages
+  }
+
+  /** Rust 每次在规则变化时推一次；写进本地存储，屏蔽服务从那里读。 */
+  @Command
+  fun setBlockRules(invoke: Invoke) {
+    val (enabled, packages) = try { blockRules(invoke) } catch (_: Exception) {
+      invoke.reject("应用屏蔽规则无效。")
+      return
+    }
+    if (AppBlockStore.save(activity, enabled, packages)) invoke.resolve()
+    else invoke.reject("应用屏蔽规则写入失败，将稍后重试。")
+  }
+
+  private fun appListPermissionDefined(): Boolean = try {
+    activity.packageManager.getPermissionInfo(APP_LIST_PERMISSION, 0)
+    true
+  } catch (_: PackageManager.NameNotFoundException) {
+    false
+  }
+
+  private fun appListGranted(): Boolean =
+    ContextCompat.checkSelfPermission(activity, APP_LIST_PERMISSION) == PackageManager.PERMISSION_GRANTED
+
+  /** 应用名来自各个应用自己，只留可显示的一行字；按字符截断，不把表情等拆成半个。 */
+  private fun cleanLabel(label: CharSequence?, packageName: String): String {
+    val text = label?.toString().orEmpty()
+      .map { if (Character.isISOControl(it)) ' ' else it }.joinToString("")
+      .replace(Regex("\\s+"), " ").trim()
+    val end = text.offsetByCodePoints(0, minOf(MAX_APP_LABEL_CHARS, text.codePointCount(0, text.length)))
+    return text.substring(0, end).trim().ifEmpty { packageName }
+  }
+
+  /** 选择器用：能从桌面打开的应用，去掉坐功自己和永远不拦的系统应用。 */
+  @Command
+  fun installedApps(invoke: Invoke) {
+    val context = activity.applicationContext
+    // 读一两百个应用名要逐个加载它们的资源，放到后台线程，不卡住界面。
+    Thread {
+      try {
+        val pm = context.packageManager
+        val protected = AppBlockStore.protectedPackages(context)
+        val seen = HashSet<String>()
+        val apps = JSArray()
+        var userInstalled = 0
+        val launcher = Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_LAUNCHER)
+        for (info in AppBlockStore.queryActivities(pm, launcher)) {
+          val app = info.activityInfo?.applicationInfo ?: continue
+          val packageName = app.packageName
+          if (!AppBlockStore.validPackageName(packageName) || AppBlockStore.isOwnPackage(packageName)
+            || packageName in protected || !seen.add(packageName)) continue
+          val item = JSObject()
+          item.put("packageName", packageName)
+          item.put("label", cleanLabel(app.loadLabel(pm), packageName))
+          apps.put(item)
+          if (app.flags and (ApplicationInfo.FLAG_SYSTEM or ApplicationInfo.FLAG_UPDATED_SYSTEM_APP) == 0) userInstalled++
+          if (apps.length() >= 1000) break
+        }
+        val defined = appListPermissionDefined()
+        val result = JSObject()
+        result.put("apps", apps)
+        // 有的系统没给这项权限也照样交出完整列表：一个自己装的应用都看不到，才算真被限制了。
+        result.put("limited", defined && !appListGranted() && userInstalled == 0)
+        result.put("canRequestFullList", defined)
+        invoke.resolve(result)
+      } catch (_: Exception) {
+        invoke.reject("读不到手机上的应用列表。")
+      }
+    }.apply { name = "sitzfleisch-installed-apps" }.start()
+  }
+
+  /** 请求厂商的「获取应用列表」权限；没有这项权限的系统直接返回当前状态。 */
+  @Command
+  fun requestAppListPermission(invoke: Invoke) {
+    if (!appListPermissionDefined() || appListGranted()) {
+      resolveAppListPermission(invoke)
+      return
+    }
+    requestPermissionForAlias("appList", invoke, "appListPermissionCallback")
+  }
+
+  @PermissionCallback
+  private fun appListPermissionCallback(invoke: Invoke) {
+    resolveAppListPermission(invoke)
+  }
+
+  private fun resolveAppListPermission(invoke: Invoke) {
+    val result = JSObject()
+    result.put("granted", !appListPermissionDefined() || appListGranted())
+    invoke.resolve(result)
+  }
+
+  /** 屏蔽服务刚把人送回坐功时记下的那个应用；取一次就清掉。 */
+  @Command
+  fun takeBlockNotice(invoke: Invoke) {
+    val result = JSObject()
+    result.put("packageName", AppBlockStore.takeNotice() ?: JSONObject.NULL)
+    invoke.resolve(result)
   }
 }

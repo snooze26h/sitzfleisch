@@ -1,3 +1,39 @@
 <?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <!-- 荣耀、小米等系统的「获取应用列表」权限。只在选择屏蔽应用时按需申请；其他系统上没有这一项。 -->
+    <uses-permission android:name="com.android.permission.GET_INSTALLED_APPS" />
+
+    <!-- 应用屏蔽只需要看见桌面上能打开的应用，以及永远不拦的桌面、设置和拨号，不申请读取全部已安装应用。 -->
+    <queries>
+        <intent>
+            <action android:name="android.intent.action.MAIN" />
+            <category android:name="android.intent.category.LAUNCHER" />
+        </intent>
+        <intent>
+            <action android:name="android.intent.action.MAIN" />
+            <category android:name="android.intent.category.HOME" />
+        </intent>
+        <intent>
+            <action android:name="android.intent.action.DIAL" />
+        </intent>
+        <intent>
+            <action android:name="android.settings.SETTINGS" />
+        </intent>
+    </queries>
+
+    <application>
+        <!-- 只有系统能绑定（BIND_ACCESSIBILITY_SERVICE），不对其他应用导出。 -->
+        <service
+            android:name="com.snooze26h.sitzfleisch.android.AppBlockService"
+            android:exported="false"
+            android:label="@string/sitzfleisch_app_block_label"
+            android:permission="android.permission.BIND_ACCESSIBILITY_SERVICE">
+            <intent-filter>
+                <action android:name="android.accessibilityservice.AccessibilityService" />
+            </intent-filter>
+            <meta-data
+                android:name="android.accessibilityservice"
+                android:resource="@xml/sitzfleisch_app_block_service" />
+        </service>
+    </application>
 </manifest>

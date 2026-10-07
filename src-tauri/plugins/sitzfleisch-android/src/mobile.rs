@@ -22,4 +22,20 @@ impl<R: Runtime> SitzfleischAndroid<R> {
     pub fn move_task_to_back(&self) -> Result<(), PluginInvokeError> {
         self.0.run_mobile_plugin("moveTaskToBack", ())
     }
+
+    pub fn set_block_rules(&self, payload: impl Serialize) -> Result<(), PluginInvokeError> {
+        self.0.run_mobile_plugin("setBlockRules", payload)
+    }
+
+    pub fn installed_apps<T: DeserializeOwned>(&self) -> Result<T, PluginInvokeError> {
+        self.0.run_mobile_plugin("installedApps", ())
+    }
+
+    pub fn request_app_list_permission<T: DeserializeOwned>(&self) -> Result<T, PluginInvokeError> {
+        self.0.run_mobile_plugin("requestAppListPermission", ())
+    }
+
+    pub fn take_block_notice<T: DeserializeOwned>(&self) -> Result<T, PluginInvokeError> {
+        self.0.run_mobile_plugin("takeBlockNotice", ())
+    }
 }

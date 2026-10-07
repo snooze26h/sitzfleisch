@@ -1,6 +1,6 @@
 // 界面自己的状态（不落盘）：当前页、草稿、展开项、菜单与对话框。
 
-import type { ArchivedDay, CategoryDef, CategoryState, Day, PlatformInfo, Preferences, Snapshot, SystemStatus, View } from "./types";
+import type { ArchivedDay, CategoryDef, CategoryState, Day, InstalledApp, PlatformInfo, Preferences, Snapshot, SystemStatus, View } from "./types";
 import { nowUnix, shortNameFrom } from "./format";
 
 /** 处理完这一下之后要不要留着框：返回 `"keep"` 就留着（重试还没成功），否则关掉。 */
@@ -30,11 +30,28 @@ export interface Dialog {
 /** 退出前保存失败那个框的 id。它要压过解除屏蔽的两步确认，所以得有个名字。 */
 export const QUIT_DIALOG_ID = "quit-blocked";
 
+/**
+ * 两步解除单。网站规则输入网址或域名；应用屏蔽输入应用名（移出名单）
+ * 或固定的一句话（关掉开关）。`value` 是要删掉的东西本身，`confirm` 是要手动输入的字。
+ */
 export interface Removal {
-  kind: "host" | "url";
+  kind: "host" | "url" | "app" | "app-blocking";
   value: string;
+  confirm: string;
   step: 1 | 2;
   typed: string;
+}
+
+/** 添加屏蔽应用的选择单。 */
+export interface AppPicker {
+  loading: boolean;
+  error: string;
+  apps: InstalledApp[];
+  limited: boolean;
+  canRequestFullList: boolean;
+  query: string;
+  /** 这一次勾上的包名；已在名单里的不算。 */
+  chosen: string[];
 }
 
 export interface CompletionEditor {
@@ -84,6 +101,7 @@ export const ui = {
   autostart: null as boolean | null,
   appVersion: null as string | null,
   removal: null as Removal | null,
+  appPicker: null as AppPicker | null,
   // 覆盖层
   dialog: null as Dialog | null,
   /** 正在忙的是哪一个对话框（token）；null = 不忙。跟着实例走，旧操作不会禁用新框。 */
@@ -109,11 +127,13 @@ export function dialogIsBusy(): boolean {
  * 最上层的覆盖层是哪一个。渲染顺序与键盘处理共用它，
  * 否则会出现「Esc 关掉了看不见的那一个」。
  */
-export function topOverlay(): "dialog" | "removal" | "completion" | null {
+export function topOverlay(): "dialog" | "removal" | "picker" | "completion" | null {
   // 退出被拦是外壳推过来、用户正等着的答复，压过解除屏蔽的两步确认。
   if (ui.dialog?.id === QUIT_DIALOG_ID) return "dialog";
   if (ui.removal) return "removal";
   if (ui.dialog) return "dialog";
+  // 选应用是人正在做的事；这期间走完的格，完成记录等选完再弹。
+  if (ui.appPicker) return "picker";
   if (ui.completion) return "completion";
   return null;
 }

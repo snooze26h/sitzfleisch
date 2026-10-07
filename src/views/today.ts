@@ -22,10 +22,12 @@ import {
   sessionRow,
 } from "../components";
 import { blockMinutes, estimatedRemainingWallSeconds, remainingSeconds, suggest } from "../scheduler";
+import { appBlocking } from "../app-blocking";
 import {
   BREAK_OPTIONS,
   breakRemaining,
   day,
+  hasFeature,
   idleNowSeconds,
   iconOf,
   isPaused,
@@ -71,10 +73,13 @@ function startBoard(): string {
     })
     .join("");
   const total = profileTotalMinutes(plan);
-  return `<section class="start-board" id="start">
+  // 应用屏蔽和学习日无关：没开始今天也要看得见它没生效。
+  const warning = appBlockingWarning();
+  return `<section class="start-board${warning ? " with-warning" : ""}" id="start">
       <header class="masthead">
         <h1 class="t-masthead">落座，便是今天</h1>
       </header>
+      ${warning}
       <div class="plan">
         <div class="plan-head"><span class="engraved">今天的安排</span><span class="engraved">分钟</span></div>
         <div class="plan-rows">${rows}</div>
@@ -103,23 +108,33 @@ function activeBoard(d: Day): string {
   // 四块排成两行两列：这一格 | 今天这一轮月，今日配额 | 今天的总读数。
   // 左右两列上下各自对齐，窗口第一屏里放得下「此刻」和「今天」两个尺度。
   const moon = `<div class="moon-cell moon-stage" id="day-moon">${dayMoon(d)}</div>`;
-  const notificationWarning = reminderWarning();
+  const notificationWarning = reminderWarning() || appBlockingWarning();
   return `<section class="today-top${ui.compact && suggestion ? " choosing" : ""}${ui.compact && notificationWarning ? " with-warning" : ""}" id="today-top">${focusPanel(d)}${moon}${quotaPanel(d, suggestion?.category ?? null)}${dayReadings(d)}${notificationWarning}</section>
     ${diagramBlock()}
     ${d.ledger.length ? logBlock(d) : ""}`;
+}
+
+function warning(text: string, label: string, target: string): string {
+  return `<div class="notification-warning"><b>${text}</b>${btn(label, { kind: "plate", action: "system-settings", data: { target } })}</div>`;
 }
 
 /** 手机上提醒不能如期送达时，在今天页就说清楚，不让人锁屏后才发现没响。 */
 function reminderWarning(): string {
   const s = ui.platform?.mobile ? ui.systemStatus : null;
   if (!s) return "";
-  const warning = (text: string, label: string, target: string) =>
-    `<div class="notification-warning"><b>${text}</b>${btn(label, { kind: "plate", action: "system-settings", data: { target } })}</div>`;
   if (!s.notificationsEnabled) return warning("通知未开启，锁屏后到点不会提醒", "去开启", "app_notifications");
   // 「计时」渠道管一格走完和休息结束；它被关掉时，最要紧的提醒一条都不会响。
   if (s.channels.some((c) => c.id === "timer" && !c.enabled)) return warning("计时提醒已关闭，到点不会提醒", "去设置", "app_notifications");
   if (!s.canScheduleExactAlarms) return warning("精确闹钟未允许，锁屏后的提醒可能晚到", "去设置", "exact_alarm");
   return "";
+}
+
+/** 屏蔽开着、名单不空，系统里的无障碍服务却关着（常见于被一键清理或强行停止之后）。 */
+function appBlockingWarning(): string {
+  const s = ui.systemStatus;
+  const b = appBlocking(prefs());
+  if (!hasFeature("app_blocking") || !s || s.appBlockServiceEnabled || !b.enabled || !b.apps.length) return "";
+  return warning("应用屏蔽没生效：无障碍服务未开启", "去开启", "accessibility");
 }
 
 /** 月亮下面：「从几点坐下」这一天已学多少、停了多久、休息了多久，外加今天这一天的菜单。 */

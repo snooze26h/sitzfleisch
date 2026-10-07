@@ -15,11 +15,12 @@ export interface PlatformInfo {
     in_app_sound_toggle: boolean;
     system_settings: boolean;
     exact_alarm_status: boolean;
+    app_blocking: boolean;
   };
 }
 
 export const NOTIFICATION_CHANNELS = ["timer", "body", "water", "status"] as const;
-export const SYSTEM_SETTINGS_TARGETS = ["app_notifications", "channel", "exact_alarm", "battery", "app_details"] as const;
+export const SYSTEM_SETTINGS_TARGETS = ["app_notifications", "channel", "exact_alarm", "battery", "app_details", "accessibility"] as const;
 export type SystemSettingsTarget = typeof SYSTEM_SETTINGS_TARGETS[number];
 
 /** 与外壳 platform::SystemStatus 的 camelCase 输出对应，独立于计时快照。 */
@@ -37,6 +38,21 @@ export interface SystemStatus {
   }[];
   canScheduleExactAlarms: boolean;
   ignoringBatteryOptimizations: boolean;
+  /** 坐功的无障碍服务在系统里开着没有；应用屏蔽靠它生效。 */
+  appBlockServiceEnabled: boolean;
+}
+
+/** 应用选择器里的一项：手机上能从桌面打开的应用（外壳 platform::InstalledApp）。 */
+export interface InstalledApp {
+  packageName: string;
+  label: string;
+}
+
+export interface InstalledApps {
+  apps: InstalledApp[];
+  /** 厂商的「获取应用列表」权限没给，系统只交出了一部分应用。 */
+  limited: boolean;
+  canRequestFullList: boolean;
 }
 
 export interface CategoryDef {
@@ -77,6 +93,20 @@ export interface Preferences {
   uniform_block_minutes: number;
   default_profile_id: string;
   sound_enabled: boolean;
+  /** 手机上的应用屏蔽；从没开过时外壳不发这个字段。 */
+  app_blocking?: AppBlocking;
+}
+
+/** 手动开关的应用屏蔽，与学习日无关。 */
+export interface AppBlocking {
+  enabled: boolean;
+  apps: BlockedApp[];
+}
+
+export interface BlockedApp {
+  package_name: string;
+  /** 选中那一刻系统给的应用名，只用来显示。 */
+  label: string;
 }
 
 export interface TaskItem {

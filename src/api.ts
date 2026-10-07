@@ -3,8 +3,9 @@
 
 import { invoke as tauriInvoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
-import type { PlatformInfo, Snapshot, SystemSettingsTarget, SystemStatus } from "./types";
+import type { InstalledApps, PlatformInfo, Snapshot, SystemSettingsTarget, SystemStatus } from "./types";
 import { NOTIFICATION_CHANNELS, SYSTEM_SETTINGS_TARGETS } from "./types";
+import { validPackageName } from "./app-blocking";
 
 export const inTauri = typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
 
@@ -24,7 +25,7 @@ const DESKTOP_FEATURES: Feature[] = [
   "tray", "website_blocking", "browser_extension", "autostart", "reveal_state_file",
   "window_title", "quit_flow", "in_app_sound_toggle",
 ];
-const ANDROID_FEATURES: Feature[] = ["system_settings", "exact_alarm_status"];
+const ANDROID_FEATURES: Feature[] = ["system_settings", "exact_alarm_status", "app_blocking"];
 
 /**
  * 外壳给的能力表缺键、格式不对或干脆取不到时，按平台推出与外壳一致的默认值，
@@ -60,7 +61,8 @@ function validSystemStatus(value: unknown): value is SystemStatus {
   return Number.isInteger(s.sdkInt) && s.sdkInt! >= 1 && s.sdkInt! <= 1000
     && typeof s.manufacturer === "string" && s.manufacturer.length <= 128
     && typeof s.notificationsEnabled === "boolean" && typeof s.canScheduleExactAlarms === "boolean"
-    && typeof s.ignoringBatteryOptimizations === "boolean" && Array.isArray(s.channels) && s.channels.length <= 16
+    && typeof s.ignoringBatteryOptimizations === "boolean" && typeof s.appBlockServiceEnabled === "boolean"
+    && Array.isArray(s.channels) && s.channels.length <= 16
     && s.channels.every((c) => c !== null && typeof c === "object" && NOTIFICATION_CHANNELS.includes(c.id)
       && typeof c.name === "string" && c.name.length <= 128 && typeof c.enabled === "boolean"
       && Number.isInteger(c.importance) && c.importance >= -1000 && c.importance <= 1000 && typeof c.vibration === "boolean"
@@ -72,6 +74,28 @@ export async function systemStatus(): Promise<SystemStatus> {
   const status = await invoke<unknown>("system_status");
   if (!validSystemStatus(status)) throw new Error("系统提醒状态数据格式无效");
   return status;
+}
+
+function validInstalledApps(value: unknown): value is InstalledApps {
+  if (value === null || typeof value !== "object") return false;
+  const list = value as Partial<InstalledApps>;
+  return typeof list.limited === "boolean" && typeof list.canRequestFullList === "boolean"
+    && Array.isArray(list.apps) && list.apps.length <= 1000
+    && list.apps.every((app) => app !== null && typeof app === "object" && validPackageName(app.packageName)
+      && typeof app.label === "string" && app.label.trim().length > 0 && app.label.length <= 80);
+}
+
+/** 应用屏蔽的选择器：手机上能从桌面打开的应用。 */
+export async function installedApps(): Promise<InstalledApps> {
+  const list = await invoke<unknown>("installed_apps");
+  if (!validInstalledApps(list)) throw new Error("应用列表数据格式无效");
+  return list;
+}
+
+/** 屏蔽服务刚把人送回坐功时，是因为哪个应用；没有就是 null。 */
+export async function takeBlockNotice(): Promise<string | null> {
+  const name = await invoke<unknown>("take_block_notice");
+  return validPackageName(name) ? name : null;
 }
 
 export async function openSystemSettings(target: SystemSettingsTarget, channelId?: string): Promise<void> {

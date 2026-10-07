@@ -4,6 +4,7 @@
 import type { CategoryDef, ProfileDef } from "../types";
 import { inTauri } from "../api";
 import { conflictingHost, MAX_BLOCK_RULES, normalizeHost, normalizeUrl } from "../blocking";
+import { appBlocking, MAX_BLOCKED_APPS } from "../app-blocking";
 import { ICON_NAMED, NOTIFICATION_CHANNELS } from "../types";
 import { esc, meter, shortNameFrom } from "../format";
 import { icon } from "../icons";
@@ -17,13 +18,15 @@ const SETTINGS_SECTIONS: [string, string, string][] = [
   ["tiers", "时间安排", "sliders-horizontal"],
   ["rhythm", "节奏", "timer"],
   ["hosts", "网站屏蔽", "shield"],
+  ["apps", "应用屏蔽", "shield"],
   ["body", "身体", "heart-pulse"],
   ["notify", "提醒", "bell"],
   ["about", "关于", "info"],
 ];
 
 export function settingsSections(): [string, string, string][] {
-  return SETTINGS_SECTIONS.filter(([id]) => id !== "hosts" || hasFeature("website_blocking"));
+  return SETTINGS_SECTIONS.filter(([id]) => (id !== "hosts" || hasFeature("website_blocking"))
+    && (id !== "apps" || hasFeature("app_blocking")));
 }
 
 function sectionBody(id: string): string {
@@ -31,6 +34,7 @@ function sectionBody(id: string): string {
     case "tiers": return tierPlan();
     case "rhythm": return rhythm();
     case "hosts": return websiteBlock();
+    case "apps": return appBlockPanel();
     case "body": return bodyPanel();
     case "notify": return notificationPanel();
     case "about": return aboutPanel();
@@ -254,6 +258,40 @@ function websiteBlock(): string {
     ${ruleRows("host", p.blocked_hosts)}
     ${problem}
     <div class="foot-note"><p>暂停和休息时规则保持生效，收工后解除。写入和解除系统 hosts 各需一次管理员授权。</p>${btn("核对整站规则", { kind: "quiet", action: "recheck-blocking", disabled: ui.snap!.blocking.busy })}</div>
+  </div>`;
+}
+
+// ---------- 应用屏蔽（手机） ----------
+
+function appBlockPanel(): string {
+  const b = appBlocking(prefs());
+  const service = ui.systemStatus?.appBlockServiceEnabled ?? null;
+  const open = (target: string, label: string) => btn(label, { kind: "plate", action: "system-settings", data: { target } });
+  const switchDetail = !b.enabled
+    ? "打开后，名单里的应用一打开就被送回坐功。跟学习日无关，随时手动开关。"
+    : service === false ? "已打开，但无障碍服务没开，现在拦不住。"
+    : b.apps.length ? "开着：打开名单里的应用会被送回坐功。关掉要两步确认。" : "开着，名单还是空的。";
+  const rows = [
+    settingRow("屏蔽名单里的应用", switchDetail, toggle({ change: "app-blocking", checked: b.enabled, label: "屏蔽名单里的应用", disabled: ui.pendingPrefs > 0 })),
+    settingRow("无障碍服务", service === null ? (ui.systemStatusLoading ? "正在读取…" : "尚未读取")
+      : service ? "已开启。坐功只读取前台应用的包名，不读屏幕内容。"
+      : "未开启，屏蔽不会生效。在无障碍设置里找到「坐功应用屏蔽」并打开。", service === false ? open("accessibility", "去开启") : ""),
+  ];
+  // Android 13 起，浏览器下载安装的应用默认不许开无障碍；系统会提示「受限设置」。
+  if (service === false) rows.push(settingRow("开关是灰的", "系统提示「受限设置」时，到应用信息页点右上角 ⋮，选「允许受限制的设置」，再回来打开。", open("app_details", "应用信息"), "guidance"));
+  const list = b.apps.length
+    ? `<div class="blocking-rule-list">${b.apps.map((app) => `<div class="blocking-rule">
+        <span class="rule-content"><span class="rule-value">${esc(app.label)}</span><span class="rule-kind mono">${esc(app.package_name)}</span></span>
+        ${btn("移出", { kind: "quiet-danger", action: "remove-blocked-app", data: { package: app.package_name }, title: b.enabled ? `把${app.label}移出名单（需要两步确认）` : `把${app.label}移出名单` })}
+      </div>`).join("")}</div>`
+    : `<p class="blocking-note">名单是空的。点「添加应用」，从手机上的应用里选。</p>`;
+  return `<div class="app-block-settings">
+    <div class="settings-panel rows">${rows.join("")}</div>
+    <div class="app-block-list">
+      <div class="blocking-group-heading"><b>屏蔽名单</b><span class="t-note">${b.apps.length} / ${MAX_BLOCKED_APPS}</span>${btn("添加应用", { kind: "plate", action: "open-app-picker", icon: "plus", disabled: b.apps.length >= MAX_BLOCKED_APPS || ui.pendingPrefs > 0 })}</div>
+      ${list}
+    </div>
+    <p class="t-note">桌面、设置和拨号永远不会被屏蔽。请在最近任务里锁定坐功：被一键清理或强行停止后，系统会关掉这项服务，需要再开一次。</p>
   </div>`;
 }
 

@@ -9,7 +9,8 @@ use tauri::{AppHandle, Manager};
 use tauri_plugin_notification::{NotificationExt, PermissionState, Schedule};
 use tauri_plugin_sitzfleisch_android::SitzfleischAndroidExt;
 
-use crate::{alarm_store, alerts::{self, AppliedAlarm, StatusModel}, android_shutdown::HeartbeatShutdown, platform::{SettingsRequest, SystemStatus}, Shared};
+use crate::{alarm_store, alerts::{self, AppliedAlarm, StatusModel}, android_shutdown::HeartbeatShutdown,
+    platform::{AppBlockRules, InstalledApps, SettingsRequest, SystemStatus}, Shared};
 
 /// 同步失败后，在这段时间内只在状态真的变了（dirty）时才重试，不再每秒去敲原生接口。
 const RETRY_SECONDS: i64 = 30;
@@ -17,6 +18,8 @@ const RETRY_SECONDS: i64 = 30;
 struct SyncState {
     applied: Vec<AppliedAlarm>,
     status: Option<StatusModel>,
+    /// 上一次成功推给原生屏蔽服务的规则；进程刚起来时为空，首轮同步一定推一次。
+    block_rules: Option<AppBlockRules>,
     cold: bool,
     last_error: Option<String>,
     retry_after: i64,
@@ -59,7 +62,7 @@ impl MobileShared {
             last_heartbeat: AtomicI64::new(0),
             heartbeat: Mutex::new(None), alarms_path,
             shutdown: Arc::new(HeartbeatShutdown::new()),
-            synchronizer: Mutex::new(SyncState { applied, status: None, cold: true,
+            synchronizer: Mutex::new(SyncState { applied, status: None, block_rules: None, cold: true,
                 last_error: None, retry_after: 0 }),
         }
     }
@@ -208,14 +211,23 @@ fn sync_alarms(app: &AppHandle, mobile: &MobileShared, state: &mut SyncState,
 }
 
 /// 所有参数在心跳的 take_due_* 之后计算；进入本函数前已释放 Shared 的全部锁。
-pub fn sync(app: &AppHandle, desired: Vec<AppliedAlarm>, desired_status: StatusModel, now: i64) {
+/// `block_rules` 为 None 表示这次不推（保护模式下内存里的偏好不是用户的真实设置）。
+pub fn sync(app: &AppHandle, desired: Vec<AppliedAlarm>, desired_status: StatusModel,
+    block_rules: Option<AppBlockRules>, now: i64) {
     let mobile = app.state::<MobileShared>();
     let forced = mobile.dirty.swap(false, Ordering::SeqCst);
     let mut state = mobile.synchronizer.lock().unwrap();
     if mobile.status_stale.swap(false, Ordering::SeqCst) { state.status = None; }
-    // 上次失败后先等一等；状态有变化（开格、回前台、刚授权）就立刻重试。
+    // 上次失败后先等一等；状态有变化（开格、回前台、刚授权、改了屏蔽名单）就立刻重试。
     if !forced && now < state.retry_after { return; }
+    // 屏蔽规则先推：它不依赖通知权限，不能被提醒那边的失败拖住。
+    let mut rules_result = Ok(());
+    if let Some(rules) = block_rules.filter(|rules| state.block_rules.as_ref() != Some(rules)) {
+        rules_result = plugin_call(|| app.sitzfleisch_android().set_block_rules(&rules));
+        if rules_result.is_ok() { state.block_rules = Some(rules); }
+    }
     let mut result = sync_alarms(app, &mobile, &mut state, &desired, now);
+    if result.is_ok() { result = rules_result; }
     if state.status.as_ref() != Some(&desired_status) {
         let now_ms = SystemTime::now().duration_since(UNIX_EPOCH)
             .map(|value| i64::try_from(value.as_millis()).unwrap_or(i64::MAX)).unwrap_or(0);
@@ -246,6 +258,25 @@ pub fn open_settings(app: &AppHandle, request: SettingsRequest) -> Result<(), St
 
 pub fn move_task_to_back(app: &AppHandle) -> Result<(), String> {
     plugin_call(|| app.sitzfleisch_android().move_task_to_back())
+}
+
+pub fn installed_apps(app: &AppHandle) -> Result<InstalledApps, String> {
+    plugin_call(|| app.sitzfleisch_android().installed_apps::<InstalledApps>()).map(InstalledApps::sanitized)
+}
+
+pub fn request_app_list_permission(app: &AppHandle) -> Result<bool, String> {
+    #[derive(serde::Deserialize)]
+    struct Answer { granted: bool }
+    plugin_call(|| app.sitzfleisch_android().request_app_list_permission::<Answer>()).map(|answer| answer.granted)
+}
+
+/// 屏蔽服务刚把人送回坐功时记下的应用包名；取一次就清掉。
+pub fn take_block_notice(app: &AppHandle) -> Result<Option<String>, String> {
+    #[derive(serde::Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct Notice { package_name: Option<String> }
+    plugin_call(|| app.sitzfleisch_android().take_block_notice::<Notice>())
+        .map(|notice| notice.package_name.filter(|name| sitzfleisch_core::valid_package_name(name)))
 }
 
 fn permission_name(permission: PermissionState) -> String {
