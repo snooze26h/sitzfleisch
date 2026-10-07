@@ -92,6 +92,8 @@ cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings
 
 这些场景来自 [src/dev/mock.ts](../src/dev/mock.ts)，不会读取真实存档，也不执行系统网站屏蔽。`savefail` 模拟保存失败；浏览器没有应用退出流程，可在控制台执行 `qaQuitBlocked()` 查看退出前保存失败的对话框。
 
+加 `&platform=android` 预览手机版。应用屏蔽另有几个片段：`&apps=off|none`（开关关着或从没设置过）、`&a11y=off`（无障碍服务没开）、`&applist=limited`（系统只交出部分应用）、`&notice=<包名>`（刚被送回坐功的提示）。
+
 ### README 截图
 
 [images/](images/) 中的三张 WebP 来自当前前端的浏览器预览，使用内置演示数据；只用于展示界面，不作为原生功能验收证据。
@@ -155,6 +157,16 @@ adb -d exec-out screencap -p > .android-work/shots/device.png
 ```
 
 安装需按手机系统提示确认；不卸载旧应用、不清数据。Chrome 中打开 `chrome://inspect/#devices`，可调试已启动的 debug WebView。生产包不打开 WebView 调试。截图、日志、APK 和本机配置放在忽略的 `.android-work/` 中。
+
+应用屏蔽依赖无障碍服务。只在模拟器上用命令打开它，真机由使用者在系统设置里自己打开：
+
+```bash
+adb -e shell settings put secure enabled_accessibility_services com.snooze26h.sitzfleisch.x.debug/com.snooze26h.sitzfleisch.android.AppBlockService
+adb -e shell settings put secure accessibility_enabled 1
+adb -e shell dumpsys accessibility | grep -i sitzfleisch
+```
+
+这条命令会覆盖模拟器上已打开的其他无障碍服务。
 
 ### 发布签名
 

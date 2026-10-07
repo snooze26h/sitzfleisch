@@ -4,9 +4,10 @@
 
 ## 外壳接口
 
-- `platform_info`：返回 `{ os, mobile, features }`，独立于每秒快照。features 为十个布尔值：`tray`、`website_blocking`、`browser_extension`、`autostart`、`reveal_state_file`、`window_title`、`quit_flow`、`in_app_sound_toggle`、`system_settings`、`exact_alarm_status`。Android 只开启后两项；桌面开启前八项。
-- `system_status`：返回 `{ sdkInt, manufacturer, notificationsEnabled, channels, canScheduleExactAlarms, ignoringBatteryOptimizations }`。channels 是数组，每项为 `{ id, name, enabled, importance, vibration, sound }`；sound 可以为 null。
-- `open_system_settings`：参数 `{ target, channelId? }`。target 仅接受 `app_notifications`、`channel`、`exact_alarm`、`battery`、`app_details`；只有 channel 可携带 channelId，且必须为 timer / body / water / status 之一。
+- `platform_info`：返回 `{ os, mobile, features }`，独立于每秒快照。features 为十一个布尔值：`tray`、`website_blocking`、`browser_extension`、`autostart`、`reveal_state_file`、`window_title`、`quit_flow`、`in_app_sound_toggle`、`system_settings`、`exact_alarm_status`、`app_blocking`。Android 只开启后三项；桌面开启前八项。
+- `system_status`：返回 `{ sdkInt, manufacturer, notificationsEnabled, channels, canScheduleExactAlarms, ignoringBatteryOptimizations, appBlockServiceEnabled }`。channels 是数组，每项为 `{ id, name, enabled, importance, vibration, sound }`；sound 可以为 null。
+- `open_system_settings`：参数 `{ target, channelId? }`。target 仅接受 `app_notifications`、`channel`、`exact_alarm`、`battery`、`app_details`、`accessibility`；只有 channel 可携带 channelId，且必须为 timer / body / water / status 之一。
+- `installed_apps`：返回 `{ apps, limited, canRequestFullList }`，apps 每项为 `{ packageName, label }`，只含能从桌面打开的应用，去掉坐功自己和永远不拦的应用。`request_app_list_permission` 申请厂商的「获取应用列表」权限，返回是否已允许。`take_block_notice` 返回屏蔽服务刚拦下的包名或 null，取一次就清掉。
 - `move_task_to_back`：保留学习日，将任务移到后台。
 - `notification_status`、`request_notification_permission`：保留 granted / denied / unknown 返回值；请求前先查询，已授权时直接返回。
 - `test_notification` / `test_water_sound`：分别发 ID 9100 的 timer 通知、ID 9101 的 water 通知。
@@ -20,6 +21,12 @@
 `SitzfleischPlugin.updateStatus` 参数为 `{ visible, title, text, chronometerBaseMs?, countDown, timeoutAfterMs? }`。通知 ID 固定 9000，单色半月小图标，点按打开应用，不带按钮，不设置强调色。PendingIntent 使用 FLAG_IMMUTABLE。chronometerBaseMs 是墙钟毫秒；timeoutAfterMs 是从投递起算的毫秒数。
 
 Rust 的 StatusModel 保存固定计时终点或暂停起点，以整体相等去重；超时也保存绝对终点，投递前才换成 duration，避免每秒重发。回到前台时清掉去重缓存重发一次，用户划掉的常驻通知会回来。仅心跳线程调用 updateStatus，调用前释放 Shared 锁；Activity 不可用时捕获 panic，下一轮重试。渠道在插件构造时就建好。
+
+## 应用屏蔽
+
+开关和名单存在偏好的 `app_blocking` 里（`{ enabled, apps: [{ package_name, label }] }`，从没开过时不写入存档），由 core 校验。心跳在每轮同步时把 `{ enabled, packages }` 推给 `setBlockRules`，按整体相等去重，失败与提醒同步一起退避重试；保护模式下不推，免得出厂偏好覆盖原生侧的规则。插件把规则同步写进 SharedPreferences：系统只为无障碍服务拉起进程、Rust 还没运行时，服务照样读得到。
+
+`AppBlockService` 是只订阅 `typeWindowStateChanged` 的无障碍服务，`canRetrieveWindowContent=false`，组件不导出、只许系统绑定。名单里的应用有界面到前台时（事件的类名能在该应用里解析为 Activity；悬浮窗、输入法等窗口不算），先打开桌面、再把坐功放到上面，并记下包名供界面提示；同一应用 1.5 秒内只拦一次。桌面、系统界面、设置、拨号和坐功自己永远不拦。选择单的应用列表来自 `<queries>` 声明的 LAUNCHER 意图，不申请 `QUERY_ALL_PACKAGES`；荣耀、小米等系统另有 `com.android.permission.GET_INSTALLED_APPS`，只在用户点「允许读取」时申请。
 
 ## 资源
 
