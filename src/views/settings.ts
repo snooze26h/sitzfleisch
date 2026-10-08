@@ -265,20 +265,24 @@ function websiteBlock(): string {
 
 function appBlockPanel(): string {
   const b = appBlocking(prefs());
-  const service = ui.systemStatus?.appBlockServiceEnabled ?? null;
+  const s = ui.systemStatus;
+  // 开关开着还不够：服务断了（多见于刚升级完）时设置里仍显示开启，要看系统是不是真的连着它。
+  const service = !s ? null : s.appBlockServiceEnabled && s.appBlockServiceRunning;
+  const stalled = !!s && s.appBlockServiceEnabled && !s.appBlockServiceRunning;
   const open = (target: string, label: string) => btn(label, { kind: "plate", action: "system-settings", data: { target } });
   const switchDetail = !b.enabled
     ? "打开后，名单里的应用一打开就被送回坐功。跟学习日无关，随时手动开关。"
-    : service === false ? "已打开，但无障碍服务没开，现在拦不住。"
+    : service === false ? `已打开，但无障碍服务${stalled ? "没在运行" : "没开"}，现在拦不住。`
     : b.apps.length ? "开着：打开名单里的应用会被送回坐功。关掉要两步确认。" : "开着，名单还是空的。";
   const rows = [
     settingRow("屏蔽名单里的应用", switchDetail, toggle({ change: "app-blocking", checked: b.enabled, label: "屏蔽名单里的应用", disabled: ui.pendingPrefs > 0 })),
     settingRow("无障碍服务", service === null ? (ui.systemStatusLoading ? "正在读取…" : "尚未读取")
       : service ? "已开启。坐功只读取前台应用的包名，不读屏幕内容。"
-      : "未开启，屏蔽不会生效。坐功被划掉或强行停止后，系统会一起关掉这项服务；在无障碍设置里找到「坐功应用屏蔽」并重新打开。", service === false ? open("accessibility", "去开启") : ""),
+      : stalled ? "开关开着，但服务没在运行（多见于刚升级完），屏蔽不会生效。到无障碍设置里把「坐功应用屏蔽」关掉再打开一次。"
+      : "未开启，屏蔽不会生效。坐功被强行停止后，系统会一起关掉这项服务；在无障碍设置里找到「坐功应用屏蔽」并重新打开。", service === false ? open("accessibility", "去开启") : ""),
   ];
   // Android 13 起，浏览器下载安装的应用默认不许开无障碍；系统会提示「受限设置」。
-  if (service === false) rows.push(settingRow("开关是灰的", "系统提示「受限设置」时，到应用信息页点右上角 ⋮，选「允许受限制的设置」，再回来打开。", open("app_details", "应用信息"), "guidance"));
+  if (service === false && !stalled) rows.push(settingRow("开关是灰的", "系统提示「受限设置」时，到应用信息页点右上角 ⋮，选「允许受限制的设置」，再回来打开。", open("app_details", "应用信息"), "guidance"));
   // 屏蔽服务跟着坐功的进程走：系统不许坐功在后台运行时，划掉坐功就会被强行停止，服务也被关掉，
   // 要用户自己再开。坐功读得到「后台活动没被允许」这一状态，据实说明。
   const restricted = ui.systemStatus?.backgroundRestricted ?? null;

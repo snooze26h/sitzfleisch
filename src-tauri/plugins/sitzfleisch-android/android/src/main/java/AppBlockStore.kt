@@ -1,5 +1,6 @@
 package com.snooze26h.sitzfleisch.android
 
+import android.accessibilityservice.AccessibilityServiceInfo
 import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
@@ -9,17 +10,27 @@ import android.os.Build
 import android.os.SystemClock
 import android.provider.Settings
 import android.telecom.TelecomManager
+import android.view.accessibility.AccessibilityManager
+import java.io.File
+import java.io.FileOutputStream
+import java.io.IOException
 
 /**
- * 应用屏蔽在原生侧的状态。规则由 Rust 推过来、落进 SharedPreferences：
- * 系统可能只为无障碍服务拉起进程，那时 Rust 还没运行，服务只能读这里。
- * 服务和界面跑在同一个进程里，所以内存里的缓存和「刚屏蔽了谁」两边都看得到。
+ * 应用屏蔽在原生侧的状态。
+ *
+ * 屏蔽服务跑在自己的进程（`:blocker`）里：划掉坐功时界面进程会退出，服务进程不受影响，
+ * 屏蔽不留空档。所以两边只能通过文件和启动参数交换信息——
+ * - 规则：界面进程把 Rust 推来的开关和包名整份写进文件（先写临时文件再改名），服务进程按文件
+ *   修改时间与大小判断要不要重读。系统只为服务拉起进程、Rust 还没运行时也照样读得到。
+ * - 「刚把谁送了回来」：服务在打开坐功的启动参数里带上，界面进程收到后记在内存里。
  */
 object AppBlockStore {
-  private const val PREFS = "sitzfleisch_app_blocking"
-  private const val KEY_ENABLED = "enabled"
-  private const val KEY_PACKAGES = "packages"
+  private const val RULES_FILE = "app_blocking_rules"
+  /** 0.14.0 把规则存在这里；新版第一次读规则时迁移过来。 */
+  private const val LEGACY_PREFS = "sitzfleisch_app_blocking"
   const val MAX_PACKAGES = 200
+  const val EXTRA_BLOCKED_PACKAGE = "com.snooze26h.sitzfleisch.extra.BLOCKED_PACKAGE"
+  const val EXTRA_SENT_BACK_AT = "com.snooze26h.sitzfleisch.extra.SENT_BACK_AT"
   /** 被送回坐功之后，界面在这段时间内回到前台才说明原因；再晚就是旧事了。 */
   private const val NOTICE_TTL_MS = 60_000L
   /** 送回坐功后这段时间内收到的「离开坐功」，是上一次离开迟到的回调，不算数。 */
@@ -28,9 +39,13 @@ object AppBlockStore {
 
   class Rules(val enabled: Boolean, val packages: Set<String>)
 
+  private data class Stamp(val modified: Long, val length: Long)
+
   private class Notice(val packageName: String, val at: Long)
 
-  @Volatile private var cached: Rules? = null
+  private val lock = Any()
+  private var cached: Rules? = null
+  private var cachedStamp: Stamp? = null
   @Volatile private var notice: Notice? = null
   /**
    * 屏蔽服务把坐功叫到前台的时刻（0 表示没有）。这时坐功下面可能还压着刚被拦下的应用：
@@ -40,28 +55,88 @@ object AppBlockStore {
 
   fun validPackageName(name: String): Boolean = name.length <= 255 && PACKAGE_NAME.matches(name)
 
+  private fun rulesFile(context: Context) = File(context.applicationContext.filesDir, RULES_FILE)
+
+  private fun stampOf(file: File) = Stamp(file.lastModified(), file.length())
+
   fun rules(context: Context): Rules {
-    cached?.let { return it }
-    val prefs = context.applicationContext.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
-    val packages = prefs.getStringSet(KEY_PACKAGES, null).orEmpty().filter(::validPackageName).toSet()
-    return Rules(prefs.getBoolean(KEY_ENABLED, false), packages).also { cached = it }
+    synchronized(lock) {
+      val file = rulesFile(context)
+      if (!file.exists()) return migrateLegacy(context)
+      val stamp = stampOf(file)
+      cached?.let { if (cachedStamp == stamp) return it }
+      val lines = try { file.readLines() } catch (_: IOException) { return cached ?: Rules(false, emptySet()) }
+      val rules = Rules(
+        lines.firstOrNull() == "enabled",
+        lines.drop(1).filter(::validPackageName).take(MAX_PACKAGES).toSet(),
+      )
+      cached = rules
+      cachedStamp = stamp
+      return rules
+    }
   }
 
-  /** 同步写盘：写成功才算推送成功，Rust 那边据此决定要不要重试。 */
-  fun save(context: Context, enabled: Boolean, packages: Set<String>): Boolean {
-    val saved = context.applicationContext.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit()
-      .putBoolean(KEY_ENABLED, enabled)
-      .putStringSet(KEY_PACKAGES, HashSet(packages))
-      .commit()
-    if (saved) cached = Rules(enabled, packages.toSet())
-    return saved
+  /** 旧版的规则只在新文件还不存在时读一次，写成新文件后旧的就不再使用。 */
+  private fun migrateLegacy(context: Context): Rules {
+    val prefs = context.applicationContext.getSharedPreferences(LEGACY_PREFS, Context.MODE_PRIVATE)
+    val rules = Rules(
+      prefs.getBoolean("enabled", false),
+      prefs.getStringSet("packages", null).orEmpty().filter(::validPackageName).take(MAX_PACKAGES).toSet(),
+    )
+    if (rules.enabled || rules.packages.isNotEmpty()) writeRules(context, rules)
+    return rules
   }
 
-  /** 屏蔽服务送人回坐功之前调用：记下拦的是谁，也记下坐功此刻正压在它上面。 */
-  fun recordSentBack(packageName: String) {
-    val now = SystemClock.elapsedRealtime()
-    notice = Notice(packageName, now)
-    coveringSince = now
+  /** 整份写入：先写临时文件并落盘，再改名替换，另一个进程永远读不到写了一半的规则。 */
+  private fun writeRules(context: Context, rules: Rules): Boolean {
+    val file = rulesFile(context)
+    val temp = File(file.parentFile, "$RULES_FILE.tmp")
+    val text = buildString {
+      append(if (rules.enabled) "enabled" else "disabled").append('\n')
+      rules.packages.sorted().forEach { append(it).append('\n') }
+    }
+    return try {
+      FileOutputStream(temp).use { output ->
+        output.write(text.toByteArray(Charsets.UTF_8))
+        output.fd.sync()
+      }
+      if (!temp.renameTo(file)) return false
+      cached = rules
+      cachedStamp = stampOf(file)
+      true
+    } catch (_: IOException) {
+      temp.delete()
+      false
+    }
+  }
+
+  /** 写成功才算推送成功，Rust 那边据此决定要不要重试。 */
+  fun save(context: Context, enabled: Boolean, packages: Set<String>): Boolean = synchronized(lock) {
+    writeRules(context, Rules(enabled, packages.toSet()))
+  }
+
+  /**
+   * 界面进程收到打开坐功的启动参数时调用：是屏蔽服务送回来的，就记下拦的是谁、坐功正压在它上面。
+   * 主界面是导出的，别的应用也能带着这两个参数打开它，所以只认名单里的应用、只认一分钟内的。
+   */
+  fun acceptSentBack(context: Context, intent: Intent?) {
+    if (intent == null || !intent.hasExtra(EXTRA_BLOCKED_PACKAGE)) return
+    val packageName = intent.getStringExtra(EXTRA_BLOCKED_PACKAGE)
+    val at = intent.getLongExtra(EXTRA_SENT_BACK_AT, -1L)
+    // 读一次就去掉：界面重建时会拿到同一份启动参数，不能再提示一遍。
+    intent.removeExtra(EXTRA_BLOCKED_PACKAGE)
+    intent.removeExtra(EXTRA_SENT_BACK_AT)
+    val age = SystemClock.elapsedRealtime() - at
+    if (packageName == null || !validPackageName(packageName) || at <= 0L || age < 0L || age > NOTICE_TTL_MS) return
+    if (packageName !in rules(context).packages) return
+    notice = Notice(packageName, at)
+    coveringSince = at
+  }
+
+  fun takeNotice(): String? {
+    val current = notice ?: return null
+    notice = null
+    return current.packageName.takeIf { SystemClock.elapsedRealtime() - current.at <= NOTICE_TTL_MS }
   }
 
   /** 返回键用：坐功是不是正压在刚被拦下的应用上面。读一次就清掉。 */
@@ -75,12 +150,6 @@ object AppBlockStore {
   fun leftForeground() {
     val since = coveringSince
     if (since != 0L && SystemClock.elapsedRealtime() - since > LEAVE_GRACE_MS) coveringSince = 0L
-  }
-
-  fun takeNotice(): String? {
-    val current = notice ?: return null
-    notice = null
-    return current.packageName.takeIf { SystemClock.elapsedRealtime() - current.at <= NOTICE_TTL_MS }
   }
 
   /** 坐功自己的包（正式版和测试版）都不进名单，也永远不拦。 */
@@ -124,7 +193,20 @@ object AppBlockStore {
   fun serviceEnabled(context: Context): Boolean {
     val own = ComponentName(context, AppBlockService::class.java)
     val enabled = Settings.Secure.getString(context.contentResolver, Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES)
-      ?: return AppBlockService.connected
-    return enabled.split(':').any { ComponentName.unflattenFromString(it) == own } || AppBlockService.connected
+      ?: return false
+    return enabled.split(':').any { ComponentName.unflattenFromString(it) == own }
+  }
+
+  /**
+   * 系统此刻真的连着坐功的屏蔽服务。开关开着、服务却断了（比如升级时进程被换掉，系统把它记成出错）
+   * 时，设置里仍显示开启，只有这里看得出来。服务在另一个进程，只能问系统。
+   */
+  fun serviceRunning(context: Context): Boolean {
+    val manager = context.getSystemService(Context.ACCESSIBILITY_SERVICE) as? AccessibilityManager ?: return false
+    val own = ComponentName(context, AppBlockService::class.java)
+    return manager.getEnabledAccessibilityServiceList(AccessibilityServiceInfo.FEEDBACK_ALL_MASK).any {
+      val info = it.resolveInfo?.serviceInfo
+      info != null && ComponentName(info.packageName, info.name) == own
+    }
   }
 }

@@ -25,9 +25,11 @@
     </queries>
 
     <application>
-        <!-- 只有系统能绑定（BIND_ACCESSIBILITY_SERVICE），不对其他应用导出。 -->
+        <!-- 只有系统能绑定（BIND_ACCESSIBILITY_SERVICE），不对其他应用导出。
+             放在独立进程：划掉坐功时界面进程会退出，屏蔽服务不能跟着断。 -->
         <service
             android:name="com.snooze26h.sitzfleisch.android.AppBlockService"
+            android:process=":blocker"
             android:exported="false"
             android:label="@string/sitzfleisch_app_block_label"
             android:permission="android.permission.BIND_ACCESSIBILITY_SERVICE">

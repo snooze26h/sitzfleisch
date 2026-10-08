@@ -511,7 +511,7 @@ async function setAppBlocking(checked: boolean, el: HTMLInputElement) {
   if (!ok) return;
   // 服务可能在上次读取之后被系统关掉了（强行停止会关掉它），以这一刻的状态为准。
   const status = await refreshSystemStatus();
-  if (status && !status.appBlockServiceEnabled) askForAccessibility();
+  if (status && !(status.appBlockServiceEnabled && status.appBlockServiceRunning)) askForAccessibility();
   else toast(current.apps.length ? "应用屏蔽已打开：打开名单里的应用会被送回坐功。" : "应用屏蔽已打开。添加应用后生效。");
 }
 
@@ -600,7 +600,7 @@ async function addPickedApps() {
   const chosen = picker.chosen.flatMap((name) => picker.apps.filter((app) => app.packageName === name));
   const before = appBlocking(prefs());
   const message = !before.enabled ? "已加入名单。打开「屏蔽名单里的应用」后生效。"
-    : ui.systemStatus && !ui.systemStatus.appBlockServiceEnabled ? "已加入名单。无障碍服务打开后生效。"
+    : ui.systemStatus && !(ui.systemStatus.appBlockServiceEnabled && ui.systemStatus.appBlockServiceRunning) ? "已加入名单。无障碍服务打开后生效。"
     : "已加入名单，现在打开它们会被送回坐功。";
   const ok = await savePrefs((x) => {
     const current = appBlocking(x);

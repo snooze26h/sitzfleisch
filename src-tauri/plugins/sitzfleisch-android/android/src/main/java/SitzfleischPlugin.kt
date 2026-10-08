@@ -66,6 +66,13 @@ class SitzfleischPlugin(private val activity: Activity) : Plugin(activity) {
   override fun load(webView: WebView) {
     super.load(webView)
     ensureChannels()
+    // 冷启动：坐功可能正是被屏蔽服务叫起来的。
+    AppBlockStore.acceptSentBack(activity, activity.intent)
+  }
+
+  override fun onNewIntent(intent: Intent) {
+    super.onNewIntent(intent)
+    AppBlockStore.acceptSentBack(activity, intent)
   }
 
   /** 重建同 ID 的渠道会保留用户在系统里选的声音、开关和重要性，所以可以放心重复调用。 */
@@ -196,6 +203,7 @@ class SitzfleischPlugin(private val activity: Activity) : Plugin(activity) {
       Build.VERSION.SDK_INT < Build.VERSION_CODES.S || alarmManager.canScheduleExactAlarms())
     result.put("ignoringBatteryOptimizations", powerManager.isIgnoringBatteryOptimizations(activity.packageName))
     result.put("appBlockServiceEnabled", AppBlockStore.serviceEnabled(activity))
+    result.put("appBlockServiceRunning", AppBlockStore.serviceRunning(activity))
     // 「后台活动」没被允许（荣耀「应用启动管理」里关着就是这样）：划掉坐功时系统会强行停止它，
     // 预排的提醒和无障碍服务都会被一起清掉。
     val activityManager = activity.getSystemService(Context.ACTIVITY_SERVICE) as ActivityManager

@@ -14,13 +14,11 @@ import android.view.accessibility.AccessibilityEvent
  * 只订阅「窗口切换」这一类事件，只读事件里的包名和界面类名；不读取屏幕内容
  * （配置里 canRetrieveWindowContent=false），不代替用户点按，也不联网。
  * 开关和名单由坐功界面决定，这里只照着 [AppBlockStore] 里的规则执行。
+ *
+ * 服务在独立进程（`:blocker`）里运行：划掉坐功时界面进程按设计退出，这个进程不跟着退，屏蔽不断档。
  */
 class AppBlockService : AccessibilityService() {
   companion object {
-    /** 系统确实绑定着这个服务。界面据此和系统开关一起判断屏蔽能不能生效。 */
-    @Volatile var connected = false
-      private set
-
     /** 同一个应用连着发好几条窗口事件时，只送回一次。 */
     private const val REPEAT_WINDOW_MS = 1_500L
     private const val CACHE_LIMIT = 256
@@ -29,21 +27,6 @@ class AppBlockService : AccessibilityService() {
   private var lastPackage: String? = null
   private var lastBlockedAt = 0L
   private val windowKinds = HashMap<String, Boolean>()
-
-  override fun onServiceConnected() {
-    super.onServiceConnected()
-    connected = true
-  }
-
-  override fun onUnbind(intent: Intent?): Boolean {
-    connected = false
-    return super.onUnbind(intent)
-  }
-
-  override fun onDestroy() {
-    connected = false
-    super.onDestroy()
-  }
 
   override fun onInterrupt() {}
 
@@ -105,11 +88,13 @@ class AppBlockService : AccessibilityService() {
    * 无障碍服务由系统绑定，允许从后台打开界面。
    */
   private fun sendBack(packageName: String) {
-    AppBlockStore.recordSentBack(packageName)
     val home = Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_HOME)
       .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+    // 拦的是谁、什么时候拦的，随启动参数交给界面进程：界面据此提示，并让返回键直接回桌面。
     val zuogong = packageManager.getLaunchIntentForPackage(this.packageName)
       ?.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+      ?.putExtra(AppBlockStore.EXTRA_BLOCKED_PACKAGE, packageName)
+      ?.putExtra(AppBlockStore.EXTRA_SENT_BACK_AT, SystemClock.elapsedRealtime())
     try {
       if (zuogong != null) startActivities(arrayOf(home, zuogong)) else startActivity(home)
     } catch (_: RuntimeException) {

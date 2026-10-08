@@ -145,8 +145,8 @@ function backgroundWarning(): string {
 function appBlockingWarning(): string {
   const s = ui.systemStatus;
   const b = appBlocking(prefs());
-  if (!hasFeature("app_blocking") || !s || s.appBlockServiceEnabled || !b.enabled || !b.apps.length) return "";
-  return warning("应用屏蔽没生效：无障碍服务未开启", "去开启", "accessibility");
+  if (!hasFeature("app_blocking") || !s || (s.appBlockServiceEnabled && s.appBlockServiceRunning) || !b.enabled || !b.apps.length) return "";
+  return warning(s.appBlockServiceEnabled ? "应用屏蔽没生效：无障碍服务没在运行" : "应用屏蔽没生效：无障碍服务未开启", "去开启", "accessibility");
 }
 
 /** 月亮下面：「从几点坐下」这一天已学多少、停了多久、休息了多久，外加今天这一天的菜单。 */
