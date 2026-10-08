@@ -90,13 +90,13 @@ function removalSheet(): string {
     const matches = sameText(r.typed, r.confirm);
     const what = r.kind === "app" ? "应用名" : "这句话";
     body = `<h2 id="removal-title">${r.kind === "app" ? "手动确认应用名" : "手动确认关闭"}</h2>
-      <div class="confirm-field"><label for="removal-input">输入${what} <span class="rule-value sel">${esc(r.confirm)}</span></label><input id="removal-input" class="field md" data-input="removal" value="${esc(r.typed)}" aria-label="输入${what}以确认" placeholder="${esc(r.confirm)}" autocomplete="off" spellcheck="false" ${busy ? "disabled" : ""} /></div>
+      <div class="confirm-field"><label for="removal-input">输入${what} <span class="rule-value sel">${esc(r.confirm)}</span></label><input id="removal-input" class="field md" data-input="removal" value="${esc(r.typed)}" placeholder="${esc(r.confirm)}" autocomplete="off" spellcheck="false" ${busy ? "disabled" : ""} /></div>
       <div class="btns">${btn("返回", { kind: "plate", action: "removal-back", disabled: busy })}${btn("取消", { kind: "quiet", action: "removal-cancel", disabled: busy })}<span class="spacer"></span>${btn(busy ? "正在保存…" : r.kind === "app" ? "确认移出" : "确认关闭", { kind: "danger", action: "removal-confirm", disabled: !matches || busy })}</div>`;
   } else {
     const matches = r.typed.trim() === r.value;
     const label = r.kind === "url" ? "完整网址" : "完整域名";
     body = `<h2 id="removal-title">手动确认${r.kind === "url" ? "网址" : "域名"}</h2>
-      <div class="confirm-field"><label for="removal-input">输入${label} <span class="rule-value mono sel">${esc(r.value)}</span></label><input id="removal-input" class="field mono md" data-input="removal" value="${esc(r.typed)}" aria-label="输入${label}以确认解除" placeholder="${esc(r.value)}" autocomplete="off" spellcheck="false" ${busy ? "disabled" : ""} /></div>
+      <div class="confirm-field"><label for="removal-input">输入${label} <span class="rule-value mono sel">${esc(r.value)}</span></label><input id="removal-input" class="field mono md" data-input="removal" value="${esc(r.typed)}" placeholder="${esc(r.value)}" autocomplete="off" spellcheck="false" ${busy ? "disabled" : ""} /></div>
       <div class="btns">${btn("返回", { kind: "plate", action: "removal-back", disabled: busy })}${btn("取消", { kind: "quiet", action: "removal-cancel", disabled: busy })}<span class="spacer"></span>${btn(busy ? "正在解除…" : "确认解除", { kind: "danger", action: "removal-confirm", disabled: !matches || busy })}</div>`;
   }
   return `<div class="backdrop" id="removal"><div class="dialog sheet" role="dialog" aria-modal="true" aria-labelledby="removal-title" data-stop>${body}</div></div>`;
@@ -125,7 +125,7 @@ function appPickerSheet(): string {
     : !picker.apps.length ? "没有读到可以屏蔽的应用。"
     : !visible.length ? "没有找到这个应用。" : "";
   const limited = picker.limited && !picker.loading
-    ? `<div class="picker-limited"><p>系统只交出了系统自带的应用。允许坐功读取应用列表，才能看到你装的应用。</p>${btn("允许读取", { kind: "plate", action: "picker-full-list" })}</div>`
+    ? `<div class="picker-limited"><p>系统只交出了系统自带的应用。允许坐功读取应用列表，才能看到你装的应用。</p>${picker.canRequestFullList ? btn(picker.requesting ? "等待系统授权…" : "允许读取", { kind: "plate", action: "picker-full-list", disabled: picker.requesting }) : ""}</div>`
     : "";
   const count = picker.chosen.length;
   return `<div class="backdrop" id="app-picker"><div class="dialog sheet app-picker" role="dialog" aria-modal="true" aria-labelledby="picker-title" data-stop>

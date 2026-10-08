@@ -16,7 +16,8 @@ export function appBlocking(p: Preferences): AppBlocking {
   return p.app_blocking ?? { enabled: false, apps: [] };
 }
 
-/** 手动确认时比较输入：去掉首尾空白，英文不分大小写。 */
+/** 手动确认时比较输入：统一全半角、去掉看不见的格式字符、合并空白，英文不分大小写。 */
 export function sameText(typed: string, expected: string): boolean {
-  return typed.trim().toLocaleLowerCase() === expected.trim().toLocaleLowerCase();
+  const plain = (text: string) => text.normalize("NFKC").replace(/\p{Cf}/gu, "").replace(/\s+/g, " ").trim().toLocaleLowerCase();
+  return plain(typed) === plain(expected);
 }

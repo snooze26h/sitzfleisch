@@ -3,7 +3,7 @@
 // 下面逐日归档，每一行开头是同一轮小月；可展开看配额、台账，复制 Markdown，永久删除。
 
 import type { ArchivedDay, Day } from "../types";
-import { dayLabel, duration, esc, meter, wallClock } from "../format";
+import { dayLabel, duration, esc, meter, wallRange } from "../format";
 import { icon } from "../icons";
 import { archiveMoon, crescentArt, dayFull, dayMoon, keyMoon, newMoon } from "../moon";
 import { btn, quotaRows, sectionLabel, sessionRow } from "../components";
@@ -153,7 +153,7 @@ function archiveRow(entry: ArchivedDay): string {
   const header = `<button class="archive-row${ui.selectedHistoryDay === d.started_at ? " on" : ""}${open ? " open" : ""}" id="archive-${d.started_at}" data-action="toggle-day" data-id="${d.started_at}" aria-expanded="${open}" aria-controls="archive-detail-${d.started_at}" aria-label="${open ? "折叠" : "展开"} ${esc(dayLabel(d.started_at))} 的归档详情">
       ${icon(open ? "chevron-down" : "chevron-right", 14, "chev")}
       <span class="archive-moon">${archiveMoon(d, "row")}</span>
-      <span class="titles"><b>${esc(dayLabel(d.started_at))}</b><span>${esc(wallClock(d.started_at))}–${esc(wallClock(entry.ended_at))} · ${accepted} 格计入</span></span>
+      <span class="titles"><b>${esc(dayLabel(d.started_at))}</b><span>${esc(wallRange(d.started_at, entry.ended_at))} · ${accepted} 格计入</span></span>
       ${compositionStrip(d)}
       <span class="nums"><b>${esc(meter(netSeconds(d)))}</b><span>目标 ${esc(meter(quotaSeconds(d)))}</span></span>
     </button>`;

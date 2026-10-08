@@ -1116,9 +1116,12 @@ button.day-cell:active { background: rgba(231, 223, 208, 0.1); }
   .archive-row > .archive-moon { grid-area: moon; }
   .archive-row > .titles { display: contents; }
   .archive-row .titles b { grid-area: title; }
-  .archive-row .titles span { grid-area: meta; white-space: normal; overflow: visible; }
+  .archive-row .titles span { grid-area: meta; white-space: normal; overflow: visible; word-break: keep-all; overflow-wrap: anywhere; }
   .archive-row > .nums { grid-area: nums; }
   .archive-detail { padding: 20px 0 24px; }
+  /* 任务写长了会折行：图标对齐第一行，不要夹在两行中间像一道下划线。 */
+  .session-tasks span { align-items: flex-start; }
+  .session-tasks span .ic { flex: none; margin-top: 0.3em; }
   .archive-detail .actions { flex-wrap: wrap; }
   .archive-detail .actions .spacer { display: none; }
   .history-empty .moon-art { width: 200px; }

@@ -42,6 +42,13 @@ export function wallClock(unix: number): string {
   return `${pad2(d.getHours())}:${pad2(d.getMinutes())}`;
 }
 
+/** 一段时间的起止钟点。拉满一整天以上（手机上忘了收工）时给结束补上日期，免得看成同一天。 */
+export function wallRange(from: number, to: number): string {
+  if (to - from < 24 * 3600) return `${wallClock(from)}–${wallClock(to)}`;
+  const end = new Date(to * 1000);
+  return `${wallClock(from)}–${end.getMonth() + 1}月${end.getDate()}日 ${wallClock(to)}`;
+}
+
 const WEEKDAYS = ["周日", "周一", "周二", "周三", "周四", "周五", "周六"];
 
 /** 8月28日 周五 */

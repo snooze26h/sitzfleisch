@@ -94,16 +94,33 @@ export function drawDiagram(
   const hours = span / 3600;
   // 一天拉长之后半点线会糊成一片，那时只留整点。
   const halfHours = hours <= 6;
-  const hourStride = hours > 14 ? 2 : 1;
   ctx.font = `500 13px ui-monospace, "SF Mono", Menlo, monospace`;
   ctx.textBaseline = "middle";
   ctx.textAlign = "center";
-  const endLabelGap = ctx.measureText("00:00").width * 1.5 + 12;
+  const tickLabelWidth = ctx.measureText("00:00").width;
+  let hourStride = hours > 14 ? 2 : 1;
+  // 忘了收工、一天拉到好几天时（手机按墙钟计时），整点字会叠成一团：只在真会叠住时放宽，
+  // 跨天后只在零点标日期。平常一天的刻度不变。
+  const pxPerHour = usable / Math.max(hours, 1 / 60);
+  if (hourStride * pxPerHour < tickLabelWidth) {
+    hourStride = [3, 4, 6, 12, 24, 48, 168].find((stride) => stride * pxPerHour >= tickLabelWidth + 8) ?? 168;
+  }
+  const byDay = hourStride >= 24;
+  const multiDay = span >= 24 * 3600;
+  const endText = (date: Date) => `${multiDay ? `${date.getMonth() + 1}/${date.getDate()} ` : ""}${pad2(date.getHours())}:${pad2(date.getMinutes())}`;
+  const fromText = endText(new Date(day.started_at * 1000));
+  const toText = endText(new Date(end * 1000));
+  const endLabelGap = Math.max(ctx.measureText(fromText).width, ctx.measureText(toText).width) + tickLabelWidth / 2 + 12;
+  const firstMidnight = new Date(day.started_at * 1000);
+  firstMidnight.setHours(24, 0, 0, 0);
   while (mark.getTime() / 1000 <= end) {
     const t = mark.getTime() / 1000;
     const onHour = mark.getMinutes() === 0;
     const px = crisp(x(t));
-    if (onHour ? mark.getHours() % hourStride === 0 : halfHours) {
+    const shown = byDay
+      ? onHour && mark.getHours() === 0 && Math.round((mark.getTime() - firstMidnight.getTime()) / 86_400_000) % (hourStride / 24) === 0
+      : onHour ? mark.getHours() % hourStride === 0 : halfHours;
+    if (shown) {
       ctx.strokeStyle = onHour ? "rgba(231,223,208,0.12)" : "rgba(231,223,208,0.06)";
       ctx.lineWidth = 1;
       ctx.beginPath();
@@ -113,7 +130,7 @@ export function drawDiagram(
       // 两端已经写了起止钟点，靠得太近的整点就不写了，免得两个数字叠在一起。
       if (onHour && px > endLabelGap && px < cssW - endLabelGap) {
         ctx.fillStyle = INK_FAINT;
-        ctx.fillText(`${pad2(mark.getHours())}:00`, px, trackBottom + 13);
+        ctx.fillText(byDay ? `${mark.getMonth() + 1}/${mark.getDate()}` : `${pad2(mark.getHours())}:00`, px, trackBottom + 13);
       }
     }
     mark.setMinutes(mark.getMinutes() + 30);
@@ -209,9 +226,7 @@ export function drawDiagram(
   ctx.font = `500 13px ui-monospace, "SF Mono", Menlo, monospace`;
   ctx.fillStyle = INK_FAINT;
   ctx.textAlign = "left";
-  const from = new Date(day.started_at * 1000);
-  ctx.fillText(`${pad2(from.getHours())}:${pad2(from.getMinutes())}`, 0, trackBottom + 13);
+  ctx.fillText(fromText, 0, trackBottom + 13);
   ctx.textAlign = "right";
-  const to = new Date(end * 1000);
-  ctx.fillText(`${pad2(to.getHours())}:${pad2(to.getMinutes())}`, cssW, trackBottom + 13);
+  ctx.fillText(toText, cssW, trackBottom + 13);
 }

@@ -273,7 +273,9 @@ function appBlockPanel(): string {
   const switchDetail = !b.enabled
     ? "打开后，名单里的应用一打开就被送回坐功。跟学习日无关，随时手动开关。"
     : service === false ? `已打开，但无障碍服务${stalled ? "没在运行" : "没开"}，现在拦不住。`
-    : b.apps.length ? "开着：打开名单里的应用会被送回坐功。关掉要两步确认。" : "开着，名单还是空的。";
+    : !b.apps.length ? "开着，名单还是空的。"
+    : service === null ? "开着。无障碍服务的状态还没读到，读到后这里会说明能不能拦住。"
+    : "开着：打开名单里的应用会被送回坐功。关掉要两步确认。";
   const rows = [
     settingRow("屏蔽名单里的应用", switchDetail, toggle({ change: "app-blocking", checked: b.enabled, label: "屏蔽名单里的应用", disabled: ui.pendingPrefs > 0 })),
     settingRow("无障碍服务", service === null ? (ui.systemStatusLoading ? "正在读取…" : "尚未读取")
@@ -385,9 +387,14 @@ function mobileNotificationPanel(): string {
   const status = !s ? "" : s.backgroundRestricted
     ? "后台活动未允许：从最近任务里划掉坐功时，系统会强行停止它，之后的提醒都不会响。"
     : "已允许后台活动。";
+  const allowed = s?.backgroundRestricted === false;
   const guidance = honor
-    ? `${status}点「去设置」到「应用启动管理」，找到坐功，关闭自动管理，并把自启动、关联启动、后台活动三个开关都打开。最近任务里下拉坐功卡片并锁定，避免一键清理。`
-    : `${status}在系统的应用或电池设置中允许坐功后台活动。可在最近任务中锁定坐功，避免一键清理。菜单名称以手机实际显示为准。`;
+    ? allowed
+      ? `${status}自启动和关联启动也要保持打开，点「去设置」可以到「应用启动管理」核对。最近任务里下拉坐功卡片并锁定，避免一键清理。`
+      : `${status}点「去设置」到「应用启动管理」，找到坐功，关闭自动管理，并把自启动、关联启动、后台活动三个开关都打开。最近任务里下拉坐功卡片并锁定，避免一键清理。`
+    : allowed
+      ? `${status}可在最近任务中锁定坐功，避免一键清理。`
+      : `${status}在系统的应用或电池设置中允许坐功后台活动。可在最近任务中锁定坐功，避免一键清理。菜单名称以手机实际显示为准。`;
   rows.push(settingRow("后台运行", guidance, open(honor ? "startup" : "app_details"), "background-guidance"));
   return `<div class="reminder-settings">
     <div class="reminder-check"><p role="status">${ui.systemStatusLoading ? "正在读取系统状态…" : ui.systemStatusError ? "暂时无法读取提醒状态，请重新检查。" : "从系统设置返回后，会自动重新检查。"}</p>${btn("重新检查", { kind: "quiet", action: "system-recheck", disabled: ui.systemStatusLoading })}</div>

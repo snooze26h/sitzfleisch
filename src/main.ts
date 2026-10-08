@@ -54,6 +54,8 @@ const appOrder = new Intl.Collator("zh-Hans-CN", { numeric: true, sensitivity: "
 let permissionChoiceMade = false;
 /** 把框叫出来的那个元素；关框之后焦点还给它。 */
 let dialogOpener: HTMLElement | null = null;
+/** 解除单、选择单是谁打开的：关掉后焦点还回去（与对话框一样）。 */
+let sheetOpener: HTMLElement | null = null;
 
 // ---------- 渲染 ----------
 
@@ -114,7 +116,10 @@ function render() {
   morphdom(app, html, {
     onBeforeElUpdated(from, to) {
       // 正在编辑的控件不动，免得打断输入；它的其它属性会在失焦后的下一次渲染补上。
-      if (from === document.activeElement && (from instanceof HTMLInputElement || from instanceof HTMLTextAreaElement || from instanceof HTMLSelectElement)) {
+      // 开关点完会带着焦点（安卓、Windows 的 WebView）；它没有光标可打断，照常同步勾选与禁用。
+      const typing = from instanceof HTMLTextAreaElement || from instanceof HTMLSelectElement
+        || (from instanceof HTMLInputElement && from.type !== "checkbox" && from.type !== "radio");
+      if (from === document.activeElement && typing) {
         // 保留光标时仍同步校验状态，让读屏与输入框下方的即时错误一致。
         if (to.hasAttribute("aria-invalid")) from.setAttribute("aria-invalid", to.getAttribute("aria-invalid")!);
         return false;
@@ -313,6 +318,24 @@ function focusDialog(dialog: Dialog) {
   app.querySelector<HTMLElement>(`.dialog [data-action="${action}"]`)?.focus();
 }
 
+function rememberSheetOpener() {
+  if (!topOverlay() && document.activeElement instanceof HTMLElement) sheetOpener = document.activeElement;
+}
+
+function returnSheetFocus() {
+  const opener = sheetOpener;
+  sheetOpener = null;
+  if (topOverlay() || !canAutoFocus()) return;
+  if (opener?.isConnected) opener.focus();
+  else app.querySelector<HTMLElement>("#content")?.focus();
+}
+
+function closeRemoval() {
+  ui.removal = null;
+  render();
+  returnSheetFocus();
+}
+
 /** 框里可以停焦点的东西，按文档顺序。Tab 就在这一圈里绕。 */
 function dialogFocusables(): HTMLElement[] {
   return [...app.querySelectorAll<HTMLElement>(".dialog button:not([disabled]), .dialog input:not([disabled]), .dialog textarea:not([disabled])")];
@@ -335,7 +358,7 @@ async function handleBack() {
   const top = topOverlay();
   if (top === "completion") { await cancelCompletion(); return; }
   if (top === "dialog") { if (!dialogIsBusy()) closeDialog(); return; }
-  if (top === "removal") { ui.removal = null; render(); return; }
+  if (top === "removal") { closeRemoval(); return; }
   if (top === "picker") { closeAppPicker(); return; }
   if (ui.menu) { ui.menu = null; render(); return; }
   if (ui.view === "settings" && ui.compact && !ui.settingsIndex) {
@@ -462,10 +485,8 @@ async function refreshSystemStatus() {
     }
     return status;
   } catch (error) {
-    if (request === systemRequest) {
-      ui.systemStatus = null;
-      ui.systemStatusError = String(error).slice(0, 240);
-    }
+    // 读取失败时保留上一次读到的状态（界面会写明「暂时无法读取」），不让今天页的提醒凭空消失。
+    if (request === systemRequest) ui.systemStatusError = String(error).slice(0, 240);
     return null;
   } finally {
     // 系统设置快速进出时，迟到的查询不能覆盖较新的结果。
@@ -501,8 +522,14 @@ async function setAppBlocking(checked: boolean, el: HTMLInputElement) {
   const current = appBlocking(prefs());
   if (checked === current.enabled) return;
   if (!checked) {
+    // 名单是空的，关掉也放不出什么，不必走两步确认。
+    if (!current.apps.length) {
+      await savePrefs((x) => { x.app_blocking = { enabled: false, apps: appBlocking(x).apps }; }, "应用屏蔽已关闭。");
+      return;
+    }
     // 关掉要两步确认：开关先拨回去，确认单走完才真的关。
     el.checked = true;
+    rememberSheetOpener();
     ui.removal = { kind: "app-blocking", value: "", confirm: DISABLE_PHRASE, step: 1, typed: "" };
     render();
     return;
@@ -511,7 +538,8 @@ async function setAppBlocking(checked: boolean, el: HTMLInputElement) {
   if (!ok) return;
   // 服务可能在上次读取之后被系统关掉了（强行停止会关掉它），以这一刻的状态为准。
   const status = await refreshSystemStatus();
-  if (status && !(status.appBlockServiceEnabled && status.appBlockServiceRunning)) askForAccessibility();
+  if (!status) toast("应用屏蔽已打开。读不到系统状态，请在「设置 → 应用屏蔽」确认无障碍服务已开启。", 8000);
+  else if (!(status.appBlockServiceEnabled && status.appBlockServiceRunning)) askForAccessibility();
   else toast(current.apps.length ? "应用屏蔽已打开：打开名单里的应用会被送回坐功。" : "应用屏蔽已打开。添加应用后生效。");
 }
 
@@ -523,8 +551,8 @@ async function confirmAppRemoval(r: NonNullable<typeof ui.removal>) {
       ? { enabled: current.enabled, apps: current.apps.filter((app) => app.package_name !== r.value) }
       : { enabled: false, apps: current.apps };
   }, r.kind === "app" ? `已把「${r.confirm}」移出名单。` : "应用屏蔽已关闭。名单还在，随时可以再打开。");
-  if (ok && ui.removal === r) ui.removal = null;
-  render();
+  if (ok && ui.removal === r) closeRemoval();
+  else render();
 }
 
 async function removeBlockedApp(name: string) {
@@ -532,6 +560,7 @@ async function removeBlockedApp(name: string) {
   const target = b.apps.find((app) => app.package_name === name);
   if (!target || ui.pendingPrefs > 0) return;
   if (b.enabled) {
+    rememberSheetOpener();
     ui.removal = { kind: "app", value: target.package_name, confirm: target.label, step: 1, typed: "" };
     render();
     return;
@@ -546,7 +575,8 @@ async function removeBlockedApp(name: string) {
 
 async function openAppPicker() {
   if (!hasFeature("app_blocking") || ui.appPicker) return;
-  ui.appPicker = { loading: true, error: "", apps: [], limited: false, canRequestFullList: false, query: "", chosen: [] };
+  rememberSheetOpener();
+  ui.appPicker = { loading: true, error: "", apps: [], limited: false, canRequestFullList: false, requesting: false, query: "", chosen: [] };
   ui.menu = null;
   render();
   await loadPickerApps();
@@ -557,6 +587,7 @@ function closeAppPicker() {
   pickerRequest++;
   ui.appPicker = null;
   render();
+  returnSheetFocus();
 }
 
 async function loadPickerApps() {
@@ -575,7 +606,7 @@ async function loadPickerApps() {
     // 列表变了（比如刚卸载了某个应用）：不再存在的勾选一并去掉。
     picker.chosen = picker.chosen.filter((name) => picker.apps.some((app) => app.packageName === name));
   } catch (error) {
-    if (request === pickerRequest && ui.appPicker === picker) picker.error = String(error).slice(0, 240);
+    if (request === pickerRequest && ui.appPicker === picker) picker.error = (error instanceof Error ? error.message : String(error)).slice(0, 240);
   } finally {
     if (request === pickerRequest && ui.appPicker === picker) {
       picker.loading = false;
@@ -599,8 +630,10 @@ async function addPickedApps() {
   if (!picker || !picker.chosen.length || ui.pendingPrefs > 0) return;
   const chosen = picker.chosen.flatMap((name) => picker.apps.filter((app) => app.packageName === name));
   const before = appBlocking(prefs());
+  const s = ui.systemStatus;
   const message = !before.enabled ? "已加入名单。打开「屏蔽名单里的应用」后生效。"
-    : ui.systemStatus && !(ui.systemStatus.appBlockServiceEnabled && ui.systemStatus.appBlockServiceRunning) ? "已加入名单。无障碍服务打开后生效。"
+    : !s ? "已加入名单。"
+    : !(s.appBlockServiceEnabled && s.appBlockServiceRunning) ? "已加入名单。无障碍服务打开后生效。"
     : "已加入名单，现在打开它们会被送回坐功。";
   const ok = await savePrefs((x) => {
     const current = appBlocking(x);
@@ -613,8 +646,14 @@ async function addPickedApps() {
 }
 
 async function requestFullAppList() {
+  const picker = ui.appPicker;
+  // 系统授权框还开着时再点一次，会发出第二次申请并立刻得到「没允许」。
+  if (!picker || picker.requesting) return;
+  picker.requesting = true;
+  render();
   try {
     const granted = (await invoke<unknown>("request_app_list_permission")) === true;
+    if (ui.appPicker !== picker) return;
     if (granted) {
       await loadPickerApps();
       return;
@@ -623,6 +662,9 @@ async function requestFullAppList() {
     await openSystemSettings("app_details").catch(() => {});
   } catch (error) {
     toast(String(error));
+  } finally {
+    picker.requesting = false;
+    render();
   }
 }
 
@@ -639,7 +681,7 @@ async function beginDay(profileId: string) {
 async function startDay(profileId: string) {
   if (ui.startingDay || day() || !prefs().profiles.some((profile) => profile.id === profileId)) return;
   if (!ui.platform?.mobile) {
-    if (await act("start_day", { profileId })) toast("开始了。这一天从现在算起，不看几点钟。");
+    await beginDay(profileId);
     return;
   }
   if (permissionPrompted()) { await beginDay(profileId); return; }
@@ -967,6 +1009,7 @@ async function handleAction(action: string, el: HTMLElement) {
       await addBlockingRule("url");
       break;
     case "remove-rule":
+      rememberSheetOpener();
       ui.removal = { kind: el.dataset.kind === "url" ? "url" : "host", value: el.dataset.value ?? "", confirm: el.dataset.value ?? "", step: 1, typed: "" };
       render();
       break;
@@ -983,8 +1026,7 @@ async function handleAction(action: string, el: HTMLElement) {
       render();
       break;
     case "removal-cancel":
-      ui.removal = null;
-      render();
+      closeRemoval();
       break;
     case "removal-confirm": {
       const r = ui.removal;
@@ -998,8 +1040,8 @@ async function handleAction(action: string, el: HTMLElement) {
         if (r.kind === "url") x.blocked_urls = x.blocked_urls.filter((url) => url !== r.value);
         else x.blocked_hosts = x.blocked_hosts.filter((host) => host !== r.value);
       }, r.kind === "url" ? "已移除精确网址规则，浏览器扩展将在同步后解除。" : "已从设置移除整站规则。系统解除后才会恢复访问，请留意下方整站状态。");
-      if (ok && ui.removal === r) ui.removal = null;
-      render();
+      if (ok && ui.removal === r) closeRemoval();
+      else render();
       break;
     }
     case "reveal-browser-extension":
@@ -1498,7 +1540,7 @@ document.addEventListener("keydown", (event) => {
   // 输入法的 Esc / Enter 只处理候选词，不能跳过记录或启动计时。
   if (event.isComposing || event.keyCode === 229) return;
   // 焦点不许跑出对话框：Tab 在框内那一圈里绕。判据与渲染共用 topOverlay()。
-  if (event.key === "Tab" && (topOverlay() === "dialog" || topOverlay() === "completion")) {
+  if (event.key === "Tab" && topOverlay()) {
     const items = dialogFocusables();
     if (!items.length) return;
     event.preventDefault();
@@ -1515,8 +1557,10 @@ document.addEventListener("keydown", (event) => {
       void cancelCompletion();
       return;
     }
-    if (top === "removal") ui.removal = null;
-    else if (top === "picker") {
+    if (top === "removal") {
+      closeRemoval();
+      return;
+    } else if (top === "picker") {
       closeAppPicker();
       return;
     } else if (top === "dialog") {

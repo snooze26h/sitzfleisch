@@ -49,6 +49,8 @@ export interface AppPicker {
   apps: InstalledApp[];
   limited: boolean;
   canRequestFullList: boolean;
+  /** 正在等系统的「获取应用列表」授权结果。 */
+  requesting: boolean;
   query: string;
   /** 这一次勾上的包名；已在名单里的不算。 */
   chosen: string[];

@@ -78,19 +78,24 @@ export async function systemStatus(): Promise<SystemStatus> {
   return status;
 }
 
-function validInstalledApps(value: unknown): value is InstalledApps {
-  if (value === null || typeof value !== "object") return false;
+/**
+ * 应用名来自手机上的各个应用：单个不合规就跳过它，不能让一个怪名字拖垮整张选择单。
+ * 长度按字符数算，与原生和外壳的 80 字上限一致（表情等占两个 UTF-16 单元）。
+ */
+function cleanInstalledApps(value: unknown): InstalledApps | null {
+  if (value === null || typeof value !== "object") return null;
   const list = value as Partial<InstalledApps>;
-  return typeof list.limited === "boolean" && typeof list.canRequestFullList === "boolean"
-    && Array.isArray(list.apps) && list.apps.length <= 1000
-    && list.apps.every((app) => app !== null && typeof app === "object" && validPackageName(app.packageName)
-      && typeof app.label === "string" && app.label.trim().length > 0 && app.label.length <= 80);
+  if (typeof list.limited !== "boolean" || typeof list.canRequestFullList !== "boolean"
+    || !Array.isArray(list.apps) || list.apps.length > 1000) return null;
+  const apps = list.apps.filter((app) => app !== null && typeof app === "object" && validPackageName(app.packageName)
+    && typeof app.label === "string" && app.label.trim().length > 0 && [...app.label].length <= 80);
+  return { apps, limited: list.limited, canRequestFullList: list.canRequestFullList };
 }
 
 /** 应用屏蔽的选择器：手机上能从桌面打开的应用。 */
 export async function installedApps(): Promise<InstalledApps> {
-  const list = await invoke<unknown>("installed_apps");
-  if (!validInstalledApps(list)) throw new Error("应用列表数据格式无效");
+  const list = cleanInstalledApps(await invoke<unknown>("installed_apps"));
+  if (!list) throw new Error("应用列表数据格式无效");
   return list;
 }
 

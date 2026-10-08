@@ -75,7 +75,7 @@ function startBoard(): string {
     .join("");
   const total = profileTotalMinutes(plan);
   // 应用屏蔽和学习日无关：没开始今天也要看得见它没生效。
-  const warning = backgroundWarning() || appBlockingWarning();
+  const warning = appBlockingWarning() || backgroundWarning();
   return `<section class="start-board${warning ? " with-warning" : ""}" id="start">
       <header class="masthead">
         <h1 class="t-masthead">落座，便是今天</h1>
@@ -109,14 +109,15 @@ function activeBoard(d: Day): string {
   // 四块排成两行两列：这一格 | 今天这一轮月，今日配额 | 今天的总读数。
   // 左右两列上下各自对齐，窗口第一屏里放得下「此刻」和「今天」两个尺度。
   const moon = `<div class="moon-cell moon-stage" id="day-moon">${dayMoon(d)}</div>`;
-  const notificationWarning = reminderWarning() || backgroundWarning() || appBlockingWarning();
+  // 先说已经坏掉的（提醒不响、屏蔽没生效），再说划掉之后才会坏的。
+  const notificationWarning = reminderWarning() || appBlockingWarning() || backgroundWarning();
   return `<section class="today-top${ui.compact && suggestion ? " choosing" : ""}${ui.compact && notificationWarning ? " with-warning" : ""}" id="today-top">${focusPanel(d)}${moon}${quotaPanel(d, suggestion?.category ?? null)}${dayReadings(d)}${notificationWarning}</section>
     ${diagramBlock()}
     ${d.ledger.length ? logBlock(d) : ""}`;
 }
 
-function warning(text: string, label: string, target: string): string {
-  return `<div class="notification-warning"><b>${text}</b>${btn(label, { kind: "plate", action: "system-settings", data: { target } })}</div>`;
+function warning(text: string, label: string, target: string, channel?: string): string {
+  return `<div class="notification-warning"><b>${esc(text)}</b>${btn(label, { kind: "plate", action: "system-settings", data: { target, ...(channel ? { channel } : {}) } })}</div>`;
 }
 
 /** 手机上提醒不能如期送达时，在今天页就说清楚，不让人锁屏后才发现没响。 */
@@ -125,7 +126,7 @@ function reminderWarning(): string {
   if (!s) return "";
   if (!s.notificationsEnabled) return warning("通知未开启，锁屏后到点不会提醒", "去开启", "app_notifications");
   // 「计时」渠道管一格走完和休息结束；它被关掉时，最要紧的提醒一条都不会响。
-  if (s.channels.some((c) => c.id === "timer" && !c.enabled)) return warning("计时提醒已关闭，到点不会提醒", "去设置", "app_notifications");
+  if (s.channels.some((c) => c.id === "timer" && !c.enabled)) return warning("计时提醒已关闭，到点不会提醒", "去设置", "channel", "timer");
   if (!s.canScheduleExactAlarms) return warning("精确闹钟未允许，锁屏后的提醒可能晚到", "去设置", "exact_alarm");
   return "";
 }
@@ -137,8 +138,9 @@ function reminderWarning(): string {
 function backgroundWarning(): string {
   const s = ui.platform?.mobile ? ui.systemStatus : null;
   const b = appBlocking(prefs());
-  if (!s?.backgroundRestricted || (!day() && !(b.enabled && b.apps.length))) return "";
-  return warning("后台活动未允许，划掉坐功后提醒和屏蔽都会失效", "去设置", honorPhone() ? "startup" : "app_details");
+  const affected = [day() ? "提醒" : "", b.enabled && b.apps.length ? "屏蔽" : ""].filter(Boolean);
+  if (!s?.backgroundRestricted || !affected.length) return "";
+  return warning(`后台活动未允许，划掉坐功后${affected.join("和")}会失效`, "去设置", honorPhone() ? "startup" : "app_details");
 }
 
 /** 屏蔽开着、名单不空，系统里的无障碍服务却关着（常见于被一键清理或强行停止之后）。 */
