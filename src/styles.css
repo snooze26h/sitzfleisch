@@ -1228,3 +1228,8 @@ button, select, summary, .switch { -webkit-tap-highlight-color: transparent; tou
   /* 搜索时结果变少，弹层不跟着一下一下变矮。 */
   .dialog.app-picker { height: 85vh; height: 85dvh; }
 }
+
+/* 手机系统 WebView 太旧时 compat.js 写出的说明页：只用最基本的样式，旧内核也排得开。 */
+.unsupported { max-width: 520px; padding: 48px 20px; }
+.unsupported h1 { font-size: 26px; font-weight: 600; color: var(--ink-high); margin-bottom: 18px; }
+.unsupported p { font-size: 16px; line-height: 1.7; color: var(--ink-muted); margin-bottom: 12px; }

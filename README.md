@@ -49,7 +49,7 @@
 | --- | --- |
 | macOS（Apple 芯片 / Intel） | 下载通用版 `.dmg`，将应用拖入「应用程序」。 |
 | Windows（x64） | 下载 `-setup.exe`，运行安装程序。 |
-| Android（ARM64，8.0 及以上） | 用手机浏览器下载 `_android-arm64.apk` 并安装。首次设置与升级说明见 [Android](docs/usage.md#android)。 |
+| Android（ARM64，8.0 及以上，系统 WebView 99 及以上） | 用手机浏览器下载 `_android-arm64.apk` 并安装。首次设置与升级说明见 [Android](docs/usage.md#android)。 |
 
 macOS 版暂未做 Developer ID 签名与公证，首次打开若被系统拦截，请看[安装说明](docs/usage.md#安装)。Windows 版尚未完成真机验收。
 

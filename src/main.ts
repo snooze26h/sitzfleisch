@@ -1574,6 +1574,8 @@ const initialView = params.get("view");
 if (initialView === "today" || initialView === "history" || initialView === "settings") ui.view = initialView;
 
 async function start() {
+  // 手机系统 WebView 太旧时，compat.js 已经把原因写在页面上，这里不再启动。
+  if (app.hasAttribute("data-unsupported")) return;
   // 先拿能力再渲染首屏，手机上不会闪过桌面入口。
   ui.platform = await platformInfo();
   if (ui.platform.mobile) await onBackRequested(handleBack);
