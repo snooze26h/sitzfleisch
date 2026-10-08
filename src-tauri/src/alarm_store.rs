@@ -5,6 +5,9 @@ use serde::{Deserialize, Serialize};
 use crate::alerts::{valid_applied_alarm, AppliedAlarm, MAX_APPLIED_ALARMS};
 
 const MAX_BYTES: u64 = 256 * 1024;
+/// 账本上限是一轮最多排的条数的两倍：同步时先把「旧账本 + 这次新排的」整批记下，再去取消旧的，
+/// 两份同时在账上的那一刻可能接近两倍。
+const MAX_LEDGER: usize = MAX_APPLIED_ALARMS * 2;
 
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -28,7 +31,7 @@ pub fn load(path: &Path) -> io::Result<Vec<AppliedAlarm>> {
     file.take(MAX_BYTES + 1).read_to_end(&mut bytes)?;
     if bytes.len() as u64 > MAX_BYTES { return invalid(); }
     let saved: AlarmFile = serde_json::from_slice(&bytes).map_err(|_| io::ErrorKind::InvalidData)?;
-    if saved.schema != 1 || saved.applied.len() > MAX_APPLIED_ALARMS
+    if saved.schema != 1 || saved.applied.len() > MAX_LEDGER
         || saved.applied.iter().any(|item| !valid_applied_alarm(item)) { return invalid(); }
     let mut identities = std::collections::BTreeSet::new();
     if saved.applied.iter().any(|item| !identities.insert(item.id)) { return invalid(); }
@@ -38,7 +41,7 @@ pub fn load(path: &Path) -> io::Result<Vec<AppliedAlarm>> {
 fn invalid<T>() -> io::Result<T> { Err(io::ErrorKind::InvalidData.into()) }
 
 pub fn save(path: &Path, applied: &[AppliedAlarm]) -> io::Result<()> {
-    if applied.len() > MAX_APPLIED_ALARMS || applied.iter().any(|item| !valid_applied_alarm(item)) { return invalid(); }
+    if applied.len() > MAX_LEDGER || applied.iter().any(|item| !valid_applied_alarm(item)) { return invalid(); }
     let bytes = serde_json::to_vec(&AlarmFile { schema: 1, applied: applied.to_vec() })
         .map_err(|_| io::ErrorKind::InvalidData)?;
     if bytes.len() as u64 > MAX_BYTES { return invalid(); }
@@ -94,6 +97,26 @@ mod tests {
         assert_eq!(fs::read(&path).unwrap(),b"{invalid");
         fs::write(&path,b"{\"schema\":2,\"applied\":[]}").unwrap();
         assert!(load(&path).is_err());
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn ledger_holds_old_and_new_alarms_together_up_to_twice_one_round() {
+        let directory = directory();
+        let path = directory.join("alarms.json");
+        let item = |at: i64| {
+            let kind = core::AlertKind::Stretch;
+            AppliedAlarm { alert: core::PlannedAlert { kind, at, pause_started_at: None },
+                id: crate::alerts::notification_id(kind, at), title: "起来活动一下".into(),
+                body: "已经坐了很久，站起来走两步。".into(), channel: "body".into() }
+        };
+        let full: Vec<_> = (0..MAX_LEDGER as i64).map(|i| item(1_700_000_000 + i * 60)).collect();
+        save(&path, &full).unwrap();
+        assert_eq!(load(&path).unwrap().len(), MAX_LEDGER);
+        let mut over = full.clone();
+        over.push(item(1_800_000_000));
+        assert!(save(&path, &over).is_err(), "超出上限仍然拒写");
+        assert_eq!(load(&path).unwrap().len(), MAX_LEDGER, "拒写不改动原账本");
         fs::remove_dir_all(directory).unwrap();
     }
 
