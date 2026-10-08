@@ -32,6 +32,7 @@ import app.tauri.plugin.JSObject
 import app.tauri.plugin.Plugin
 import org.json.JSONArray
 import org.json.JSONObject
+import java.text.Normalizer
 
 /** 荣耀、小米等系统自带的「获取应用列表」权限；没给时系统可能只交出一部分应用。 */
 private const val APP_LIST_PERMISSION = "com.android.permission.GET_INSTALLED_APPS"
@@ -66,13 +67,6 @@ class SitzfleischPlugin(private val activity: Activity) : Plugin(activity) {
   override fun load(webView: WebView) {
     super.load(webView)
     ensureChannels()
-    // 冷启动：坐功可能正是被屏蔽服务叫起来的。
-    AppBlockStore.acceptSentBack(activity, activity.intent)
-  }
-
-  override fun onNewIntent(intent: Intent) {
-    super.onNewIntent(intent)
-    AppBlockStore.acceptSentBack(activity, intent)
   }
 
   /** 重建同 ID 的渠道会保留用户在系统里选的声音、开关和重要性，所以可以放心重复调用。 */
@@ -272,13 +266,6 @@ class SitzfleischPlugin(private val activity: Activity) : Plugin(activity) {
     }
   }
 
-  override fun onStop() {
-    super.onStop()
-    // 只在亮屏时算「离开」：锁屏再解锁，坐功下面压着的还是刚被拦下的应用。
-    val power = activity.getSystemService(Context.POWER_SERVICE) as PowerManager
-    if (power.isInteractive) AppBlockStore.leftForeground()
-  }
-
   /**
    * 荣耀（以及华为）的「应用启动管理」。自动管理下，从最近任务里划掉坐功会被系统强行停止，
    * 无障碍服务和预排提醒都随之失效；改成手动管理才能保住。只打开不需要额外权限的那个公开页面，
@@ -310,19 +297,7 @@ class SitzfleischPlugin(private val activity: Activity) : Plugin(activity) {
 
   @Command
   fun moveTaskToBack(invoke: Invoke) {
-    if (AppBlockStore.takeCoveringBlockedApp()) {
-      // 屏蔽服务刚送回来的：只退到后台的话，坐功会又被送回前台（荣耀实测），所以直接回到桌面。
-      val home = Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_HOME)
-        .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-      try {
-        activity.startActivity(home)
-        invoke.resolve()
-        return
-      } catch (_: RuntimeException) {
-        // 叫不出桌面时，退回到普通的退到后台。
-      }
-    }
-    if (activity.moveTaskToBack(true)) invoke.resolve()
+    if (AppBlockStore.goHomeIfCovering(activity) || activity.moveTaskToBack(true)) invoke.resolve()
     else invoke.reject("无法把当前任务移到后台。")
   }
 
@@ -360,11 +335,23 @@ class SitzfleischPlugin(private val activity: Activity) : Plugin(activity) {
   private fun appListGranted(): Boolean =
     ContextCompat.checkSelfPermission(activity, APP_LIST_PERMISSION) == PackageManager.PERMISSION_GRANTED
 
-  /** 应用名来自各个应用自己，只留可显示的一行字；按字符截断，不把表情等拆成半个。 */
+  /**
+   * 应用名来自各个应用自己，只留可显示的一行字：统一全半角，去掉零宽、双向控制这类看不见的
+   * 格式字符（它们会打乱显示，也让「输入应用名确认」几乎打不对），各种空白都换成普通空格；
+   * 按字符截断，不把表情等拆成半个。
+   */
   private fun cleanLabel(label: CharSequence?, packageName: String): String {
-    val text = label?.toString().orEmpty()
-      .map { if (Character.isISOControl(it)) ' ' else it }.joinToString("")
-      .replace(Regex("\\s+"), " ").trim()
+    val normalized = Normalizer.normalize(label?.toString().orEmpty(), Normalizer.Form.NFKC)
+    val text = buildString {
+      for (point in normalized.codePoints()) {
+        when (Character.getType(point)) {
+          // 落单的代理项过 JNI 会变成非法 UTF-8，Rust 那头解不开会让整个进程退出。
+          Character.FORMAT.toInt(), Character.SURROGATE.toInt() -> Unit
+          else -> if (Character.isISOControl(point) || Character.isWhitespace(point) || Character.isSpaceChar(point)) append(' ')
+            else appendCodePoint(point)
+        }
+      }
+    }.replace(Regex(" +"), " ").trim()
     val end = text.offsetByCodePoints(0, minOf(MAX_APP_LABEL_CHARS, text.codePointCount(0, text.length)))
     return text.substring(0, end).trim().ifEmpty { packageName }
   }

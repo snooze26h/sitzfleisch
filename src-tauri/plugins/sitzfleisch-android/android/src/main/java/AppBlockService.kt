@@ -33,6 +33,9 @@ class AppBlockService : AccessibilityService() {
   override fun onAccessibilityEvent(event: AccessibilityEvent?) {
     if (event?.eventType != AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED) return
     val packageName = event.packageName?.toString() ?: return
+    // 别的应用（桌面、坐功自己……）的窗口一出现，上一次拦截就算结束：用户马上又打开同一个应用，也要再拦。
+    // 去重只用来合并同一次打开连着发来的几条窗口事件。
+    if (packageName != lastPackage) lastPackage = null
     val rules = AppBlockStore.rules(this)
     if (!rules.enabled || packageName !in rules.packages) return
     if (!isAppScreen(packageName, event.className?.toString())) return

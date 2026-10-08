@@ -6,9 +6,14 @@ import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.content.pm.ResolveInfo
+import android.app.Activity
 import android.os.Build
+import android.os.PowerManager
+import android.os.Process
 import android.os.SystemClock
 import android.provider.Settings
+import android.system.ErrnoException
+import android.system.Os
 import android.telecom.TelecomManager
 import android.view.accessibility.AccessibilityManager
 import java.io.File
@@ -39,7 +44,8 @@ object AppBlockStore {
 
   class Rules(val enabled: Boolean, val packages: Set<String>)
 
-  private data class Stamp(val modified: Long, val length: Long)
+  /** 改名替换会换一个新的 inode：同一毫秒里写了两次、长度又相同，也认得出是新文件。 */
+  private data class Stamp(val inode: Long, val modified: Long, val length: Long)
 
   private class Notice(val packageName: String, val at: Long)
 
@@ -57,7 +63,10 @@ object AppBlockStore {
 
   private fun rulesFile(context: Context) = File(context.applicationContext.filesDir, RULES_FILE)
 
-  private fun stampOf(file: File) = Stamp(file.lastModified(), file.length())
+  private fun stampOf(file: File): Stamp {
+    val inode = try { Os.stat(file.path).st_ino } catch (_: ErrnoException) { -1L }
+    return Stamp(inode, file.lastModified(), file.length())
+  }
 
   fun rules(context: Context): Rules {
     synchronized(lock) {
@@ -90,7 +99,8 @@ object AppBlockStore {
   /** 整份写入：先写临时文件并落盘，再改名替换，另一个进程永远读不到写了一半的规则。 */
   private fun writeRules(context: Context, rules: Rules): Boolean {
     val file = rulesFile(context)
-    val temp = File(file.parentFile, "$RULES_FILE.tmp")
+    // 两个进程都可能写（界面进程推规则、服务进程迁移旧规则）：临时文件按进程分开，互不改名对方写了一半的文件。
+    val temp = File(file.parentFile, "$RULES_FILE.${Process.myPid()}.tmp")
     val text = buildString {
       append(if (rules.enabled) "enabled" else "disabled").append('\n')
       rules.packages.sorted().forEach { append(it).append('\n') }
@@ -146,10 +156,29 @@ object AppBlockStore {
     return covering
   }
 
-  /** 用户自己离开了坐功（回桌面、切到别的应用），之后坐功下面是什么就不再确定。 */
-  fun leftForeground() {
+  /**
+   * 坐功的界面不在前台了。只在亮屏时算「用户自己离开」（回桌面、切到别的应用），之后坐功下面是什么
+   * 就不再确定；锁屏再解锁，坐功下面压着的还是刚被拦下的应用。
+   */
+  fun leftForeground(context: Context) {
+    val power = context.getSystemService(Context.POWER_SERVICE) as? PowerManager
+    if (power?.isInteractive != true) return
     val since = coveringSince
     if (since != 0L && SystemClock.elapsedRealtime() - since > LEAVE_GRACE_MS) coveringSince = 0L
+  }
+
+  /**
+   * 根页面按返回时调用：刚被屏蔽服务送回来的话直接回桌面并返回 true——只退到后台，坐功会又被送回前台
+   * （荣耀实测）。否则返回 false，由调用方照常退到后台。
+   */
+  fun goHomeIfCovering(activity: Activity): Boolean {
+    if (!takeCoveringBlockedApp()) return false
+    return try {
+      activity.startActivity(Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_HOME).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+      true
+    } catch (_: RuntimeException) {
+      false
+    }
   }
 
   /** 坐功自己的包（正式版和测试版）都不进名单，也永远不拦。 */
