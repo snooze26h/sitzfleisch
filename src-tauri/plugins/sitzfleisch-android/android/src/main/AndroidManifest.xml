@@ -19,6 +19,9 @@
         <intent>
             <action android:name="android.settings.SETTINGS" />
         </intent>
+        <!-- 荣耀 / 华为的「应用启动管理」：引导用户关闭坐功的自动管理时直接打开它。 -->
+        <package android:name="com.hihonor.systemmanager" />
+        <package android:name="com.huawei.systemmanager" />
     </queries>
 
     <application>

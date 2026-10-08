@@ -6,7 +6,7 @@
 
 - `platform_info`：返回 `{ os, mobile, features }`，独立于每秒快照。features 为十一个布尔值：`tray`、`website_blocking`、`browser_extension`、`autostart`、`reveal_state_file`、`window_title`、`quit_flow`、`in_app_sound_toggle`、`system_settings`、`exact_alarm_status`、`app_blocking`。Android 只开启后三项；桌面开启前八项。
 - `system_status`：返回 `{ sdkInt, manufacturer, notificationsEnabled, channels, canScheduleExactAlarms, ignoringBatteryOptimizations, appBlockServiceEnabled }`。channels 是数组，每项为 `{ id, name, enabled, importance, vibration, sound }`；sound 可以为 null。
-- `open_system_settings`：参数 `{ target, channelId? }`。target 仅接受 `app_notifications`、`channel`、`exact_alarm`、`battery`、`app_details`、`accessibility`；只有 channel 可携带 channelId，且必须为 timer / body / water / status 之一。
+- `open_system_settings`：参数 `{ target, channelId? }`。target 仅接受 `app_notifications`、`channel`、`exact_alarm`、`battery`、`app_details`、`accessibility`、`startup`（荣耀 / 华为的「应用启动管理」，只开不需要额外权限的公开页面，没有就退到应用详情）；只有 channel 可携带 channelId，且必须为 timer / body / water / status 之一。
 - `installed_apps`：返回 `{ apps, limited, canRequestFullList }`，apps 每项为 `{ packageName, label }`，只含能从桌面打开的应用，去掉坐功自己和永远不拦的应用。`request_app_list_permission` 申请厂商的「获取应用列表」权限，返回是否已允许。`take_block_notice` 返回屏蔽服务刚拦下的包名或 null，取一次就清掉。
 - `move_task_to_back`：保留学习日，将任务移到后台。
 - `notification_status`、`request_notification_permission`：保留 granted / denied / unknown 返回值；请求前先查询，已授权时直接返回。

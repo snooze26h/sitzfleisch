@@ -56,6 +56,8 @@ pub enum SettingsTarget {
     Battery,
     AppDetails,
     Accessibility,
+    /// 荣耀 / 华为的「应用启动管理」；其他手机退到应用详情。
+    Startup,
 }
 
 #[derive(Debug, Serialize)]
@@ -187,7 +189,7 @@ mod tests {
 
     #[test]
     fn settings_accept_only_known_targets_and_own_channels() {
-        for raw in ["app_notifications", "channel", "exact_alarm", "battery", "app_details", "accessibility"] {
+        for raw in ["app_notifications", "channel", "exact_alarm", "battery", "app_details", "accessibility", "startup"] {
             assert!(serde_json::from_value::<SettingsTarget>(serde_json::json!(raw)).is_ok());
         }
         for raw in ["", "other", "android.intent.action.VIEW", &"x".repeat(4096)] {
@@ -201,6 +203,7 @@ mod tests {
         }
         assert!(SettingsRequest::new(SettingsTarget::Battery, Some("water".into())).is_err());
         assert!(SettingsRequest::new(SettingsTarget::Accessibility, Some("water".into())).is_err());
+        assert!(SettingsRequest::new(SettingsTarget::Startup, Some("water".into())).is_err());
         assert_eq!(serde_json::to_value(SettingsRequest::new(
             SettingsTarget::Channel, Some("water".into())
         ).unwrap()).unwrap(), serde_json::json!({"target": "channel", "channelId": "water"}));

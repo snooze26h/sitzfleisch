@@ -6,6 +6,7 @@ import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.PendingIntent
 import android.content.ActivityNotFoundException
+import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
 import android.content.pm.ApplicationInfo
@@ -204,7 +205,7 @@ class SitzfleischPlugin(private val activity: Activity) : Plugin(activity) {
     val channelId = raw.opt("channelId")
     require(channelId == null || channelId == JSONObject.NULL || channelId is String)
     val args = invoke.parseArgs(SettingsArgs::class.java)
-    require(args.target in setOf("app_notifications", "channel", "exact_alarm", "battery", "app_details", "accessibility"))
+    require(args.target in setOf("app_notifications", "channel", "exact_alarm", "battery", "app_details", "accessibility", "startup"))
     if (args.target == "channel") require(args.channelId in channelIds)
     else require(args.channelId == null)
     return args
@@ -218,6 +219,10 @@ class SitzfleischPlugin(private val activity: Activity) : Plugin(activity) {
     }
     val details = Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS)
       .setData(Uri.parse("package:${activity.packageName}"))
+    if (args.target == "startup") {
+      openStartupManager(invoke, details)
+      return
+    }
     val intent = when (args.target) {
       "app_notifications" -> Intent(Settings.ACTION_APP_NOTIFICATION_SETTINGS)
         .putExtra(Settings.EXTRA_APP_PACKAGE, activity.packageName)
@@ -258,6 +263,35 @@ class SitzfleischPlugin(private val activity: Activity) : Plugin(activity) {
     // 只在亮屏时算「离开」：锁屏再解锁，坐功下面压着的还是刚被拦下的应用。
     val power = activity.getSystemService(Context.POWER_SERVICE) as PowerManager
     if (power.isInteractive) AppBlockStore.leftForeground()
+  }
+
+  /**
+   * 荣耀（以及华为）的「应用启动管理」。自动管理下，从最近任务里划掉坐功会被系统强行停止，
+   * 无障碍服务和预排提醒都随之失效；改成手动管理才能保住。只打开不需要额外权限的那个公开页面，
+   * 找不到就退到应用详情。
+   */
+  private fun openStartupManager(invoke: Invoke, fallback: Intent) {
+    val candidates = listOf(
+      ComponentName("com.hihonor.systemmanager", "com.hihonor.systemmanager.startupmgr.ui.StartupNormalAppListActivity"),
+      ComponentName("com.huawei.systemmanager", "com.huawei.systemmanager.startupmgr.ui.StartupNormalAppListActivity"),
+    )
+    for (component in candidates) {
+      try {
+        activity.startActivity(Intent().setComponent(component))
+        invoke.resolve()
+        return
+      } catch (_: ActivityNotFoundException) {
+        // 这台手机没有这个入口，换下一个。
+      } catch (_: SecurityException) {
+        // 系统不许直接打开，换下一个。
+      }
+    }
+    try {
+      activity.startActivity(fallback)
+      invoke.resolve()
+    } catch (_: Exception) {
+      invoke.reject("此设备没有可用的后台管理入口。")
+    }
   }
 
   @Command
