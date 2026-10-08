@@ -28,6 +28,7 @@ import {
   breakRemaining,
   day,
   hasFeature,
+  honorPhone,
   idleNowSeconds,
   iconOf,
   isPaused,
@@ -74,7 +75,7 @@ function startBoard(): string {
     .join("");
   const total = profileTotalMinutes(plan);
   // 应用屏蔽和学习日无关：没开始今天也要看得见它没生效。
-  const warning = appBlockingWarning();
+  const warning = backgroundWarning() || appBlockingWarning();
   return `<section class="start-board${warning ? " with-warning" : ""}" id="start">
       <header class="masthead">
         <h1 class="t-masthead">落座，便是今天</h1>
@@ -108,7 +109,7 @@ function activeBoard(d: Day): string {
   // 四块排成两行两列：这一格 | 今天这一轮月，今日配额 | 今天的总读数。
   // 左右两列上下各自对齐，窗口第一屏里放得下「此刻」和「今天」两个尺度。
   const moon = `<div class="moon-cell moon-stage" id="day-moon">${dayMoon(d)}</div>`;
-  const notificationWarning = reminderWarning() || appBlockingWarning();
+  const notificationWarning = reminderWarning() || backgroundWarning() || appBlockingWarning();
   return `<section class="today-top${ui.compact && suggestion ? " choosing" : ""}${ui.compact && notificationWarning ? " with-warning" : ""}" id="today-top">${focusPanel(d)}${moon}${quotaPanel(d, suggestion?.category ?? null)}${dayReadings(d)}${notificationWarning}</section>
     ${diagramBlock()}
     ${d.ledger.length ? logBlock(d) : ""}`;
@@ -127,6 +128,17 @@ function reminderWarning(): string {
   if (s.channels.some((c) => c.id === "timer" && !c.enabled)) return warning("计时提醒已关闭，到点不会提醒", "去设置", "app_notifications");
   if (!s.canScheduleExactAlarms) return warning("精确闹钟未允许，锁屏后的提醒可能晚到", "去设置", "exact_alarm");
   return "";
+}
+
+/**
+ * 系统不许坐功在后台运行：划掉坐功就会被强行停止，预排的提醒和屏蔽服务一起失效。
+ * 只在它真会坏事的时候说：学习日进行中，或者应用屏蔽开着。
+ */
+function backgroundWarning(): string {
+  const s = ui.platform?.mobile ? ui.systemStatus : null;
+  const b = appBlocking(prefs());
+  if (!s?.backgroundRestricted || (!day() && !(b.enabled && b.apps.length))) return "";
+  return warning("后台活动未允许，划掉坐功后提醒和屏蔽都会失效", "去设置", honorPhone() ? "startup" : "app_details");
 }
 
 /** 屏蔽开着、名单不空，系统里的无障碍服务却关着（常见于被一键清理或强行停止之后）。 */

@@ -1,6 +1,7 @@
 package com.snooze26h.sitzfleisch.android
 
 import android.app.Activity
+import android.app.ActivityManager
 import android.app.AlarmManager
 import android.app.NotificationChannel
 import android.app.NotificationManager
@@ -195,6 +196,11 @@ class SitzfleischPlugin(private val activity: Activity) : Plugin(activity) {
       Build.VERSION.SDK_INT < Build.VERSION_CODES.S || alarmManager.canScheduleExactAlarms())
     result.put("ignoringBatteryOptimizations", powerManager.isIgnoringBatteryOptimizations(activity.packageName))
     result.put("appBlockServiceEnabled", AppBlockStore.serviceEnabled(activity))
+    // 「后台活动」没被允许（荣耀「应用启动管理」里关着就是这样）：划掉坐功时系统会强行停止它，
+    // 预排的提醒和无障碍服务都会被一起清掉。
+    val activityManager = activity.getSystemService(Context.ACTIVITY_SERVICE) as ActivityManager
+    result.put("backgroundRestricted",
+      Build.VERSION.SDK_INT >= Build.VERSION_CODES.P && activityManager.isBackgroundRestricted)
     invoke.resolve(result)
   }
 

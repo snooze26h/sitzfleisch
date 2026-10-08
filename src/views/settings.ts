@@ -10,7 +10,7 @@ import { esc, meter, shortNameFrom } from "../format";
 import { icon } from "../icons";
 import { PROJECT_ICON_CHOICES } from "../project-icons";
 import { btn, labelled, select, stepper, toggle } from "../components";
-import { BLOCK_OPTIONS, BREAK_OPTIONS, IDLE_OPTIONS, day, hasFeature, prefs, profileTotalMinutes, ui, withValue } from "../state";
+import { BLOCK_OPTIONS, BREAK_OPTIONS, IDLE_OPTIONS, day, hasFeature, honorPhone, prefs, profileTotalMinutes, ui, withValue } from "../state";
 
 /** 设置的分区：id → 标题 + 图标。侧栏在设置页直接列它们，一区一页。 */
 const SETTINGS_SECTIONS: [string, string, string][] = [
@@ -263,11 +263,6 @@ function websiteBlock(): string {
 
 // ---------- 应用屏蔽（手机） ----------
 
-/** 荣耀、华为默认「自动管理」新应用：从最近任务里划掉就强行停止，提醒和屏蔽服务都会被一起清掉。 */
-function honorPhone(): boolean {
-  return /honor|huawei|荣耀|华为/i.test(ui.systemStatus?.manufacturer ?? "");
-}
-
 function appBlockPanel(): string {
   const b = appBlocking(prefs());
   const service = ui.systemStatus?.appBlockServiceEnabled ?? null;
@@ -284,10 +279,16 @@ function appBlockPanel(): string {
   ];
   // Android 13 起，浏览器下载安装的应用默认不许开无障碍；系统会提示「受限设置」。
   if (service === false) rows.push(settingRow("开关是灰的", "系统提示「受限设置」时，到应用信息页点右上角 ⋮，选「允许受限制的设置」，再回来打开。", open("app_details", "应用信息"), "guidance"));
-  // 屏蔽服务跟着坐功的进程走：系统把坐功强行停止，服务就被关掉，要用户自己再开。先把这条路堵上。
-  rows.push(honorPhone()
-    ? settingRow("划掉后也生效", "荣耀手机默认「自动管理」坐功，从最近任务里划掉就会强行停止它，屏蔽服务随之关闭。到「应用启动管理」找到坐功，关闭自动管理，允许自启动、关联启动和后台活动。", open("startup", "应用启动管理"), "guidance")
-    : settingRow("划掉后也生效", "部分手机从最近任务里划掉应用时会强行停止它，屏蔽服务随之关闭。在系统的应用设置里允许坐功自启动和后台活动，并在最近任务里锁定坐功。", open("app_details", "应用信息"), "guidance"));
+  // 屏蔽服务跟着坐功的进程走：系统不许坐功在后台运行时，划掉坐功就会被强行停止，服务也被关掉，
+  // 要用户自己再开。坐功读得到「后台活动没被允许」这一状态，据实说明。
+  const restricted = ui.systemStatus?.backgroundRestricted ?? null;
+  const swipeDetail = restricted === false
+    ? "已允许后台活动：从最近任务里划掉坐功只会移出列表，屏蔽照常生效。"
+    : honorPhone()
+      ? `${restricted ? "坐功的后台活动没有允许：" : "荣耀手机默认不许新应用在后台运行，"}从最近任务里划掉或一键清理时，系统会强行停止坐功，屏蔽服务随之关闭。到「应用启动管理」找到坐功，关闭自动管理，并把自启动、关联启动、后台活动三个开关都打开。`
+      : `${restricted ? "坐功的后台活动被系统限制了：" : "部分手机上，"}从最近任务里划掉坐功时系统会强行停止它，屏蔽服务随之关闭。在应用信息的电池或后台设置里允许坐功在后台运行。`;
+  rows.push(settingRow("划掉后也生效", swipeDetail,
+    honorPhone() ? open("startup", "应用启动管理") : restricted === false ? "" : open("app_details", "应用信息"), "guidance"));
   const list = b.apps.length
     ? `<div class="blocking-rule-list">${b.apps.map((app) => `<div class="blocking-rule">
         <span class="rule-content"><span class="rule-value">${esc(app.label)}</span><span class="rule-kind mono">${esc(app.package_name)}</span></span>
@@ -377,9 +378,12 @@ function mobileNotificationPanel(): string {
     : s.ignoringBatteryOptimizations ? "已设为不限制。"
     : "未设为不限制。到点提醒不受它影响；如果坐功在后台常被清理，可以改为不限制。", s && !s.ignoringBatteryOptimizations ? open("battery") : ""));
   const honor = honorPhone();
+  const status = !s ? "" : s.backgroundRestricted
+    ? "后台活动未允许：从最近任务里划掉坐功时，系统会强行停止它，之后的提醒都不会响。"
+    : "已允许后台活动。";
   const guidance = honor
-    ? "点「去设置」到「应用启动管理」，找到坐功，关闭自动管理，允许自启动、关联启动和后台活动；否则从最近任务里划掉坐功，系统会强行停止它，之后的提醒都不会响。最近任务里下拉坐功卡片并锁定，避免一键清理。"
-    : "在系统的应用或电池设置中允许坐功后台活动。可在最近任务中锁定坐功，避免一键清理。菜单名称以手机实际显示为准。";
+    ? `${status}点「去设置」到「应用启动管理」，找到坐功，关闭自动管理，并把自启动、关联启动、后台活动三个开关都打开。最近任务里下拉坐功卡片并锁定，避免一键清理。`
+    : `${status}在系统的应用或电池设置中允许坐功后台活动。可在最近任务中锁定坐功，避免一键清理。菜单名称以手机实际显示为准。`;
   rows.push(settingRow("后台运行", guidance, open(honor ? "startup" : "app_details"), "background-guidance"));
   return `<div class="reminder-settings">
     <div class="reminder-check"><p role="status">${ui.systemStatusLoading ? "正在读取系统状态…" : ui.systemStatusError ? "暂时无法读取提醒状态，请重新检查。" : "从系统设置返回后，会自动重新检查。"}</p>${btn("重新检查", { kind: "quiet", action: "system-recheck", disabled: ui.systemStatusLoading })}</div>

@@ -90,6 +90,8 @@ pub struct SystemStatus {
     pub ignoring_battery_optimizations: bool,
     /// 坐功的无障碍服务在系统里是否打开；应用屏蔽靠它才能生效。
     pub app_block_service_enabled: bool,
+    /// 系统不许坐功在后台运行：划掉坐功会被强行停止，提醒和屏蔽服务一起失效。
+    pub background_restricted: bool,
 }
 
 #[derive(Debug, Deserialize, Serialize)]

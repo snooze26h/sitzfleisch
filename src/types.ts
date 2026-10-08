@@ -40,6 +40,8 @@ export interface SystemStatus {
   ignoringBatteryOptimizations: boolean;
   /** 坐功的无障碍服务在系统里开着没有；应用屏蔽靠它生效。 */
   appBlockServiceEnabled: boolean;
+  /** 系统不许坐功在后台运行（荣耀「应用启动管理」里没允许后台活动）：划掉就会被强行停止。 */
+  backgroundRestricted: boolean;
 }
 
 /** 应用选择器里的一项：手机上能从桌面打开的应用（外壳 platform::InstalledApp）。 */

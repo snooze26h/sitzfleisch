@@ -114,6 +114,11 @@ export function hasFeature(feature: keyof PlatformInfo["features"]): boolean {
   return ui.platform?.features[feature] ?? false;
 }
 
+/** 荣耀、华为手机：后台运行由「应用启动管理」决定，能直接打开那一页。 */
+export function honorPhone(): boolean {
+  return /honor|huawei|荣耀|华为/i.test(ui.systemStatus?.manufacturer ?? "");
+}
+
 /**
  * 当前这个对话框正在跑一次异步动作吗。**显示与事件处理必须共用这一条判据**：
  * 只看 `ui.dialogBusy !== null` 的话，旧实例还在 pending 时新框会画成可点的样子，
