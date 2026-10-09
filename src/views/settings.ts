@@ -384,9 +384,10 @@ function mobileNotificationPanel(): string {
     : s.ignoringBatteryOptimizations ? "已设为不限制。"
     : "未设为不限制。到点提醒不受它影响；如果坐功在后台常被清理，可以改为不限制。", s && !s.ignoringBatteryOptimizations ? open("battery") : ""));
   const honor = honorPhone();
-  const status = !s ? "" : s.backgroundRestricted
+  // 读不到（Android 8/8.1）时不下结论，照常给出完整的设置步骤。
+  const status = s?.backgroundRestricted === true
     ? "后台活动未允许：从最近任务里划掉坐功时，系统会强行停止它，之后的提醒都不会响。"
-    : "已允许后台活动。";
+    : s?.backgroundRestricted === false ? "已允许后台活动。" : "";
   const allowed = s?.backgroundRestricted === false;
   const guidance = honor
     ? allowed

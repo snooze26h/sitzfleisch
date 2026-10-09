@@ -63,7 +63,7 @@ function validSystemStatus(value: unknown): value is SystemStatus {
     && typeof s.notificationsEnabled === "boolean" && typeof s.canScheduleExactAlarms === "boolean"
     && typeof s.ignoringBatteryOptimizations === "boolean" && typeof s.appBlockServiceEnabled === "boolean"
     && typeof s.appBlockServiceRunning === "boolean"
-    && typeof s.backgroundRestricted === "boolean"
+    && (s.backgroundRestricted === null || typeof s.backgroundRestricted === "boolean")
     && Array.isArray(s.channels) && s.channels.length <= 16
     && s.channels.every((c) => c !== null && typeof c === "object" && NOTIFICATION_CHANNELS.includes(c.id)
       && typeof c.name === "string" && c.name.length <= 128 && typeof c.enabled === "boolean"

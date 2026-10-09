@@ -4,7 +4,7 @@
 // 可加 &platform=android 预览平台能力，&clock=<带时区的 ISO 时间> 固定截图时钟；手机下 &system=blocked|lowered 预览提醒受限。
 // 应用屏蔽（手机）：&apps=off|none 预览开关关着或从没设置过，&a11y=off|stalled 预览无障碍服务没开或开着却没在运行，
 // &applist=limited 预览系统只给部分应用，&notice=<包名> 预览刚被送回坐功的提示（也可在控制台设 qaBlockNotice），
-// &bg=restricted 预览后台活动没被允许（划掉就会被强行停止）。
+// &bg=restricted 预览后台活动没被允许（划掉就会被强行停止）；&bg=unknown 预览 Android 8/8.1 读不到这一状态。
 
 import type {
   AppBlocking,
@@ -77,7 +77,7 @@ const systemFixture: SystemStatus = {
   ignoringBatteryOptimizations: false,
   appBlockServiceEnabled: params.get("a11y") !== "off",
   appBlockServiceRunning: params.get("a11y") !== "off" && params.get("a11y") !== "stalled",
-  backgroundRestricted: params.get("bg") === "restricted",
+  backgroundRestricted: params.get("bg") === "unknown" ? null : params.get("bg") === "restricted",
 };
 
 // 预览用的手机应用；名字只为看排版和搜索，不读取任何真实设备。

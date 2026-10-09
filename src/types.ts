@@ -42,8 +42,8 @@ export interface SystemStatus {
   appBlockServiceEnabled: boolean;
   /** 系统此刻是否真的连着这个服务：开关开着、服务却断了（常见于刚升级完）时为 false。 */
   appBlockServiceRunning: boolean;
-  /** 系统不许坐功在后台运行（荣耀「应用启动管理」里没允许后台活动）：划掉就会被强行停止。 */
-  backgroundRestricted: boolean;
+  /** 系统不许坐功在后台运行（荣耀「应用启动管理」里没允许后台活动）：划掉就会被强行停止。Android 8/8.1 读不到，为 null。 */
+  backgroundRestricted: boolean | null;
 }
 
 /** 应用选择器里的一项：手机上能从桌面打开的应用（外壳 platform::InstalledApp）。 */

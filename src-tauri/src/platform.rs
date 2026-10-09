@@ -93,7 +93,8 @@ pub struct SystemStatus {
     /// 系统此刻是否真的连着这个服务；开关开着却断了时为 false。
     pub app_block_service_running: bool,
     /// 系统不许坐功在后台运行：划掉坐功会被强行停止，提醒和屏蔽服务一起失效。
-    pub background_restricted: bool,
+    /// Android 8/8.1 读不到这一状态，为 None（未知），不能当成已允许。
+    pub background_restricted: Option<bool>,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -211,6 +212,21 @@ mod tests {
         assert_eq!(serde_json::to_value(SettingsRequest::new(
             SettingsTarget::Channel, Some("water".into())
         ).unwrap()).unwrap(), serde_json::json!({"target": "channel", "channelId": "water"}));
+    }
+
+    #[test]
+    fn background_state_may_be_unknown_on_android_8_and_stays_unknown_for_the_ui() {
+        let status = |restricted: serde_json::Value| serde_json::json!({
+            "sdkInt": 26, "manufacturer": "HONOR", "notificationsEnabled": true, "channels": [],
+            "canScheduleExactAlarms": true, "ignoringBatteryOptimizations": false,
+            "appBlockServiceEnabled": true, "appBlockServiceRunning": true, "backgroundRestricted": restricted,
+        });
+        for (raw, expected) in [(serde_json::Value::Null, None), (serde_json::json!(true), Some(true)), (serde_json::json!(false), Some(false))] {
+            let parsed: SystemStatus = serde_json::from_value(status(raw.clone())).unwrap();
+            assert_eq!(parsed.background_restricted, expected);
+            // 原样交给界面：读不到就是 null，不会被补成「已允许」。
+            assert_eq!(serde_json::to_value(&parsed).unwrap()["backgroundRestricted"], raw);
+        }
     }
 
     #[test]
