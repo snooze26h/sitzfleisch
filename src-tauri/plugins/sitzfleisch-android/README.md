@@ -24,7 +24,7 @@ Rust 的 StatusModel 保存固定计时终点或暂停起点，以整体相等�
 
 ## 应用屏蔽
 
-开关和名单存在偏好的 `app_blocking` 里（`{ enabled, apps: [{ package_name, label }] }`，从没开过时不写入存档），由 core 校验。心跳在每轮同步时把 `{ enabled, packages }` 推给 `setBlockRules`，按整体相等去重，失败与提醒同步一起退避重试；保护模式下不推，免得出厂偏好覆盖原生侧的规则。`AppBlockService` 跑在独立进程 `:blocker` 里：划掉坐功时界面进程按设计退出（见 `android_shutdown.rs`），屏蔽服务不跟着断。两个进程只通过文件和启动参数交换信息：插件把规则整份写进 `files/app_blocking_rules`（临时文件落盘后改名），服务按文件修改时间与大小判断是否重读；0.14.0 存在 SharedPreferences 里的规则在第一次读取时迁移。系统只为无障碍服务拉起进程、Rust 还没运行时，服务照样读得到。
+开关和名单存在偏好的 `app_blocking` 里（`{ enabled, apps: [{ package_name, label }] }`，从没开过时不写入存档），由 core 校验。心跳在每轮同步时把 `{ enabled, packages }` 推给 `setBlockRules`，按整体相等去重，失败与提醒同步一起退避重试；保护模式下不推，免得出厂偏好覆盖原生侧的规则。`AppBlockService` 跑在独立进程 `:blocker` 里：划掉坐功时界面进程按设计退出（见 `android_shutdown.rs`），屏蔽服务不跟着断。两个进程只通过文件和启动参数交换信息。规则只由界面进程写：插件把规则整份写进 `files/app_blocking_rules`（临时文件落盘后改名），服务只读，按文件的 inode、修改时间与大小判断是否重读；新文件还不存在时（从 0.14.0 升级后还没打开过坐功），服务照旧读 0.14.0 存在 SharedPreferences 里的规则。送回坐功时，服务把拦下的应用和时间写进 `files/app_blocking_sent_back`，附一个一次性口令；打开坐功的启动参数里只带口令，界面进程核对一致才提示。主界面是导出的，别的应用可以带参数打开它，但伪造不了口令。系统只为无障碍服务拉起进程、Rust 还没运行时，服务照样读得到。
 
 `AppBlockService` 是只订阅 `typeWindowStateChanged` 的无障碍服务，`canRetrieveWindowContent=false`，组件不导出、只许系统绑定。名单里的应用有界面到前台时（事件的类名能在该应用里解析为 Activity；悬浮窗、输入法等窗口不算），先打开桌面、再把坐功放到上面，并在启动参数里带上被拦的包名和时刻，界面进程只接受名单里、一分钟内的这两个参数，据此提示；同一应用 1.5 秒内只拦一次。荣耀上实测，送回后按返回若只退到后台，坐功会又被送回前台，所以 `moveTaskToBack` 在坐功刚被送回、可能压着被拦下的应用时，改为直接打开桌面；用户亮屏离开坐功（送回后 2 秒内迟到的离开回调不算）就清掉这个标记。桌面、系统界面、设置、拨号和坐功自己永远不拦。选择单的应用列表来自 `<queries>` 声明的 LAUNCHER 意图，不申请 `QUERY_ALL_PACKAGES`；荣耀、小米等系统另有 `com.android.permission.GET_INSTALLED_APPS`，只在用户点「允许读取」时申请。
 

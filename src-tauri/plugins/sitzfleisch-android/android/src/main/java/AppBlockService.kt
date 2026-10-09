@@ -93,11 +93,11 @@ class AppBlockService : AccessibilityService() {
   private fun sendBack(packageName: String) {
     val home = Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_HOME)
       .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-    // 拦的是谁、什么时候拦的，随启动参数交给界面进程：界面据此提示，并让返回键直接回桌面。
+    // 拦的是谁写进私有文件，启动参数里只带一次性口令：界面进程核对一致后才提示，并让返回键直接回桌面。
+    val token = AppBlockStore.recordSentBack(this, packageName)
     val zuogong = packageManager.getLaunchIntentForPackage(this.packageName)
       ?.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-      ?.putExtra(AppBlockStore.EXTRA_BLOCKED_PACKAGE, packageName)
-      ?.putExtra(AppBlockStore.EXTRA_SENT_BACK_AT, SystemClock.elapsedRealtime())
+      ?.apply { if (token != null) putExtra(AppBlockStore.EXTRA_SENT_BACK_TOKEN, token) }
     try {
       if (zuogong != null) startActivities(arrayOf(home, zuogong)) else startActivity(home)
     } catch (_: RuntimeException) {

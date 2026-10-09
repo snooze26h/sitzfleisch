@@ -9,7 +9,6 @@ import android.content.pm.ResolveInfo
 import android.app.Activity
 import android.os.Build
 import android.os.PowerManager
-import android.os.Process
 import android.os.SystemClock
 import android.provider.Settings
 import android.system.ErrnoException
@@ -19,23 +18,26 @@ import android.view.accessibility.AccessibilityManager
 import java.io.File
 import java.io.FileOutputStream
 import java.io.IOException
+import java.security.MessageDigest
+import java.security.SecureRandom
 
 /**
  * 应用屏蔽在原生侧的状态。
  *
  * 屏蔽服务跑在自己的进程（`:blocker`）里：划掉坐功时界面进程会退出，服务进程不受影响，
  * 屏蔽不留空档。所以两边只能通过文件和启动参数交换信息——
- * - 规则：界面进程把 Rust 推来的开关和包名整份写进文件（先写临时文件再改名），服务进程按文件
- *   修改时间与大小判断要不要重读。系统只为服务拉起进程、Rust 还没运行时也照样读得到。
- * - 「刚把谁送了回来」：服务在打开坐功的启动参数里带上，界面进程收到后记在内存里。
+ * - 规则：只有界面进程写。它把 Rust 推来的开关和包名整份写进文件（先写临时文件再改名），服务进程
+ *   只读，按文件的 inode、修改时间与大小判断要不要重读。系统只为服务拉起进程、Rust 还没运行时也照样读得到。
+ * - 「刚把谁送了回来」：服务写进私有文件，并附一个一次性口令；打开坐功的启动参数里只带口令。
+ *   主界面是导出的，别的应用也能带着参数打开它，但读不到这个文件，也猜不中口令。
  */
 object AppBlockStore {
   private const val RULES_FILE = "app_blocking_rules"
   /** 0.14.0 把规则存在这里；新版第一次读规则时迁移过来。 */
   private const val LEGACY_PREFS = "sitzfleisch_app_blocking"
   const val MAX_PACKAGES = 200
-  const val EXTRA_BLOCKED_PACKAGE = "com.snooze26h.sitzfleisch.extra.BLOCKED_PACKAGE"
-  const val EXTRA_SENT_BACK_AT = "com.snooze26h.sitzfleisch.extra.SENT_BACK_AT"
+  const val EXTRA_SENT_BACK_TOKEN = "com.snooze26h.sitzfleisch.extra.SENT_BACK_TOKEN"
+  private const val SENT_BACK_FILE = "app_blocking_sent_back"
   /** 被送回坐功之后，界面在这段时间内回到前台才说明原因；再晚就是旧事了。 */
   private const val NOTICE_TTL_MS = 60_000L
   /** 送回坐功后这段时间内收到的「离开坐功」，是上一次离开迟到的回调，不算数。 */
@@ -50,6 +52,7 @@ object AppBlockStore {
   private class Notice(val packageName: String, val at: Long)
 
   private val lock = Any()
+  private val random by lazy { SecureRandom() }
   private var cached: Rules? = null
   private var cachedStamp: Stamp? = null
   @Volatile private var notice: Notice? = null
@@ -71,7 +74,7 @@ object AppBlockStore {
   fun rules(context: Context): Rules {
     synchronized(lock) {
       val file = rulesFile(context)
-      if (!file.exists()) return migrateLegacy(context)
+      if (!file.exists()) return legacyRules(context)
       val stamp = stampOf(file)
       cached?.let { if (cachedStamp == stamp) return it }
       val lines = try { file.readLines() } catch (_: IOException) { return cached ?: Rules(false, emptySet()) }
@@ -85,22 +88,23 @@ object AppBlockStore {
     }
   }
 
-  /** 旧版的规则只在新文件还不存在时读一次，写成新文件后旧的就不再使用。 */
-  private fun migrateLegacy(context: Context): Rules {
+  /**
+   * 新文件还不存在（从 0.14.0 升级后坐功还没打开过）时，照旧读当时存的规则。界面进程第一次推规则
+   * 就会写出新文件，之后不再用它。这里只读不写：服务进程若把旧规则写成文件，可能恰好盖掉界面进程
+   * 刚写下的新规则，而 Rust 以为已经推过，不会再推。
+   */
+  private fun legacyRules(context: Context): Rules {
     val prefs = context.applicationContext.getSharedPreferences(LEGACY_PREFS, Context.MODE_PRIVATE)
-    val rules = Rules(
+    return Rules(
       prefs.getBoolean("enabled", false),
       prefs.getStringSet("packages", null).orEmpty().filter(::validPackageName).take(MAX_PACKAGES).toSet(),
     )
-    if (rules.enabled || rules.packages.isNotEmpty()) writeRules(context, rules)
-    return rules
   }
 
-  /** 整份写入：先写临时文件并落盘，再改名替换，另一个进程永远读不到写了一半的规则。 */
+  /** 整份写入：先写临时文件并落盘，再改名替换，服务进程永远读不到写了一半的规则。只在界面进程里调用。 */
   private fun writeRules(context: Context, rules: Rules): Boolean {
     val file = rulesFile(context)
-    // 两个进程都可能写（界面进程推规则、服务进程迁移旧规则）：临时文件按进程分开，互不改名对方写了一半的文件。
-    val temp = File(file.parentFile, "$RULES_FILE.${Process.myPid()}.tmp")
+    val temp = File(file.parentFile, "$RULES_FILE.tmp")
     val text = buildString {
       append(if (rules.enabled) "enabled" else "disabled").append('\n')
       rules.packages.sorted().forEach { append(it).append('\n') }
@@ -126,19 +130,48 @@ object AppBlockStore {
   }
 
   /**
-   * 界面进程收到打开坐功的启动参数时调用：是屏蔽服务送回来的，就记下拦的是谁、坐功正压在它上面。
-   * 主界面是导出的，别的应用也能带着这两个参数打开它，所以只认名单里的应用、只认一分钟内的。
+   * 屏蔽服务送回之前调用（服务进程）：把拦的是谁、什么时候拦的写进私有文件，返回一次性口令，
+   * 随打开坐功的启动参数带过去。写不成就返回 null：照样送回，只是不提示。
+   */
+  fun recordSentBack(context: Context, packageName: String): String? {
+    val token = ByteArray(16).also(random::nextBytes).joinToString("") { "%02x".format(it) }
+    val file = File(context.applicationContext.filesDir, SENT_BACK_FILE)
+    val temp = File(file.parentFile, "$SENT_BACK_FILE.tmp")
+    return try {
+      FileOutputStream(temp).use { it.write("$token\n$packageName\n${SystemClock.elapsedRealtime()}\n".toByteArray(Charsets.UTF_8)) }
+      if (temp.renameTo(file)) token else null
+    } catch (_: IOException) {
+      temp.delete()
+      null
+    }
+  }
+
+  /**
+   * 界面进程收到打开坐功的启动参数时调用：口令和屏蔽服务刚写下的一致，才记下拦的是谁、坐功正压在它上面。
+   * 另外只认屏蔽开着、名单里的应用，只认一分钟内的。
    */
   fun acceptSentBack(context: Context, intent: Intent?) {
-    if (intent == null || !intent.hasExtra(EXTRA_BLOCKED_PACKAGE)) return
-    val packageName = intent.getStringExtra(EXTRA_BLOCKED_PACKAGE)
-    val at = intent.getLongExtra(EXTRA_SENT_BACK_AT, -1L)
-    // 读一次就去掉：界面重建时会拿到同一份启动参数，不能再提示一遍。
-    intent.removeExtra(EXTRA_BLOCKED_PACKAGE)
-    intent.removeExtra(EXTRA_SENT_BACK_AT)
+    val token = try {
+      intent?.getStringExtra(EXTRA_SENT_BACK_TOKEN)?.also {
+        // 读一次就去掉：界面重建时会拿到同一份启动参数，不能再提示一遍。
+        intent.removeExtra(EXTRA_SENT_BACK_TOKEN)
+      }
+    } catch (_: RuntimeException) {
+      // 别的应用塞进来解不开的参数时，读参数本身就会抛异常；不能让它把坐功启动弄崩。
+      null
+    } ?: return
+    val lines = try {
+      File(context.applicationContext.filesDir, SENT_BACK_FILE).takeIf { it.length() in 1..1024 }?.readLines()
+    } catch (_: IOException) {
+      null
+    } ?: return
+    if (lines.size < 3 || !MessageDigest.isEqual(lines[0].toByteArray(), token.toByteArray())) return
+    val packageName = lines[1]
+    val at = lines[2].toLongOrNull() ?: return
     val age = SystemClock.elapsedRealtime() - at
-    if (packageName == null || !validPackageName(packageName) || at <= 0L || age < 0L || age > NOTICE_TTL_MS) return
-    if (packageName !in rules(context).packages) return
+    if (!validPackageName(packageName) || at <= 0L || age < 0L || age > NOTICE_TTL_MS) return
+    val rules = rules(context)
+    if (!rules.enabled || packageName !in rules.packages) return
     notice = Notice(packageName, at)
     coveringSince = at
   }
