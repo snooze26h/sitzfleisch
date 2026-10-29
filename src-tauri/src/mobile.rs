@@ -3,7 +3,7 @@ use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::path::{Path, PathBuf};
 use std::sync::{atomic::{AtomicBool, AtomicI64, Ordering}, Arc, Mutex};
 use std::thread::{self, JoinHandle, Thread};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use tauri::{AppHandle, Manager};
 use tauri_plugin_notification::{NotificationExt, PermissionState, Schedule};
@@ -23,6 +23,7 @@ struct SyncState {
     cold: bool,
     last_error: Option<String>,
     retry_after: i64,
+    clock_offset: Option<i64>,
 }
 
 /// 移动端状态独立；通知和闹钟共用一把专用锁，只由心跳执行原生同步。
@@ -63,7 +64,7 @@ impl MobileShared {
             heartbeat: Mutex::new(None), alarms_path,
             shutdown: Arc::new(HeartbeatShutdown::new()),
             synchronizer: Mutex::new(SyncState { applied, status: None, block_rules: None, cold: true,
-                last_error: None, retry_after: 0 }),
+                last_error: None, retry_after: 0, clock_offset: None }),
         }
     }
 }
@@ -136,6 +137,7 @@ pub fn on_lifecycle(app: &AppHandle, suspended: bool) {
         mobile.status_stale.store(true, Ordering::SeqCst);
     }
     mark_dirty(app);
+    if !suspended { app.state::<Shared>().sync.lock().unwrap().wake(); }
 }
 
 fn wall_seconds() -> i64 {
@@ -147,7 +149,9 @@ fn persist(mobile: &MobileShared, ledger: &[AppliedAlarm]) -> Result<(), String>
 }
 
 fn sync_alarms(app: &AppHandle, mobile: &MobileShared, state: &mut SyncState,
-    desired: &[AppliedAlarm], now: i64) -> Result<(), String> {
+    desired: &[AppliedAlarm], now: i64, clock_offset: i64) -> Result<(), String> {
+    let began = Instant::now();
+    let logical_now = || now.saturating_add(began.elapsed().as_secs().min(i64::MAX as u64) as i64);
     // 先退出已触发的本地项再补充 horizon 尾部，避免「170 个旧项 + 一个新项」超出存档上限。
     let before = state.applied.len();
     state.applied.retain(|saved| saved.alert.at > now.saturating_add(1));
@@ -175,7 +179,7 @@ fn sync_alarms(app: &AppHandle, mobile: &MobileShared, state: &mut SyncState,
     persist(mobile, &ahead)?;
     for item in delta.cancel {
         // 原生调用可能排队；再次检查边界，不能把这期间刚弹出的横幅撤掉。
-        if item.alert.at > wall_seconds().saturating_add(1) {
+        if item.alert.at > logical_now().saturating_add(1) {
             plugin_call(|| app.notification().cancel(vec![item.id]))?;
         }
         state.applied.retain(|saved| saved != &item);
@@ -188,8 +192,8 @@ fn sync_alarms(app: &AppHandle, mobile: &MobileShared, state: &mut SyncState,
             // 精确闹钟被关掉时照样排：通知插件会改用非精确的系统闹钟，可能晚到，但不会一条都不响。
             // 今天页和「设置 → 提醒」会提示用户去打开。
             for item in delta.schedule {
-                if item.alert.at <= wall_seconds().saturating_add(1) { continue; }
-                let Ok(date) = alerts::schedule_date(item.alert.at) else {
+                if item.alert.at <= logical_now().saturating_add(1) { continue; }
+                let Ok(date) = alerts::schedule_date(alerts::device_alarm_time(item.alert.at, clock_offset)) else {
                     outcome = Err("提醒时刻超出系统范围。".to_owned());
                     break;
                 };
@@ -203,7 +207,7 @@ fn sync_alarms(app: &AppHandle, mobile: &MobileShared, state: &mut SyncState,
         }
     }
     // 收尾：账本只留真正排上、而且还没到点的项。
-    let cutoff = wall_seconds().saturating_add(1);
+    let cutoff = logical_now().saturating_add(1);
     state.applied.retain(|saved| saved.alert.at > cutoff);
     persist(mobile, &state.applied)?;
     if outcome.is_ok() { state.cold = false; }
@@ -217,6 +221,19 @@ pub fn sync(app: &AppHandle, desired: Vec<AppliedAlarm>, desired_status: StatusM
     let mobile = app.state::<MobileShared>();
     let forced = mobile.dirty.swap(false, Ordering::SeqCst);
     let mut state = mobile.synchronizer.lock().unwrap();
+    let desired_offset = {
+        let shared = app.state::<Shared>();
+        let sync = shared.sync.lock().unwrap();
+        if sync.active() { sync.now().saturating_sub(wall_seconds()) } else { 0 }
+    };
+    // 秒级采样有一秒抖动；明显校时才重排同ID闹钟，防止手机快钟把未来提醒当成过期项。
+    if state.clock_offset.is_none_or(|old| old.abs_diff(desired_offset) >= 2) {
+        state.clock_offset = Some(desired_offset);
+        state.cold = true;
+        state.status = None;
+    }
+    let clock_offset = state.clock_offset.unwrap_or(0);
+    let desired_status = desired_status.on_device_clock(clock_offset);
     if mobile.status_stale.swap(false, Ordering::SeqCst) { state.status = None; }
     // 上次失败后先等一等；状态有变化（开格、回前台、刚授权、改了屏蔽名单）就立刻重试。
     if !forced && now < state.retry_after { return; }
@@ -226,7 +243,7 @@ pub fn sync(app: &AppHandle, desired: Vec<AppliedAlarm>, desired_status: StatusM
         rules_result = plugin_call(|| app.sitzfleisch_android().set_block_rules(&rules));
         if rules_result.is_ok() { state.block_rules = Some(rules); }
     }
-    let mut result = sync_alarms(app, &mobile, &mut state, &desired, now);
+    let mut result = sync_alarms(app, &mobile, &mut state, &desired, now, clock_offset);
     if result.is_ok() { result = rules_result; }
     if state.status.as_ref() != Some(&desired_status) {
         let now_ms = SystemTime::now().duration_since(UNIX_EPOCH)

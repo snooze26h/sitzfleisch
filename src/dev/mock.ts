@@ -5,6 +5,9 @@
 // 应用屏蔽（手机）：&apps=off|none 预览开关关着或从没设置过，&a11y=off|stalled 预览无障碍服务没开或开着却没在运行，
 // &applist=limited 预览系统只给部分应用，&notice=<包名> 预览刚被送回坐功的提示（也可在控制台设 qaBlockNotice），
 // &bg=restricted 预览后台活动没被允许（划掉就会被强行停止）；&bg=unknown 预览 Android 8/8.1 读不到这一状态。
+// 账号：&view=settings&section=account&sync=login|import|synced|pending|offline|conflict|reauth|error。
+// 这些场景只在浏览器内存中演示，不发送邮件；登录验证码固定为 123456。
+// &records=same-second 构造同秒开始、ID不同的两条归档，验收编辑与删除的身份定位。
 
 import type {
   AppBlocking,
@@ -18,12 +21,15 @@ import type {
   ProfileDef,
   Snapshot,
   SystemStatus,
+  SyncStatus,
   TaskItem,
 } from "../types";
 import { MAX_BLOCK_MINUTES, MIN_BLOCK_MINUTES, SUSPEND_GAP_SECONDS, MAX_COMPLETION_NOTE_CHARS, NOTIFICATION_CHANNELS, SYSTEM_SETTINGS_TARGETS, type SystemSettingsTarget } from "../types";
 import { version } from "../../package.json";
 import { MAX_BLOCK_RULES, normalizeHost, normalizeUrl } from "../blocking";
 import { MAX_BLOCKED_APPS, validPackageName } from "../app-blocking";
+import { captureActionTarget, normalizedSyncStatus, SYNC_MUTATION_COMMANDS, validSyncEmail } from "../sync";
+import { completionEntryIndex } from "../record-identity";
 
 const HISTORY_LIMIT = 60;
 const params = new URLSearchParams(location.hash.replace(/^#/, ""));
@@ -164,6 +170,12 @@ declare global {
     qaTestNotifications?: string[];
     /** QA：下一次回到前台时，「被送回坐功」的是哪个应用（包名）。 */
     qaBlockNotice?: string;
+    /** 账号界面的合成状态与延迟，不连接真实云服务。 */
+    qaSyncStatus?: SyncStatus;
+    qaSyncDelay?: number;
+    qaSyncFailure?: string;
+    qaReplaceSyncTimer?: () => void;
+    qaRemoteSyncNote?: (dayId: string, entryId: string, note: string) => void;
   }
 }
 
@@ -245,6 +257,7 @@ function record(day: Day, timer: NonNullable<Day["timer"]>, accepted: boolean, n
     if (category) category.accepted_seconds += seconds;
   }
   day.ledger.push({
+    ...(timer.sync_id ? { sync_id: timer.sync_id } : {}),
     category: timer.category,
     seconds,
     accepted,
@@ -361,9 +374,10 @@ const ops = {
     state.day = null;
     if (state.history.length > HISTORY_LIMIT) state.history.splice(0, state.history.length - HISTORY_LIMIT);
   },
-  delete_history_day(startedAt: number) {
+  delete_history_day(startedAt: number, dayId?: string) {
+    if (!dayId && state.history.filter((d) => d.day.started_at === startedAt).length > 1) throw "同一时刻有多条记录，请重新打开后按标识删除。";
     const before = state.history.length;
-    state.history = state.history.filter((d: ArchivedDay) => d.day.started_at !== startedAt);
+    state.history = state.history.filter((d: ArchivedDay) => dayId ? d.day.sync_id !== dayId : d.day.started_at !== startedAt);
     if (state.history.length === before) throw "没有这一天的归档";
   },
   start_block(categoryId: string, minutes: number, tasks: TaskItem[], breakMinutes: number) {
@@ -432,13 +446,17 @@ const ops = {
     if (day.break_until === null) throw "现在不在休息";
     cutRest(day, state.last_tick);
   },
-  set_completion_note(dayStartedAt: number, entryIndex: number, endedAt: number, note: string) {
+  set_completion_note(dayStartedAt: number, entryIndex: number, endedAt: number, note: string, dayId?: string, entryId?: string, previousNote?: string | null) {
     if (typeof note !== "string" || [...note].length > MAX_COMPLETION_NOTE_CHARS) throw "完成记录最多 2000 字";
     if (/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f-\u009f]/.test(note)) throw "完成记录含有不支持的控制字符";
-    const target = [state.day, ...state.history.map((a) => a.day)].find((d) => d?.started_at === dayStartedAt);
-    const entry = target?.ledger[entryIndex];
+    const candidates = [state.day, ...state.history.map((a) => a.day)].filter((d): d is Day => !!d && (dayId ? d.sync_id === dayId : d.started_at === dayStartedAt));
+    if (candidates.length > 1) throw "同一时刻有多条记录，请重新打开后按标识编辑。";
+    const target = candidates[0];
     if (!target) throw "这一天的记录已不存在";
-    if (!Number.isInteger(entryIndex) || !entry?.accepted || entry.ended_at !== endedAt) throw "这段记录已改变，请重新打开";
+    const index = completionEntryIndex(target, entryId, entryIndex, endedAt);
+    if (index < 0) throw "这段记录已改变，请重新打开";
+    const entry = target.ledger[index];
+    if (sharedMockActive() && previousNote !== entry.completion_note) throw "这条完成记录已在另一台设备修改，请核对后重新编辑。";
     entry.completion_note = note.replace(/\r\n?/g, "\n").trim();
   },
   update_preferences(prefs: Preferences) {
@@ -697,7 +715,78 @@ function scenarioName(): string {
 }
 
 state = buildScenario(scenarioName());
+if (params.get("records") === "same-second" && state.history.length) {
+  const source = state.history[state.history.length - 1];
+  state.history = ["a", "b"].map((letter, index) => {
+    const archived = structuredClone(source);
+    archived.day.sync_id = `${letter.repeat(32)}-day`;
+    archived.day.ledger.forEach((entry, i) => { entry.sync_id = `${letter.repeat(32)}-entry-${i}`; entry.completion_note = `设备 ${index + 1} 的记录 ${i + 1}`; });
+    return archived;
+  });
+}
 if (state.preferences.blocked_hosts.length && state.day) blocking.active = true;
+const standaloneState = structuredClone(state);
+let syncSentEmail = "";
+let syncState: SyncStatus = syncFixture(params.get("sync") ?? "unconfigured");
+let nextSyncIdentity = 0;
+
+function sharedMockActive(): boolean {
+  return !!syncState.email && syncState.phase !== "awaiting_import";
+}
+
+function markMockSyncIds() {
+  const newId = (kind: string) => `${"c".repeat(32)}-${kind}-${++nextSyncIdentity}`;
+  for (const day of [state.day, ...state.history.map((entry) => entry.day)]) {
+    if (!day) continue;
+    day.sync_id ||= newId("day");
+    if (day.timer) day.timer.sync_id ||= newId("block");
+    for (const entry of day.ledger) entry.sync_id ||= newId("entry");
+  }
+}
+
+if (sharedMockActive()) markMockSyncIds();
+window.qaReplaceSyncTimer = () => {
+  if (!state.day?.timer || !sharedMockActive()) return;
+  state.day.timer = { ...state.day.timer, sync_id: `${"d".repeat(32)}-remote-${++nextSyncIdentity}`, elapsed_seconds: 0 };
+  syncState.revision++;
+  window.qaSyncStatus = undefined;
+  broadcast();
+};
+window.qaRemoteSyncNote = (dayId, entryId, note) => {
+  const day = [state.day, ...state.history.map((entry) => entry.day)].find((candidate) => candidate?.sync_id === dayId);
+  if (!day || !sharedMockActive()) return;
+  const index = day.ledger.findIndex((entry) => entry.sync_id === entryId);
+  const entry = day.ledger[index];
+  if (!entry) return;
+  ops.set_completion_note(day.started_at, index, entry.ended_at, note, dayId, entryId, entry.completion_note);
+  syncState.revision++;
+  window.qaSyncStatus = undefined;
+  broadcast(true);
+};
+
+function syncFixture(name: string): SyncStatus {
+  const base = normalizedSyncStatus(undefined);
+  if (name === "unconfigured") return base;
+  const phase: SyncStatus["phase"] = name === "login" ? "signed_out" : name === "import" ? "awaiting_import"
+    : ["synced", "pending", "offline", "conflict", "reauth", "error"].includes(name) ? name as SyncStatus["phase"] : "signed_out";
+  return {
+    ...base, configured: true, phase,
+    account_id: phase === "signed_out" || phase === "awaiting_import" ? null : "00000000-0000-4000-8000-000000000001",
+    email: phase === "signed_out" ? null : "reader@example.com",
+    revision: phase === "signed_out" || phase === "awaiting_import" ? 0 : 12,
+    pending: ["pending", "offline", "conflict"].includes(phase),
+    last_synced_at: ["signed_out", "awaiting_import"].includes(phase) ? null : nowUnix() - 180,
+    migration: phase === "awaiting_import" ? { local_days: state.history.length, cloud_days: 12, local_active: !!state.day, cloud_active: true, cloud_empty: false } : null,
+    conflict: phase === "conflict" ? { fields: ["day", "preferences"], local_days: state.history.length, remote_days: 12, local_active: !!state.day, remote_active: true } : null,
+    error: phase === "error" ? "暂时连接不上云端，本机改动已保留。请检查网络后重试。" : null,
+  };
+}
+
+function syncReply(): Snapshot {
+  window.qaSyncStatus = undefined;
+  broadcast();
+  return snapshot();
+}
 
 // ---------- 对外 ----------
 
@@ -711,28 +800,95 @@ function snapshot(withHistory = true): Snapshot {
     blocking: structuredClone(blocking),
     save_error: saveError,
     state_path: mobile ? "/data/user/0/com.snooze26h.sitzfleisch.x.debug/state.json" : "/Users/you/Library/Application Support/com.snooze26h.sitzfleisch.x/state.json",
+    sync: structuredClone(window.qaSyncStatus ?? syncState),
     initial_view: null,
     initial_scroll: 0,
   };
 }
 
-function broadcast() {
+function broadcast(withHistory = false) {
   // 与真实外壳同一条规矩：心跳推送不带历史。
-  const snap = snapshot(false);
+  const snap = snapshot(withHistory);
   for (const listener of listeners) listener(snap);
 }
 
 function mutate(op: () => void): Snapshot {
   tick(nowUnix());
   op();
+  if (sharedMockActive()) {
+    markMockSyncIds();
+    syncState.pending = true;
+    if (syncState.phase === "synced") syncState.phase = "pending";
+  }
   broadcast();
   return snapshot();
+}
+
+function checkMockTarget(command: string, args: Record<string, unknown>) {
+  if (!SYNC_MUTATION_COMMANDS.has(command)) return;
+  if (window.qaSyncStatus) syncState = structuredClone(window.qaSyncStatus);
+  const expected = args.expected as ReturnType<typeof captureActionTarget>;
+  if (!sharedMockActive()) {
+    if (expected?.account_id) throw "账号已切换，请重新操作。";
+    return;
+  }
+  const current = captureActionTarget(snapshot());
+  if (!expected || expected.account_id !== current?.account_id) throw "账号已切换，请重新操作。";
+  if (command === "set_completion_note" || command === "delete_history_day") return;
+  if (!current || !expected) throw "共享内容已更新，请刷新后重试。";
+  if (command === "update_preferences") {
+    if (expected.revision !== current.revision) throw "另一台设备刚更新了记录，请核对当前内容后重试。";
+    return;
+  }
+  if (expected.day_id !== current.day_id || expected.timer_id !== current.timer_id
+    || expected.paused !== current.paused || expected.break_until !== current.break_until) throw "当前计时已经改变，请核对后重新操作。";
 }
 
 export async function mockInvoke<T>(command: string, args: Record<string, unknown>): Promise<T> {
   const a = args as Record<string, never>;
   await new Promise((resolve) => setTimeout(resolve, 8));
+  if (command.startsWith("sync_")) {
+    if (window.qaSyncStatus) syncState = structuredClone(window.qaSyncStatus);
+    if (!syncState.configured) throw "此版本尚未配置云同步，部署后可用。";
+    if (Number.isFinite(window.qaSyncDelay)) await new Promise((resolve) => setTimeout(resolve, Math.min(10000, Math.max(0, window.qaSyncDelay!))));
+    if (window.qaSyncFailure) throw window.qaSyncFailure.slice(0, 2000);
+  }
+  checkMockTarget(command, args);
   switch (command) {
+    case "sync_send_code":
+      if (typeof args.email !== "string" || !validSyncEmail(args.email)) throw "请输入有效的邮箱地址。";
+      syncSentEmail = args.email;
+      return undefined as T;
+    case "sync_verify_code": {
+      if (typeof args.email !== "string" || args.email !== syncSentEmail || args.code !== "123456") throw "验证码不正确；浏览器预览请使用 123456。";
+      if (syncState.phase === "reauth") {
+        if (args.email !== syncState.email) throw "请使用当前账号的邮箱。";
+        syncState.phase = syncState.pending ? "pending" : "synced";
+      } else {
+        syncState = { ...syncFixture("import"), email: args.email };
+      }
+      syncSentEmail = "";
+      return syncReply() as T;
+    }
+    case "sync_connect":
+      if (syncState.phase !== "awaiting_import" || !["merge_remote", "merge_local", "cloud_only"].includes(String(args.strategy))) throw "请选择有效的数据连接方式。";
+      syncState = { ...syncState, account_id: "00000000-0000-4000-8000-000000000001", phase: "synced", migration: null, pending: false, revision: 13, last_synced_at: nowUnix(), error: null };
+      markMockSyncIds();
+      return syncReply() as T;
+    case "sync_resolve":
+      if (syncState.phase !== "conflict" || args.choice !== "local" && args.choice !== "remote") throw "请选择要采用的冲突内容。";
+      syncState = { ...syncState, phase: "synced", conflict: null, pending: false, revision: syncState.revision + 1, last_synced_at: nowUnix(), error: null, recovery_path: "（预览）本机账号目录 / recovery" };
+      return syncReply() as T;
+    case "sync_retry":
+      if (syncState.phase === "conflict" || syncState.phase === "awaiting_import" || syncState.phase === "reauth") return syncReply() as T;
+      if (syncState.email) syncState = { ...syncState, phase: "synced", pending: false, last_synced_at: nowUnix(), error: null };
+      return syncReply() as T;
+    case "sync_sign_out":
+    case "sync_cancel_sign_in":
+      syncState = syncFixture("login");
+      syncSentEmail = "";
+      state = structuredClone(standaloneState);
+      return syncReply() as T;
     case "system_status":
       if (!mobile) throw "系统状态查询仅支持 Android。";
       return structuredClone(window.qaSystemStatus ?? systemFixture) as T;
@@ -781,11 +937,12 @@ export async function mockInvoke<T>(command: string, args: Record<string, unknow
       return mutate(() => ops.toggle_pause(nowUnix())) as T;
     case "extend_block":
       return mutate(() => {
+        if (a.timerId !== undefined && state.day?.timer?.sync_id !== a.timerId) throw "原来的计时已结束，请重新选择延长时间";
         if (a.timerStartedAt !== undefined && state.day?.timer?.started_at !== a.timerStartedAt) throw "原来的计时已结束，请重新选择延长时间";
         ops.extend_block(a.minutes);
       }) as T;
     case "set_completion_note":
-      return mutate(() => ops.set_completion_note(a.dayStartedAt, a.entryIndex, a.endedAt, a.note)) as T;
+      return mutate(() => ops.set_completion_note(a.dayStartedAt, a.entryIndex, a.endedAt, a.note, a.dayId, a.entryId, a.previousNote)) as T;
     case "finish_block":
       return mutate(() => ops.finish_block(nowUnix())) as T;
     case "end_break":
@@ -799,7 +956,7 @@ export async function mockInvoke<T>(command: string, args: Record<string, unknow
     case "update_preferences":
       return mutate(() => ops.update_preferences(a.prefs)) as T;
     case "delete_history_day":
-      return mutate(() => ops.delete_history_day(a.startedAt)) as T;
+      return mutate(() => ops.delete_history_day(a.startedAt, a.dayId)) as T;
     case "normalize_host":
       return validateHost(a.host) as T;
     case "normalize_url":

@@ -1,10 +1,10 @@
 // 主循环：快照进来 → 拼 HTML → morphdom 打补丁 → 画运行图。所有交互走事件委托。
 
 import morphdom from "morphdom";
-import { installedApps, invoke, onBackRequested, onExtendRequested, onQuitBlocked, onQuitBlockingFailed, onReminder, onSnapshot, openSystemSettings, platformInfo, setWindowTitle, systemStatus, takeBlockNotice } from "./api";
+import { inTauri, installedApps, invoke, onBackRequested, onExtendRequested, onQuitBlocked, onQuitBlockingFailed, onReminder, onSnapshot, openSystemSettings, platformInfo, setWindowTitle, systemStatus, takeBlockNotice } from "./api";
 import { conflictingHost, MAX_BLOCK_RULES, normalizeHost, normalizeUrl } from "./blocking";
 import { appBlocking, DISABLE_PHRASE, MAX_BLOCKED_APPS, sameText } from "./app-blocking";
-import type { Day, Preferences, Snapshot, View } from "./types";
+import type { ActionTarget, Day, Preferences, Snapshot, View } from "./types";
 import { MAX_BLOCK_MINUTES, MIN_BLOCK_MINUTES, MAX_COMPLETION_NOTE_CHARS, SYSTEM_SETTINGS_TARGETS, type SystemSettingsTarget } from "./types";
 import { SHORT_NAME_WIDTH, dayLabel, displayWidth, duration, esc, nowUnix } from "./format";
 import {
@@ -35,8 +35,11 @@ import { blockState, settingsPage, settingsSections } from "./views/settings";
 import { overlays, toastView } from "./views/overlays";
 import { drawDiagram } from "./views/diagram";
 import { loadMoon, paintMoons } from "./moon";
+import { captureActionTarget, normalizedSyncStatus, observedCommandArgs, validSyncCode, validSyncEmail } from "./sync";
+import { completionEntryIndex, sameBlockTimer, studyDayKey } from "./record-identity";
 
 const app = document.getElementById("app")!;
+ui.syncPreview = !inTauri;
 const compactQuery = window.matchMedia("(max-width: 700px)");
 const touchQuery = window.matchMedia("(pointer: coarse)");
 const TITLES: Record<View, string> = { today: "今天", history: "历史", settings: "设置" };
@@ -92,7 +95,9 @@ function canAutoFocus(): boolean {
 function render() {
   if (!ui.snap || !ui.platform || renderSuspended()) return;
   ui.compact = compactQuery.matches;
-  ui.now = nowUnix();
+  // 云端计时已由原生层校准；暂停、休息和时间轴必须使用同一个快照时刻，
+  // 不能再用可能快慢几分钟的本机 Date.now 去减云端时间戳。
+  ui.now = ui.snap.state.last_tick;
   reconcileSelection();
   const hadCompletion = !!ui.completion;
   promptPendingCompletion();
@@ -122,6 +127,10 @@ function render() {
       if (from === document.activeElement && typing) {
         // 保留光标时仍同步校验状态，让读屏与输入框下方的即时错误一致。
         if (to.hasAttribute("aria-invalid")) from.setAttribute("aria-invalid", to.getAttribute("aria-invalid")!);
+        if (from instanceof HTMLInputElement && to instanceof HTMLInputElement && from.dataset.input?.startsWith("sync-")) {
+          from.disabled = to.disabled;
+          from.readOnly = to.readOnly;
+        }
         return false;
       }
       // 用户输入只改 DOM 属性，HTML 仍可能相等；保存被拒时也要恢复权威值。
@@ -215,6 +224,7 @@ function detectTransitions(prev: Snapshot | null, next: Snapshot) {
   const beforeDay = prev.state.day;
   const after = next.state.day;
   if (!beforeDay || !after) return;
+  if (studyDayKey(beforeDay) !== studyDayKey(after)) return;
   // 心跳空档让走着的格按停了：说清楚空档没有计入，不推断系统原因。本来就没在计时就不用说。
   if (after.suspend_seconds > beforeDay.suspend_seconds && isPaused(after) && beforeDay.timer && !isPaused(beforeDay)) {
     toast("检测到计时中断，已自动暂停，空档没有计入。");
@@ -260,19 +270,84 @@ function applySnapshot(snap: Snapshot) {
   }
   // 较新的心跳不带历史；较早命令的归档结果仍可能是最新的一份历史。
   ui.history = merged.history;
-  if (ui.selectedHistoryDay !== null && !history().some((entry) => entry.day.started_at === ui.selectedHistoryDay)) ui.selectedHistoryDay = null;
+  if (ui.selectedHistoryDay !== null && !history().some((entry) => studyDayKey(entry.day) === ui.selectedHistoryDay)) ui.selectedHistoryDay = null;
   render();
 }
 
 async function act(command: string, args: Record<string, unknown> = {}): Promise<Snapshot | null> {
   try {
-    const snap = await invoke<Snapshot>(command, args);
+    const snap = await invoke<Snapshot>(command, observedCommandArgs(command, args, ui.snap));
     applySnapshot(snap);
     return snap;
   } catch (error) {
     toast(String(error));
     return null;
   }
+}
+
+/** 账号表单的失败留在按钮旁；登录凭据由原生端保管，这里只发送邮箱和一次性验证码。 */
+async function syncAction(command: string, args: Record<string, unknown> = {}): Promise<Snapshot | null> {
+  if (ui.syncBusy) return null;
+  ui.syncBusy = true;
+  ui.syncError = "";
+  render();
+  try {
+    const snap = await invoke<Snapshot>(command, args);
+    applySnapshot(snap);
+    const phase = normalizedSyncStatus(snap.sync).phase;
+    if (phase !== "reauth" && phase !== "signed_out") {
+      ui.syncCode = "";
+      ui.syncSentTo = "";
+    }
+    return snap;
+  } catch (error) {
+    ui.syncError = String(error).slice(0, 2000);
+    return null;
+  } finally {
+    ui.syncBusy = false;
+    render();
+  }
+}
+
+async function sendSyncCode() {
+  if (ui.syncBusy || ui.syncResendAt > nowUnix()) return;
+  const s = normalizedSyncStatus(ui.snap?.sync);
+  const email = (s.phase === "reauth" && s.email ? s.email : ui.syncEmail).trim();
+  if (!validSyncEmail(email)) {
+    ui.syncError = "请输入有效的邮箱地址。";
+    render();
+    return;
+  }
+  ui.syncBusy = true;
+  ui.syncError = "";
+  render();
+  try {
+    await invoke("sync_send_code", { email });
+    ui.syncEmail = email;
+    ui.syncSentTo = email;
+    ui.syncCode = "";
+    ui.syncResendAt = nowUnix() + 60;
+  } catch (error) {
+    ui.syncError = String(error).slice(0, 2000);
+  } finally {
+    ui.syncBusy = false;
+    render();
+  }
+  if (ui.syncSentTo && ui.view === "settings" && ui.settingsSection === "account" && canAutoFocus()) {
+    document.getElementById("sync-code")?.focus();
+  }
+}
+
+async function verifySyncCode() {
+  if (ui.syncBusy) return;
+  const email = ui.syncSentTo;
+  const code = ui.syncCode.trim();
+  if (!validSyncEmail(email) || !validSyncCode(code)) {
+    ui.syncError = "请输入邮件里的 6 到 10 位数字验证码。";
+    render();
+    return;
+  }
+  await syncAction("sync_verify_code", { email, code });
 }
 
 function toast(message: string, ms = 6000) {
@@ -668,11 +743,11 @@ async function requestFullAppList() {
   }
 }
 
-async function beginDay(profileId: string) {
+async function beginDay(profileId: string, expected: ActionTarget | null) {
   ui.startingDay = true;
   render();
   try {
-    const snap = await act("start_day", { profileId });
+    const snap = await act("start_day", { profileId, expected });
     if (snap) toast("开始了。这一天从现在算起，不看几点钟。");
     return !!snap;
   } finally { ui.startingDay = false; render(); }
@@ -680,11 +755,12 @@ async function beginDay(profileId: string) {
 
 async function startDay(profileId: string) {
   if (ui.startingDay || day() || !prefs().profiles.some((profile) => profile.id === profileId)) return;
+  const expected = captureActionTarget(ui.snap);
   if (!ui.platform?.mobile) {
-    await beginDay(profileId);
+    await beginDay(profileId, expected);
     return;
   }
-  if (permissionPrompted()) { await beginDay(profileId); return; }
+  if (permissionPrompted()) { await beginDay(profileId, expected); return; }
   // 查询期间保持「开始中」，按钮不可重入；查完再统一解除并重绘。
   ui.startingDay = true;
   render();
@@ -697,7 +773,7 @@ async function startDay(profileId: string) {
     ui.startingDay = false;
     render();
   }
-  if (granted) { await beginDay(profileId); return; }
+  if (granted) { await beginDay(profileId, expected); return; }
   ask({
     id: "notification-start", title: "开启到点提醒", destructive: false,
     message: "允许坐功发送通知，锁屏后才能看到计时、休息和身体提醒。暂不开启也可以正常计时，之后可在「设置 → 提醒」中开启。",
@@ -706,7 +782,7 @@ async function startDay(profileId: string) {
       rememberPermissionPrompt();
       await invoke("request_notification_permission").catch((error) => toast(String(error)));
       const after = await refreshSystemStatus();
-      if (!await beginDay(profileId)) return "keep";
+      if (!await beginDay(profileId, expected)) return "keep";
       // 拒绝过两次（Android 13+）或在系统里关掉了通知时，系统不会再弹授权框：直接带去通知设置。
       if (after && !after.notificationsEnabled) {
         toast("系统没有弹出授权。请在通知设置里打开坐功的通知，返回后会自动检查。", 8000);
@@ -715,7 +791,7 @@ async function startDay(profileId: string) {
     },
     onCancel: async () => {
       rememberPermissionPrompt();
-      if (!await beginDay(profileId)) return "keep";
+      if (!await beginDay(profileId, expected)) return "keep";
     },
   });
 }
@@ -742,6 +818,7 @@ function uid(prefix: string): string {
 async function handleAction(action: string, el: HTMLElement) {
   const id = el.dataset.id ?? "";
   const d = day();
+  const expected = captureActionTarget(ui.snap);
   switch (action) {
     case "tab": {
       const view = el.dataset.view as View;
@@ -780,6 +857,61 @@ async function handleAction(action: string, el: HTMLElement) {
       await act("retry_save");
       break;
 
+    // ----- 账号与同步 -----
+    case "sync-send-code":
+      await sendSyncCode();
+      break;
+    case "sync-verify":
+      await verifySyncCode();
+      break;
+    case "sync-change-email":
+      if (ui.syncBusy) break;
+      ui.syncSentTo = "";
+      ui.syncCode = "";
+      ui.syncError = "";
+      render();
+      if (canAutoFocus()) document.getElementById("sync-email")?.focus();
+      break;
+    case "sync-connect": {
+      const strategy = el.dataset.strategy;
+      if (strategy !== "merge_remote" && strategy !== "merge_local" && strategy !== "cloud_only") break;
+      await syncAction("sync_connect", { strategy });
+      break;
+    }
+    case "sync-resolve": {
+      const choice = el.dataset.choice;
+      if (choice !== "local" && choice !== "remote") break;
+      await syncAction("sync_resolve", { choice });
+      break;
+    }
+    case "sync-retry":
+      await syncAction("sync_retry");
+      break;
+    case "sync-cancel":
+      if (await syncAction("sync_cancel_sign_in")) {
+        ui.syncCode = "";
+        ui.syncSentTo = "";
+        render();
+      }
+      break;
+    case "sync-sign-out":
+      if (ui.syncBusy) break;
+      ask({
+        title: "退出登录？",
+        message: "将回到这台设备原来的单机数据。云端记录保留，未同步的修改留在此账号的本机缓存，下次登录后继续处理。",
+        confirmLabel: "退出登录", cancelLabel: "留在账号中", destructive: false,
+        onConfirm: async (self) => {
+          if (!await syncAction("sync_sign_out")) {
+            if (ui.dialog?.token === self.token) ui.dialog.message = `退出未完成：${ui.syncError}。本机账号数据仍保留，可以重试或留在账号中。`;
+            return "keep";
+          }
+          ui.syncCode = "";
+          ui.syncSentTo = "";
+          ui.syncEmail = "";
+        },
+      });
+      break;
+
     // ----- 今天 -----
     case "start-day":
       await startDay(id);
@@ -792,7 +924,7 @@ async function handleAction(action: string, el: HTMLElement) {
         cancelLabel: "继续今天",
         destructive: true,
         onConfirm: async () => {
-          if (await act("abandon_day")) toast("已返回开始页，这一天没有归档。");
+          if (await act("abandon_day", { expected })) toast("已返回开始页，这一天没有归档。");
         },
       });
       break;
@@ -804,7 +936,7 @@ async function handleAction(action: string, el: HTMLElement) {
         cancelLabel: "再撑一会儿",
         destructive: true,
         onConfirm: async () => {
-          if (await act("end_day")) toast("今天结束。没完成的小时不会滚到明天。");
+          if (await act("end_day", { expected })) toast("今天结束。没完成的小时不会滚到明天。");
         },
       });
       break;
@@ -856,9 +988,9 @@ async function handleAction(action: string, el: HTMLElement) {
       await cancelCompletion();
       break;
     case "edit-completion": {
-      const recordDay = [day(), ...history().map((a) => a.day)].find((x) => x?.started_at === Number(el.dataset.day));
-      const index = Number(el.dataset.index);
-      if (recordDay && Number.isInteger(index) && recordDay.ledger[index]?.ended_at === Number(el.dataset.ended)) {
+      const recordDay = [day(), ...history().map((a) => a.day)].find((x) => x && studyDayKey(x) === el.dataset.dayKey);
+      const index = recordDay ? completionEntryIndex(recordDay, el.dataset.entryId || undefined, Number(el.dataset.index), Number(el.dataset.ended)) : -1;
+      if (recordDay && index >= 0) {
         openCompletion(recordDay, index, false);
         render();
         if (canAutoFocus()) app.querySelector<HTMLTextAreaElement>("#completion-note")?.focus();
@@ -876,7 +1008,7 @@ async function handleAction(action: string, el: HTMLElement) {
         cancelLabel: "返回",
         destructive: true,
         onConfirm: async () => {
-          if (await act("abandon_block")) toast("这一格已记为未计入。");
+          if (await act("abandon_block", { expected })) toast("这一格已记为未计入。");
         },
       });
       break;
@@ -888,8 +1020,8 @@ async function handleAction(action: string, el: HTMLElement) {
       break;
     }
     case "open-chart-day": {
-      const key = Number(id);
-      if (!history().some((entry) => entry.day.started_at === key)) break;
+      const key = id;
+      if (!history().some((entry) => studyDayKey(entry.day) === key)) break;
       ui.selectedHistoryDay = key;
       ui.expandedDays.add(key);
       render();
@@ -899,7 +1031,8 @@ async function handleAction(action: string, el: HTMLElement) {
       break;
     }
     case "toggle-day": {
-      const key = Number(id);
+      const key = id;
+      if (!history().some((entry) => studyDayKey(entry.day) === key)) break;
       if (ui.expandedDays.has(key)) {
         ui.expandedDays.delete(key);
         if (ui.selectedHistoryDay === key) ui.selectedHistoryDay = null;
@@ -909,22 +1042,24 @@ async function handleAction(action: string, el: HTMLElement) {
       break;
     }
     case "copy-md": {
-      const entry = history().find((h) => h.day.started_at === Number(id));
+      const entry = history().find((h) => studyDayKey(h.day) === id);
       if (entry) toast((await copyText(markdownForDay(entry.day, entry.ended_at, ui.now))) ? "已复制这一天的 Markdown。" : "复制失败。");
       break;
     }
     case "delete-day": {
-      const entry = history().find((h) => h.day.started_at === Number(id));
+      const entry = history().find((h) => studyDayKey(h.day) === id);
       if (!entry) break;
       const label = dayLabel(entry.day.started_at);
       ask({
         title: "永久删除这一天？",
-        message: `${label} 的归档记录及其中所有学习格都会从本机删除，无法恢复。`,
+        message: normalizedSyncStatus(ui.snap?.sync).email && entry.day.sync_id
+          ? `${label} 的归档记录及其中所有学习格将永久删除，并同步到此账号的其他设备。`
+          : `${label} 的归档记录及其中所有学习格都会从本机删除，无法恢复。`,
         confirmLabel: "永久删除",
         cancelLabel: "取消",
         destructive: true,
         onConfirm: async () => {
-          if (await act("delete_history_day", { startedAt: entry.day.started_at })) toast(`已删除 ${label} 的归档记录。`);
+          if (await act("delete_history_day", { startedAt: entry.day.started_at, expected, ...(entry.day.sync_id ? { dayId: entry.day.sync_id } : {}) })) toast(`已删除 ${label} 的归档记录。`);
         },
       });
       break;
@@ -1178,6 +1313,7 @@ async function finishBlock() {
 function openExtensionDialog() {
   const timer = day()?.timer;
   if (!timer) return;
+  const expected = captureActionTarget(ui.snap);
   const max = MAX_BLOCK_MINUTES * 2 - timer.total_seconds / 60;
   if (max < 1) { toast("这一格已达到 360 分钟上限。"); return; }
   ask({
@@ -1192,11 +1328,11 @@ function openExtensionDialog() {
         return "keep";
       }
       const current = day()?.timer;
-      if (!current || current.started_at !== timer.started_at || current.category !== timer.category) {
+      if (!current || !sameBlockTimer(current, timer)) {
         toast("原来的计时已结束，请为当前任务重新选择。");
         return;
       }
-      if (!await act("extend_block", { minutes, timerStartedAt: timer.started_at })) return "keep";
+      if (!await act("extend_block", { minutes, timerStartedAt: timer.started_at, expected, ...(timer.sync_id ? { timerId: timer.sync_id } : {}) })) return "keep";
       toast(`已增加 ${minutes} 分钟。`);
     },
   });
@@ -1205,11 +1341,22 @@ function openExtensionDialog() {
 function openCompletion(recordDay: Day, entryIndex: number, automatic: boolean) {
   const entry = recordDay.ledger[entryIndex];
   if (!entry?.accepted) return;
+  const draftKey = completionDraftKey(recordDay, entryIndex);
+  const recovered = ui.completionDrafts.has(draftKey);
   ui.completion = {
+    expected: captureActionTarget(ui.snap),
+    previousNote: entry.completion_note, draftKey, canDefer: recovered, missing: false,
+    dayId: recordDay.sync_id || undefined, entryId: entry.sync_id || undefined,
     dayStartedAt: recordDay.started_at, entryIndex, endedAt: entry.ended_at,
     title: nameOf(entry.category, recordDay), seconds: entry.seconds,
-    draft: entry.completion_note ?? "", automatic, busy: false, error: "",
+    draft: ui.completionDrafts.get(draftKey) ?? entry.completion_note ?? "", automatic, busy: false,
+    error: recovered ? "已恢复本次运行中未保存的草稿，请核对后保存。" : "",
   };
+}
+
+function completionDraftKey(recordDay: Day, entryIndex: number): string {
+  const entry = recordDay.ledger[entryIndex];
+  return JSON.stringify([normalizedSyncStatus(ui.snap?.sync).account_id, studyDayKey(recordDay), entry.sync_id || `${entry.ended_at}-${entryIndex}`]);
 }
 
 function promptPendingCompletion() {
@@ -1217,7 +1364,7 @@ function promptPendingCompletion() {
   // 待填写状态随台账保存，自动结束、托盘结束和重启都走同一条补记路径。
   for (const recordDay of [day(), ...history().slice().reverse().map((a) => a.day)]) {
     if (!recordDay) continue;
-    const index = recordDay.ledger.findIndex((entry) => entry.accepted && entry.completion_note === null);
+    const index = recordDay.ledger.findIndex((entry, i) => entry.accepted && entry.completion_note === null && !ui.completionDrafts.has(completionDraftKey(recordDay, i)));
     if (index >= 0) { openCompletion(recordDay, index, true); return; }
   }
 }
@@ -1235,8 +1382,14 @@ async function saveCompletion(skip: boolean) {
   editor.error = "";
   render();
   try {
-    const snap = await invoke<Snapshot>("set_completion_note", { dayStartedAt: editor.dayStartedAt, entryIndex: editor.entryIndex, endedAt: editor.endedAt, note });
+    const snap = await invoke<Snapshot>("set_completion_note", {
+      dayStartedAt: editor.dayStartedAt, entryIndex: editor.entryIndex, endedAt: editor.endedAt, note,
+      expected: editor.expected,
+      previousNote: editor.previousNote,
+      ...(editor.dayId ? { dayId: editor.dayId } : {}), ...(editor.entryId ? { entryId: editor.entryId } : {}),
+    });
     // 先接纳新快照再关弹窗，避免旧快照上的待填写标记把同一个弹窗重新打开。
+    ui.completionDrafts.delete(editor.draftKey);
     applySnapshot(snap);
     if (ui.completion === editor) ui.completion = null;
     render();
@@ -1244,12 +1397,33 @@ async function saveCompletion(skip: boolean) {
   } catch (error) {
     editor.busy = false;
     editor.error = String(error);
+    editor.canDefer = true;
+    const recordDay = [day(), ...history().map((a) => a.day)].find((candidate) => candidate && (editor.dayId ? candidate.sync_id === editor.dayId : !candidate.sync_id && candidate.started_at === editor.dayStartedAt));
+    editor.missing = !recordDay || completionEntryIndex(recordDay, editor.entryId, editor.entryIndex, editor.endedAt) < 0;
     render();
   }
 }
 
 async function cancelCompletion() {
   if (!ui.completion || ui.completion.busy) return;
+  if (ui.completion.canDefer) {
+    const editor = ui.completion;
+    if (editor.missing && editor.draft) {
+      editor.busy = true;
+      render();
+      const copied = await copyText(editor.draft);
+      editor.busy = false;
+      if (!copied) {
+        editor.error = "复制失败，请手动复制草稿，或清空文本后关闭。";
+        render();
+        return;
+      }
+    }
+    ui.completionDrafts.set(editor.draftKey, editor.draft);
+    if (ui.completion === editor) ui.completion = null;
+    toast(editor.missing ? editor.draft ? "草稿已复制，可在新的记录中粘贴。" : "已关闭这条记录的编辑框。" : "草稿保留在本次打开的应用中，可从这条记录继续填写。");
+    return;
+  }
   if (ui.completion.automatic) {
     // 自动弹出的框按 Esc 等于「先跳过」；已经写了字的话不能就这么丢掉。
     if (ui.completion.draft.trim()) {
@@ -1267,8 +1441,13 @@ async function cancelCompletion() {
 
 /** 改计划里的配额。学习日进行中的话今天也跟着改（进度与记录保留），不然设置里改了、今天页纹丝不动。 */
 async function saveQuota(profileId: string, categoryId: string, update: (minutes: number) => number) {
+  const originalDay = day();
+  const expected = captureActionTarget(ui.snap);
   const saved = await savePrefs((x) => updateQuota(x, profileId, categoryId, update));
-  if (saved && day()) await act("switch_profile", { profileId });
+  // 保存计划期间另一端可能已经收工或开了新一天；只更新当时正在编辑的学习日。
+  if (saved && originalDay && day() && studyDayKey(originalDay) === studyDayKey(day()!)) {
+    await act("switch_profile", { profileId, expected });
+  }
 }
 
 function updateQuota(p: Preferences, profileId: string, categoryId: string, update: (minutes: number) => number): void | string {
@@ -1494,6 +1673,12 @@ document.addEventListener("click", (event) => {
 document.addEventListener("input", (event) => {
   const el = event.target as HTMLInputElement | HTMLTextAreaElement;
   switch (el.dataset.input) {
+    case "sync-email":
+      if (!ui.syncBusy && !ui.syncSentTo) { ui.syncEmail = el.value; ui.syncError = ""; render(); }
+      break;
+    case "sync-code":
+      if (!ui.syncBusy) { ui.syncCode = el.value; ui.syncError = ""; render(); }
+      break;
     case "completion":
       if (ui.completion && !ui.completion.busy) {
         ui.completion.draft = el.value;
@@ -1591,6 +1776,14 @@ document.addEventListener("keydown", (event) => {
   }
   if (target instanceof HTMLInputElement) {
     switch (target.dataset.input) {
+      case "sync-email":
+        event.preventDefault();
+        void sendSyncCode();
+        return;
+      case "sync-code":
+        event.preventDefault();
+        void verifySyncCode();
+        return;
       case "extend":
         event.preventDefault();
         void handleAction("dialog-confirm", target);
@@ -1616,6 +1809,12 @@ document.addEventListener("keydown", (event) => {
 const params = new URLSearchParams(location.hash.replace(/^#/, ""));
 const initialView = params.get("view");
 if (initialView === "today" || initialView === "history" || initialView === "settings") ui.view = initialView;
+// 浏览器验收可直达账号分区；名称仍按当前分区白名单检查。
+const initialSection = params.get("section");
+if (initialView === "settings" && initialSection && settingsSections().some(([id]) => id === initialSection)) {
+  ui.settingsSection = initialSection;
+  ui.settingsIndex = false;
+}
 
 async function start() {
   // 手机系统 WebView 太旧时，compat.js 已经把原因写在页面上，这里不再启动。

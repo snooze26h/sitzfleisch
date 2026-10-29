@@ -797,6 +797,43 @@ button.day-cell:active { background: rgba(231, 223, 208, 0.1); }
 .panel-meta { display: flex; align-items: center; justify-content: flex-end; min-height: 38px; padding-bottom: 14px; border-bottom: 1px solid var(--hair-strong); }
 .settings-panel.rows { border-top: 1px solid var(--hair-strong); }
 
+/* 账号流程沿用设置页的细线分区；长邮箱和恢复路径可换行，不挤压手机上的操作键。 */
+.sync-panel { gap: 20px; border-top: 1px solid var(--hair-strong); padding-top: 20px; }
+.sync-note { color: var(--ink-muted); font-size: 15px; line-height: 1.75; max-width: 42em; overflow-wrap: anywhere; }
+.sync-account { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; padding-bottom: 20px; border-bottom: 1px solid var(--hair); }
+.sync-account > div { display: flex; flex-direction: column; gap: 8px; min-width: 0; }
+.sync-email { font-size: 16px; font-weight: 500; color: var(--ink-high); overflow-wrap: anywhere; user-select: text; -webkit-user-select: text; }
+.sync-phase { font-size: 15px; color: var(--ink-muted); }
+.sync-phase.caution, .sync-attention, .sync-error { color: var(--caution); }
+.sync-login, .sync-choice { display: flex; flex-direction: column; gap: 18px; }
+.sync-form-field { display: flex; flex-direction: column; gap: 8px; max-width: 420px; }
+.sync-form-field label { font-size: 15px; font-weight: 500; color: var(--ink-body); }
+.sync-form-field .field { width: 100%; min-width: 0; }
+.sync-form-field .sync-code { max-width: 240px; font-family: var(--font-mono); font-size: 16px; letter-spacing: 3px; }
+.sync-actions { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; }
+.sync-actions .btn { min-height: 44px; white-space: normal; text-align: center; }
+.sync-error, .sync-attention { font-size: 15px; line-height: 1.75; overflow-wrap: anywhere; }
+.sync-choice h2 { font-size: 16px; font-weight: 600; line-height: 1.5; color: var(--ink-high); }
+.sync-comparison { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 20px; margin: 0; padding: 18px 0; border-block: 1px solid var(--hair); }
+.sync-comparison > div { display: flex; flex-direction: column; gap: 10px; min-width: 0; }
+.sync-comparison dt { font-size: 14px; color: var(--ink-muted); }
+.sync-comparison dd { display: flex; flex-direction: column; gap: 6px; margin: 0; font-size: 16px; line-height: 1.6; color: var(--ink-body); }
+.sync-comparison dd span { font-size: 14px; color: var(--ink-muted); }
+.sync-boundary { padding-top: 18px; border-top: 1px solid var(--hair); }
+.sync-recovery { font-size: 14px; color: var(--ink-muted); }
+.sync-recovery summary { cursor: pointer; min-height: 32px; line-height: 2; }
+.sync-recovery p { padding-top: 8px; font-family: var(--font-mono); line-height: 1.7; overflow-wrap: anywhere; user-select: text; -webkit-user-select: text; }
+.sync-indicator { display: inline-flex; align-items: center; align-self: flex-start; flex-wrap: wrap; gap: 6px; min-height: 32px; font-size: 14px; color: var(--ink-muted); border-radius: 6px; text-align: left; }
+.sync-indicator.caution { color: var(--caution); }
+.sync-indicator:hover { color: var(--ink-high); }
+.day-heading > .sync-indicator { margin-top: 8px; }
+@media (max-width: 420px) {
+  .sync-comparison { gap: 14px; }
+  .sync-comparison dd { font-size: 15px; }
+  .sync-actions .btn-primary { flex-basis: 100%; }
+  .sync-account { flex-wrap: wrap; }
+}
+
 .setting-row { display: flex; align-items: center; gap: 20px; padding: 20px 0; border-bottom: 1px solid var(--hair); }
 .setting-row .titles { display: flex; flex-direction: column; gap: 4px; flex: 1; min-width: 0; }
 .setting-row .titles b { font-size: 16px; font-weight: 500; color: var(--ink-body); }

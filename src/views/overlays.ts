@@ -59,7 +59,7 @@ function completionSheet(): string {
     <label class="sr-only" for="completion-note">实际完成的内容</label>
     <textarea id="completion-note" class="field" data-input="completion" rows="5" maxlength="${MAX_COMPLETION_NOTE_CHARS}" placeholder="例如：读完论文的方法部分，跑完两组对照实验。" ${entry.busy ? "disabled" : ""}>${esc(entry.draft)}</textarea>
     <div class="completion-foot"><span class="completion-error" role="status">${esc(entry.error)}</span><span>${entry.draft.length} / ${MAX_COMPLETION_NOTE_CHARS}</span></div>
-    <div class="btns"><span class="spacer"></span>${btn(entry.automatic ? "先跳过" : "取消", { kind: "plate", action: "completion-cancel", disabled: entry.busy })}${btn(entry.busy ? "正在保存…" : "保存记录", { kind: "primary", action: "completion-save", disabled: entry.busy })}</div>
+    <div class="btns"><span class="spacer"></span>${btn(entry.canDefer ? entry.missing && entry.draft ? "复制草稿并关闭" : "稍后再填" : entry.automatic ? "先跳过" : "取消", { kind: "plate", action: "completion-cancel", disabled: entry.busy })}${btn(entry.busy ? "正在保存…" : "保存记录", { kind: "primary", action: "completion-save", disabled: entry.busy })}</div>
   </div></div>`;
 }
 

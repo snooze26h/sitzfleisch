@@ -1,6 +1,6 @@
 // 界面自己的状态（不落盘）：当前页、草稿、展开项、菜单与对话框。
 
-import type { ArchivedDay, CategoryDef, CategoryState, Day, InstalledApp, PlatformInfo, Preferences, Snapshot, SystemStatus, View } from "./types";
+import type { ActionTarget, ArchivedDay, CategoryDef, CategoryState, Day, InstalledApp, PlatformInfo, Preferences, Snapshot, SystemStatus, View } from "./types";
 import { nowUnix, shortNameFrom } from "./format";
 
 /** 处理完这一下之后要不要留着框：返回 `"keep"` 就留着（重试还没成功），否则关掉。 */
@@ -57,6 +57,13 @@ export interface AppPicker {
 }
 
 export interface CompletionEditor {
+  expected: ActionTarget | null;
+  previousNote: string | null;
+  draftKey: string;
+  canDefer: boolean;
+  missing: boolean;
+  dayId?: string;
+  entryId?: string;
   dayStartedAt: number;
   entryIndex: number;
   endedAt: number;
@@ -83,10 +90,12 @@ export const ui = {
   rejectedStartAt: 0,
   breakDraft: null as number | null,
   completion: null as CompletionEditor | null,
+  /** 保存失败后暂缓补写的草稿，仅保留在本次运行内；账号和稳定记录 ID 共同隔离。 */
+  completionDrafts: new Map<string, string>(),
   creditPulse: null as string | null,
   // 历史
-  expandedDays: new Set<number>(),
-  selectedHistoryDay: null as number | null,
+  expandedDays: new Set<string>(),
+  selectedHistoryDay: null as string | null,
   // 设置
   /** 设置里当前打开的分区；侧栏在设置页会整个换成分区列表。 */
   settingsSection: "projects",
@@ -104,6 +113,14 @@ export const ui = {
   appVersion: null as string | null,
   removal: null as Removal | null,
   appPicker: null as AppPicker | null,
+  // 邮箱与验证码仅留在本次界面内存，不放进存档或浏览器存储。
+  syncEmail: "",
+  syncCode: "",
+  syncSentTo: "",
+  syncResendAt: 0,
+  syncBusy: false,
+  syncError: "",
+  syncPreview: false,
   // 覆盖层
   dialog: null as Dialog | null,
   /** 正在忙的是哪一个对话框（token）；null = 不忙。跟着实例走，旧操作不会禁用新框。 */

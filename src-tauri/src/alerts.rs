@@ -111,6 +111,15 @@ pub struct StatusUpdate<'a> {
 }
 
 impl StatusModel {
+    /// 共享状态使用校准时钟，系统通知要求设备墙钟；只在平台边界换算。
+    pub fn on_device_clock(&self, offset_seconds: i64) -> Self {
+        let offset = offset_seconds.saturating_mul(1000);
+        let mut model = self.clone();
+        model.chronometer_base_ms = model.chronometer_base_ms.map(|at| at.saturating_sub(offset));
+        model.timeout_at_ms = model.timeout_at_ms.map(|at| at.saturating_sub(offset));
+        model
+    }
+
     pub fn update(&self, now_ms: i64) -> StatusUpdate<'_> {
         StatusUpdate {
             visible: self.visible,
@@ -121,6 +130,10 @@ impl StatusModel {
             timeout_after_ms: self.timeout_at_ms.map(|at| at.saturating_sub(now_ms).max(1)),
         }
     }
+}
+
+pub fn device_alarm_time(logical_at: i64, clock_offset: i64) -> i64 {
+    logical_at.saturating_sub(clock_offset)
 }
 
 fn millis(seconds: i64) -> i64 {
@@ -320,5 +333,21 @@ mod tests {
         assert_eq!(first["chronometerBaseMs"], (state.last_tick + 60) * 1000);
         let later = serde_json::to_value(model.update((state.last_tick + 61) * 1000)).unwrap();
         assert_eq!(later["timeoutAfterMs"], 1);
+    }
+
+    #[test]
+    fn cloud_time_is_mapped_to_the_device_clock_for_alarms_and_chronometers() {
+        let mut state = studying();
+        start_block(&mut state);
+        let logical_now = state.last_tick;
+        let model = status_model(&state);
+        for offset in [-300, 0, 300] {
+            let device_now = logical_now - offset;
+            let on_device = model.on_device_clock(offset);
+            let update = serde_json::to_value(on_device.update(device_now * 1000)).unwrap();
+            assert_eq!(update["timeoutAfterMs"], 60_000);
+            assert_eq!(update["chronometerBaseMs"], (device_now + 60) * 1000);
+            assert_eq!(device_alarm_time(logical_now + 60, offset), device_now + 60);
+        }
     }
 }

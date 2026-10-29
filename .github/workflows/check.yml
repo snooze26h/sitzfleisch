@@ -46,6 +46,11 @@ jobs:
       - name: 快照乱序回归
         run: node scripts/check-snapshot-order.mjs
 
+      - name: 同步界面与数据库契约
+        run: |
+          node scripts/check-sync-ui.mjs
+          node scripts/check-sync-db.mjs
+
       - name: 短名规则与 Rust 对齐
         run: node scripts/check-short-name.mjs
 

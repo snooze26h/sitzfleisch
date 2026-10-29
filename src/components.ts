@@ -5,6 +5,7 @@ import type { Day, LedgerEntry } from "./types";
 import { esc, meter, duration, wallClock } from "./format";
 import { icon } from "./icons";
 import { iconOf, shortName, remainingOf, def, ui } from "./state";
+import { studyDayKey } from "./record-identity";
 
 export function attrs(data: Record<string, string | number | boolean | undefined> = {}): string {
   return Object.entries(data)
@@ -191,6 +192,9 @@ export function menuItem(label: string, action: string, opts: { data?: Record<st
 
 /** 台账的一行。放弃了、只记在账上的那一格名字淡一档，后面写明「未计入」；行首不再放要人去猜的方块。 */
 export function sessionRow(entry: LedgerEntry, d: Day): string {
+  const dayKey = studyDayKey(d);
+  const index = d.ledger.indexOf(entry);
+  const entryKey = entry.sync_id ? `sync-${entry.sync_id}` : `time-${entry.ended_at}-${index}`;
   const startedAt = entry.started_at > 0 ? entry.started_at : entry.ended_at - entry.seconds;
   const definition = def(entry.category);
   const name = d.categories.find((c) => c.id === entry.category)?.name ?? definition?.name ?? entry.category;
@@ -203,9 +207,9 @@ export function sessionRow(entry: LedgerEntry, d: Day): string {
     ? `<p class="session-note">${esc(entry.completion_note)}</p>` : "";
   const edit = entry.accepted ? btn(completion ? "编辑完成记录" : "补充完成记录", {
     kind: "quiet", action: "edit-completion", cls: "session-edit",
-    data: { day: d.started_at, index: d.ledger.indexOf(entry), ended: entry.ended_at },
+    data: { day: d.started_at, "day-key": dayKey, "day-id": d.sync_id ?? "", "entry-id": entry.sync_id ?? "", index, ended: entry.ended_at },
   }) : "";
-  return `<div class="session${entry.accepted ? "" : " rejected"}">
+  return `<div class="session${entry.accepted ? "" : " rejected"}" id="session-${esc(dayKey)}-${esc(entryKey)}">
     <div class="body">
       <div class="meta">
         <span class="nm">${esc(name)}</span>

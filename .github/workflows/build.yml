@@ -2,14 +2,74 @@ name: build
 
 on:
   workflow_dispatch:
+    inputs:
+      android_only:
+        description: "仅构建并签名 Android APK（签名 Secrets 必须齐全）"
+        type: boolean
+        required: false
+        default: false
+      supabase_url:
+        description: "可选：与其他设备相同的 Supabase HTTPS 项目地址"
+        type: string
+        required: false
+        default: ""
+      supabase_publishable_key:
+        description: "可选：与项目地址成对填写的 publishable/anon 公开密钥"
+        type: string
+        required: false
+        default: ""
   push:
     tags: ["v*"]
 
 permissions:
   contents: read
 
+# 仅传公开配置；外部输入作为数据经环境变量进入脚本，不拼进 shell 源码。
+env:
+  SITZFLEISCH_SUPABASE_URL: ${{ inputs.supabase_url || '' }}
+  SITZFLEISCH_SUPABASE_PUBLISHABLE_KEY: ${{ inputs.supabase_publishable_key || '' }}
+
 jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - name: 校验公开同步配置
+        shell: bash
+        run: |
+          node <<'NODE'
+          const url = process.env.SITZFLEISCH_SUPABASE_URL ?? '';
+          const key = process.env.SITZFLEISCH_SUPABASE_PUBLISHABLE_KEY ?? '';
+          const fail = (message) => { console.error(message); process.exit(1); };
+          if ((url === '') !== (key === '')) fail('项目地址和公开密钥必须同时填写或同时留空。');
+          if (url === '') {
+            console.log('未配置云同步，构建保留单机模式。');
+            process.exit(0);
+          }
+          if (Buffer.byteLength(url, 'utf8') > 2048 || /[\s\u0000-\u001f\u007f]/u.test(url)) {
+            fail('项目地址过长或包含空白/控制字符。');
+          }
+          let parsed;
+          try { parsed = new URL(url); } catch { fail('项目地址格式无效。'); }
+          if (parsed.protocol !== 'https:' || !parsed.hostname || parsed.username || parsed.password
+              || parsed.pathname !== '/' || parsed.search || parsed.hash) {
+            fail('项目地址必须是无账号、路径、查询参数和片段的 HTTPS 地址。');
+          }
+          if (key.length > 4096) fail('公开密钥过长。');
+          const publishable = key.length >= 24 && /^sb_publishable_[A-Za-z0-9_-]+$/.test(key);
+          let anon = false;
+          if (key.length >= 40 && /^[A-Za-z0-9_.-]+$/.test(key) && key.split('.').length === 3) {
+            try {
+              const claims = JSON.parse(Buffer.from(key.split('.')[1], 'base64url').toString('utf8'));
+              anon = claims !== null && typeof claims === 'object' && claims.role === 'anon';
+            } catch { /* 无效 JWT 不进入旧 anon 兼容分支。 */ }
+          }
+          if (!publishable && !anon) fail('仅接受 publishable/anon 公开密钥，禁止 secret/service_role 密钥。');
+          console.log('公开同步配置校验通过。');
+          NODE
+
   build:
+    needs: validate
+    if: github.event_name != 'workflow_dispatch' || !inputs.android_only
     strategy:
       fail-fast: false
       matrix:
@@ -73,6 +133,7 @@ jobs:
           if-no-files-found: error
 
   android:
+    needs: validate
     runs-on: ubuntu-latest
     timeout-minutes: 60
     outputs:
@@ -111,14 +172,20 @@ jobs:
 
       - run: npm ci
 
-      # 只判断三项签名 Secrets 是否齐全，不写任何文件；发布标签缺任何一项都直接失败。
+      # 此处只取得“是否齐全”的布尔值；三个 Secret 的值仍仅进入后面的签名步骤。
+      # 标签发布或 android_only 都必须签名，不能生成无法覆盖正式安装的 debug 包。
       - name: 确定构建模式
         id: mode
         env:
           HAS_SIGNING: ${{ secrets.ANDROID_KEY_BASE64 != '' && secrets.ANDROID_KEY_ALIAS != '' && secrets.ANDROID_KEY_PASSWORD != '' }}
+          ANDROID_ONLY: ${{ github.event_name == 'workflow_dispatch' && inputs.android_only }}
         run: |
+          set -euo pipefail
           if [[ "$HAS_SIGNING" == "true" ]]; then
             echo "mode=release" >> "$GITHUB_OUTPUT"
+          elif [[ "$ANDROID_ONLY" == "true" ]]; then
+            echo "仅构建 Android 模式需要完整的原有签名 Secrets，不能回退为 debug" >&2
+            exit 1
           elif [[ "$GITHUB_REF" == refs/tags/v* ]]; then
             echo "发布标签缺少完整的 Android 签名 Secrets" >&2
             exit 1
@@ -205,8 +272,8 @@ jobs:
 
   release:
     needs: [build, android]
-    # 手动构建的调试回退包只留在 Artifacts，不能进入正式 Release。
-    if: startsWith(github.ref, 'refs/tags/v') && needs.android.outputs.build_mode == 'release'
+    # 手动构建只留 Artifacts；只有推送版本标签才发布正式 Release。
+    if: startsWith(github.ref, 'refs/tags/v') && github.event_name == 'push' && needs.android.outputs.build_mode == 'release'
     permissions:
       contents: write
     runs-on: ubuntu-latest

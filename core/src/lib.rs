@@ -9,6 +9,7 @@ use serde::{Deserialize, Serialize};
 
 mod alerts;
 pub use alerts::{AlertKind, PlannedAlert};
+pub mod sync;
 
 pub const SCHEMA_VERSION: u32 = 5;
 pub const SUSPEND_GAP_SECONDS: i64 = 120;
@@ -440,6 +441,9 @@ pub struct TaskItem {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct BlockTimer {
+    /// 共享模式的稳定标识；单机旧存档保持空值，不改变原来的 JSON 形状。
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub sync_id: String,
     pub category: String,
     pub total_seconds: i64,
     pub elapsed_seconds: i64,
@@ -472,6 +476,8 @@ impl BlockTimer {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct LedgerEntry {
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub sync_id: String,
     pub category: String,
     pub seconds: i64,
     /// 计入今天的进度；主动放弃的格为 false，时间只留在台账上。
@@ -528,6 +534,8 @@ pub struct CategoryState {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Day {
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub sync_id: String,
     pub profile_name: String,
     /// 开始今天时用的那份计划 id。
     #[serde(default)]
@@ -579,6 +587,7 @@ impl Day {
             })
             .collect();
         Day {
+            sync_id: String::new(),
             profile_name: profile.name.clone(),
             profile_id: profile.id.clone(),
             started_at: now,
@@ -680,6 +689,8 @@ impl Day {
             }
         }
         self.ledger.push(LedgerEntry {
+            // 多台设备可以各自投影到自然终点，但它们仍然得到同一条专注记录。
+            sync_id: timer.sync_id,
             category: timer.category,
             seconds,
             accepted,
@@ -1048,6 +1059,18 @@ impl State {
         Ok(())
     }
 
+    /// 多端可能在同一秒开始各自的学习日；共享模式只能按稳定标识删除，不能退回时间戳匹配。
+    pub fn delete_history_day_by_id(&mut self, day_id: &str) -> RuleResult {
+        sync::sync_id(day_id).map_err(|_| "学习日标识无效，请重新打开记录")?;
+        if self.day.as_ref().is_some_and(|day| day.sync_id == day_id)
+            || self.history.iter().filter(|archived| archived.day.sync_id == day_id).count() != 1
+        {
+            return Err("这一天的归档已改变，请重新打开记录");
+        }
+        self.history.retain(|archived| archived.day.sync_id != day_id);
+        Ok(())
+    }
+
     // ---------- 专注格 ----------
 
     /// 开格，之后的休息沿用偏好里的时长。
@@ -1093,6 +1116,7 @@ impl State {
         day.cut_rest(now);
         day.close_pause(now);
         day.timer = Some(BlockTimer {
+            sync_id: String::new(),
             category: category_id.into(),
             total_seconds: minutes * 60,
             elapsed_seconds: 0,
@@ -1151,12 +1175,7 @@ impl State {
 
     /// 写入实际完成记录；精确定位学习日和台账项，避免迟到的弹窗写到下一格。
     pub fn set_completion_note(&mut self, day_started_at: i64, entry_index: usize, ended_at: i64, note: &str) -> RuleResult {
-        if note.len() > MAX_COMPLETION_NOTE_CHARS * 4 || note.chars().count() > MAX_COMPLETION_NOTE_CHARS {
-            return Err("完成记录最多 2000 字");
-        }
-        if note.chars().any(|c| c.is_control() && !matches!(c, '\n' | '\r' | '\t')) {
-            return Err("完成记录含有不支持的控制字符");
-        }
+        let note = normalized_completion_note(note)?;
         let day = if self.day.as_ref().is_some_and(|d| d.started_at == day_started_at) {
             self.day.as_mut()
         } else {
@@ -1164,7 +1183,26 @@ impl State {
         }.ok_or("这一天的记录已不存在")?;
         let entry = day.ledger.get_mut(entry_index).filter(|e| e.ended_at == ended_at && e.accepted)
             .ok_or("这段记录已改变，请重新打开")?;
-        entry.completion_note = Some(note.replace("\r\n", "\n").replace('\r', "\n").trim().to_string());
+        entry.completion_note = Some(note);
+        Ok(())
+    }
+
+    /// 共享记录不依赖数组位置：合并历史后顺序可以改变，同秒记录也仍能精确定位。
+    pub fn set_completion_note_by_id(&mut self, day_id: &str, entry_id: &str, note: &str) -> RuleResult {
+        sync::sync_id(day_id).map_err(|_| "学习日标识无效，请重新打开记录")?;
+        sync::sync_id(entry_id).map_err(|_| "专注记录标识无效，请重新打开记录")?;
+        let note = normalized_completion_note(note)?;
+        let matches = self.day.iter().chain(self.history.iter().map(|archived| &archived.day))
+            .filter(|day| day.sync_id == day_id).count();
+        if matches != 1 { return Err("这一天的记录已改变，请重新打开"); }
+        let day = self.day.iter_mut().chain(self.history.iter_mut().map(|archived| &mut archived.day))
+            .find(|day| day.sync_id == day_id).ok_or("这一天的记录已不存在")?;
+        if day.ledger.iter().filter(|entry| entry.sync_id == entry_id).count() != 1 {
+            return Err("这段记录已改变，请重新打开");
+        }
+        let entry = day.ledger.iter_mut().find(|entry| entry.sync_id == entry_id && entry.accepted)
+            .ok_or("这段记录已改变，请重新打开")?;
+        entry.completion_note = Some(note);
         Ok(())
     }
 
@@ -1191,6 +1229,16 @@ impl State {
     }
 
 
+}
+
+fn normalized_completion_note(note: &str) -> Result<String, &'static str> {
+    if note.len() > MAX_COMPLETION_NOTE_CHARS * 4 || note.chars().count() > MAX_COMPLETION_NOTE_CHARS {
+        return Err("完成记录最多 2000 字");
+    }
+    if note.chars().any(|c| c.is_control() && !matches!(c, '\n' | '\r' | '\t')) {
+        return Err("完成记录含有不支持的控制字符");
+    }
+    Ok(note.replace("\r\n", "\n").replace('\r', "\n").trim().to_string())
 }
 
 // ---------- 「下一格」建议（与界面里的 TS 版同一套规则，菜单栏用） ----------

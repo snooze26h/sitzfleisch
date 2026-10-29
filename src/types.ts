@@ -119,6 +119,8 @@ export interface TaskItem {
 }
 
 export interface BlockTimer {
+  /** 同步模式中的稳定标识，旧单机存档可能没有。 */
+  sync_id?: string;
   category: string;
   total_seconds: number;
   elapsed_seconds: number;
@@ -135,6 +137,7 @@ export interface CategoryState {
 }
 
 export interface LedgerEntry {
+  sync_id?: string;
   category: string;
   seconds: number;
   accepted: boolean;
@@ -158,6 +161,7 @@ export interface RestSpan {
 }
 
 export interface Day {
+  sync_id?: string;
   profile_name: string;
   profile_id: string;
   started_at: number;
@@ -218,9 +222,47 @@ export interface Snapshot {
   /** 上一次保存失败的系统原因，成功一次就变回 null。只走 IPC，不进 state.json。 */
   save_error: string | null;
   state_path: string;
+  /** 旧预览快照可省略；令牌永不进入此结构。 */
+  sync?: SyncStatus;
   /** QA 启动参数指定的首屏；平时为空。 */
   initial_view?: string | null;
   initial_scroll?: number;
+}
+
+export interface SyncStatus {
+  configured: boolean;
+  account_id: string | null;
+  phase: "unconfigured" | "signed_out" | "awaiting_import" | "synced" | "pending" | "offline" | "conflict" | "reauth" | "error";
+  email: string | null;
+  revision: number;
+  pending: boolean;
+  last_synced_at: number | null;
+  error: string | null;
+  migration: {
+    local_days: number;
+    cloud_days: number;
+    local_active: boolean;
+    cloud_active: boolean;
+    cloud_empty: boolean;
+  } | null;
+  conflict: {
+    fields: string[];
+    local_days: number;
+    remote_days: number;
+    local_active: boolean;
+    remote_active: boolean;
+  } | null;
+  recovery_path: string | null;
+}
+
+/** 业务操作作用于用户看到的那一份状态；每秒走时不改变这份操作目标。 */
+export interface ActionTarget {
+  account_id: string | null;
+  revision: number;
+  day_id: string | null;
+  timer_id: string | null;
+  paused: boolean;
+  break_until: number | null;
 }
 
 export type View = "today" | "history" | "settings";

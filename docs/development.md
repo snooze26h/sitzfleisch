@@ -42,6 +42,8 @@ scripts/            静态检查与回归检查脚本
 npx tsc --noEmit
 node scripts/check-dead-exports.mjs
 node scripts/check-snapshot-order.mjs
+node scripts/check-sync-ui.mjs
+node scripts/check-sync-db.mjs
 node scripts/check-short-name.mjs
 node scripts/check-scheduler.mjs
 node scripts/check-timeline.mjs
@@ -53,6 +55,8 @@ cargo clippy --manifest-path core/Cargo.toml --all-targets -- -D warnings
 cargo test --manifest-path src-tauri/Cargo.toml
 cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings
 ```
+
+跨设备同步的协议、数据隔离和并发约定见[同步实现约定](sync-design.md)，云端安装与构建配置见[部署说明](sync-deployment.md)。HTTP 回归使用临时回环服务和合成身份，数据库测试使用内存 PGlite；这些测试不访问真实账号、钥匙串或个人记录。测试环境需要允许监听 `127.0.0.1`。
 
 ## 界面预览
 

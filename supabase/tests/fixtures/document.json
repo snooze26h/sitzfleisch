@@ -1,0 +1,66 @@
+{
+  "schema": 1,
+  "preferences": {
+    "categories": [
+      {
+        "id": "reading",
+        "name": "阅读",
+        "short_name": "阅读",
+        "default_block_minutes": 30,
+        "icon": "book-open",
+        "role": "general",
+        "block_rationale": ""
+      }
+    ],
+    "profiles": [
+      {
+        "id": "standard",
+        "name": "今天",
+        "subtitle": "",
+        "quotas": [{ "category": "reading", "minutes": 60 }]
+      }
+    ],
+    "break_minutes": 10,
+    "uniform_block_minutes": 0,
+    "default_profile_id": "standard"
+  },
+  "last_tick": 1700000600,
+  "day": {
+    "sync_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-d-0",
+    "profile_name": "今天",
+    "profile_id": "standard",
+    "started_at": 1700000000,
+    "categories": [{ "id": "reading", "name": "阅读", "quota_minutes": 60, "accepted_seconds": 300 }],
+    "timer": {
+      "sync_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-b-1",
+      "category": "reading",
+      "total_seconds": 1800,
+      "elapsed_seconds": 240,
+      "tasks": [],
+      "started_at": 1700000360,
+      "break_minutes": 10
+    },
+    "ledger": [{
+      "sync_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-b-0",
+      "category": "reading",
+      "seconds": 300,
+      "accepted": true,
+      "tasks": [{ "text": "阅读测试章节", "done": true }],
+      "started_at": 1700000000,
+      "ended_at": 1700000300,
+      "completion_note": "本地合成测试记录\n不含个人数据"
+    }],
+    "seated_seconds": 540,
+    "paused_seconds": 60,
+    "suspend_seconds": 0,
+    "cups": 0,
+    "seated_since_water": 0,
+    "seated_since_relief": 0,
+    "paused_without_block": 0,
+    "break_until": null,
+    "pauses": [{ "started_at": 1700000300, "ended_at": 1700000360, "auto": false }],
+    "rests": []
+  },
+  "history": [],
+  "deleted_day_ids": []
+}

@@ -1,6 +1,6 @@
 [package]
 name = "sitzfleisch-x"
-version = "0.14.2"
+version = "0.15.0"
 description = "Sitzfleisch cross-platform (macOS + Windows)"
 authors = ["snooze26h"]
 edition = "2021"
@@ -25,6 +25,8 @@ hmac = "0.12"
 sha2 = "0.10"
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
 time = "=0.3.55"
+# 网络仅在 Rust 外壳中使用，凭据不进入 WebView；WebPKI 根证书兼容 Android。
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"] }
 
 [target.'cfg(not(any(target_os = "android", target_os = "ios")))'.dependencies]
 tauri-plugin-single-instance = "2"
@@ -41,6 +43,7 @@ tauri-plugin-sitzfleisch-android = { path = "plugins/sitzfleisch-android" }
 windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Security_Cryptography", "Win32_System_SystemInformation"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
+security-framework = "3.7"
 objc2 = "0.6.4"
 block2 = "0.6.2"
 objc2-foundation = { version = "0.3.2", default-features = false, features = ["std", "NSDate", "NSError", "NSGeometry", "NSNotification", "NSOperation", "NSRunLoop", "NSString", "NSTimer", "NSValue", "block2"] }

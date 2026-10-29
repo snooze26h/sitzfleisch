@@ -23,6 +23,7 @@ import {
 } from "../components";
 import { blockMinutes, estimatedRemainingWallSeconds, remainingSeconds, suggest } from "../scheduler";
 import { appBlocking } from "../app-blocking";
+import { syncIndicator } from "./sync";
 import {
   BREAK_OPTIONS,
   breakRemaining,
@@ -79,6 +80,7 @@ function startBoard(): string {
   return `<section class="start-board${warning ? " with-warning" : ""}" id="start">
       <header class="masthead">
         <h1 class="t-masthead">落座，便是今天</h1>
+        ${syncIndicator()}
       </header>
       ${warning}
       <div class="plan">
@@ -168,11 +170,12 @@ function dayReadings(d: Day): string {
   const moreItems = `${menuItem("复制今天的 Markdown 总结", "copy-today-md")}<div class="menu-sep"></div>${menuItem("返回开始页…", "discard-day", { danger: true })}${menuItem("收工归档…", "end-day", { danger: true })}`;
   if (ui.compact) {
     // 钟点与菜单通栏，给右侧的 40px / 28px 读数留足宽度。
-    return `<div class="day-heading"><header class="section-head"><h2 class="section-title">从 ${esc(wallClock(d.started_at))} 坐下</h2><span class="trail">${menuButton("more", ui.menu, icon("ellipsis-vertical", 17), moreItems, { iconOnly: true, ariaLabel: "更多操作" })}</span></header></div>
+    return `<div class="day-heading"><header class="section-head"><h2 class="section-title">从 ${esc(wallClock(d.started_at))} 坐下</h2><span class="trail">${menuButton("more", ui.menu, icon("ellipsis-vertical", 17), moreItems, { iconOnly: true, ariaLabel: "更多操作" })}</span></header>${syncIndicator()}</div>
       <aside class="day-readings" id="day-readings"><div class="net"><span class="engraved">已学</span><div class="figure"><span class="val">${displayMeter(netSeconds(d))}</span><span class="of">/ ${displayMeter(quotaSeconds(d))}</span></div></div>${paused}</aside>`;
   }
   return `<aside class="day-readings" id="day-readings">
     <header class="section-head"><h2 class="section-title">从 ${esc(wallClock(d.started_at))} 坐下</h2><span class="trail">${menuButton("more", ui.menu, icon("ellipsis-vertical", 17), moreItems, { iconOnly: true, ariaLabel: "更多操作" })}</span></header>
+    ${syncIndicator()}
     <div class="net"><span class="engraved">已学</span><div class="figure"><span class="val">${esc(meter(netSeconds(d)))}</span><span class="of">/ ${esc(meter(quotaSeconds(d)))}</span></div></div>
     ${paused}
   </aside>`;

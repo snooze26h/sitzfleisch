@@ -8,6 +8,8 @@ import { icon } from "../icons";
 import { archiveMoon, crescentArt, dayFull, dayMoon, keyMoon, newMoon } from "../moon";
 import { btn, quotaRows, sectionLabel, sessionRow } from "../components";
 import { HISTORY_LIMIT, day, history, netSeconds, quotaSeconds, ui } from "../state";
+import { studyDayKey } from "../record-identity";
+import { normalizedSyncStatus } from "../sync";
 
 export function historyEmpty(): boolean {
   return history().length === 0;
@@ -16,7 +18,8 @@ export function historyEmpty(): boolean {
 export function historyPage(): string {
   const days = [...history()].reverse();
   if (!days.length) {
-    return `<section class="history-empty">${crescentArt("empty-art")}<div><h1>还没有归档</h1><p>收工后自动留存，最多 ${HISTORY_LIMIT} 天。</p></div></section>`;
+    const detail = normalizedSyncStatus(ui.snap?.sync).email ? "收工后自动归档，同一账号的设备都能查看。" : `收工后自动留存，最多 ${HISTORY_LIMIT} 天。`;
+    return `<section class="history-empty">${crescentArt("empty-art")}<div><h1>还没有归档</h1><p>${detail}</p></div></section>`;
   }
   return `<header class="page-heading"><div class="heading-copy"><h1>历史</h1><p>已归档 ${esc(days.length)} 天</p></div></header>` + moonWall(days) + archiveList(days);
 }
@@ -91,9 +94,10 @@ function moonWall(days: ArchivedDay[]): string {
         const d = entry.day;
         const done = netSeconds(d);
         const stamp = d.started_at;
-        const selected = ui.selectedHistoryDay === stamp;
+        const recordKey = studyDayKey(d);
+        const selected = ui.selectedHistoryDay === recordKey;
         const label = `${new Date(stamp * 1000).getFullYear()}年${dayLabel(stamp)}，已学${duration(done)}，目标${duration(quotaSeconds(d))}，查看归档详情`;
-        columns.push(`<button class="day-cell${selected ? " on" : ""}" id="wall-day-${esc(stamp)}" data-action="open-chart-day" data-id="${esc(stamp)}" title="${esc(label)}" aria-label="${esc(label)}" aria-pressed="${selected}" aria-expanded="${ui.expandedDays.has(stamp)}" aria-controls="archive-detail-${esc(stamp)}">${archiveMoon(d, "tile")}</button>`);
+        columns.push(`<button class="day-cell${selected ? " on" : ""}" id="wall-day-${esc(recordKey)}" data-action="open-chart-day" data-id="${esc(recordKey)}" title="${esc(label)}" aria-label="${esc(label)}" aria-pressed="${selected}" aria-expanded="${ui.expandedDays.has(recordKey)}" aria-controls="archive-detail-${esc(recordKey)}">${archiveMoon(d, "tile")}</button>`);
       } else if (time >= today.getTime()) {
         columns.push(`<span class="day-cell"></span>`);
       } else if (time >= oldest) {
@@ -148,9 +152,10 @@ function compositionStrip(d: Day): string {
 
 function archiveRow(entry: ArchivedDay): string {
   const d = entry.day;
-  const open = ui.expandedDays.has(d.started_at);
+  const key = studyDayKey(d);
+  const open = ui.expandedDays.has(key);
   const accepted = d.ledger.filter((l) => l.accepted).length;
-  const header = `<button class="archive-row${ui.selectedHistoryDay === d.started_at ? " on" : ""}${open ? " open" : ""}" id="archive-${d.started_at}" data-action="toggle-day" data-id="${d.started_at}" aria-expanded="${open}" aria-controls="archive-detail-${d.started_at}" aria-label="${open ? "折叠" : "展开"} ${esc(dayLabel(d.started_at))} 的归档详情">
+  const header = `<button class="archive-row${ui.selectedHistoryDay === key ? " on" : ""}${open ? " open" : ""}" id="archive-${esc(key)}" data-action="toggle-day" data-id="${esc(key)}" aria-expanded="${open}" aria-controls="archive-detail-${esc(key)}" aria-label="${open ? "折叠" : "展开"} ${esc(dayLabel(d.started_at))} 的归档详情">
       ${icon(open ? "chevron-down" : "chevron-right", 14, "chev")}
       <span class="archive-moon">${archiveMoon(d, "row")}</span>
       <span class="titles"><b>${esc(dayLabel(d.started_at))}</b><span>${esc(wallRange(d.started_at, entry.ended_at))} · ${accepted} 格计入</span></span>
@@ -159,13 +164,13 @@ function archiveRow(entry: ArchivedDay): string {
     </button>`;
   if (!open) return header;
   const sessions = d.ledger.length ? `<div class="sessions">${d.ledger.map((l) => sessionRow(l, d)).join("")}</div>` : "";
-  const detail = `<div class="archive-detail" id="archive-detail-${d.started_at}">
+  const detail = `<div class="archive-detail" id="archive-detail-${esc(key)}">
       ${quotaRows(d, { compact: true })}
       ${sessions}
       <div class="actions">
-        ${btn("复制这一天的 Markdown", { kind: "plate", action: "copy-md", data: { id: d.started_at } })}
+        ${btn("复制这一天的 Markdown", { kind: "plate", action: "copy-md", data: { id: key } })}
         <span class="spacer"></span>
-        ${btn("永久删除这一天", { kind: "danger", action: "delete-day", data: { id: d.started_at }, title: "将先显示确认提示" })}
+        ${btn("永久删除这一天", { kind: "danger", action: "delete-day", data: { id: key }, title: "将先显示确认提示" })}
       </div>
     </div>`;
   return header + detail;

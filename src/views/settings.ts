@@ -11,9 +11,11 @@ import { icon } from "../icons";
 import { PROJECT_ICON_CHOICES } from "../project-icons";
 import { btn, labelled, select, stepper, toggle } from "../components";
 import { BLOCK_OPTIONS, BREAK_OPTIONS, IDLE_OPTIONS, day, hasFeature, honorPhone, prefs, profileTotalMinutes, ui, withValue } from "../state";
+import { accountPanel } from "./sync";
 
 /** 设置的分区：id → 标题 + 图标。侧栏在设置页直接列它们，一区一页。 */
 const SETTINGS_SECTIONS: [string, string, string][] = [
+  ["account", "账号与同步", "cloud"],
   ["projects", "项目", "layers"],
   ["tiers", "时间安排", "sliders-horizontal"],
   ["rhythm", "节奏", "timer"],
@@ -31,6 +33,7 @@ export function settingsSections(): [string, string, string][] {
 
 function sectionBody(id: string): string {
   switch (id) {
+    case "account": return accountPanel();
     case "tiers": return tierPlan();
     case "rhythm": return rhythm();
     case "hosts": return websiteBlock();

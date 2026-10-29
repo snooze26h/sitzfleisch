@@ -423,4 +423,54 @@ class SitzfleischPlugin(private val activity: Activity) : Plugin(activity) {
     result.put("packageName", AppBlockStore.takeNotice() ?: JSONObject.NULL)
     invoke.resolve(result)
   }
+
+  private fun sessionArgs(invoke: Invoke, withValue: Boolean): Pair<String, String?> {
+    // 桥接 JSON 会再转义一次；明文会话本身的字节上限仍由 Store 独立检查。
+    require(invoke.getRawArgs().length <= 200_000)
+    val args = invoke.getArgs()
+    require(args.length() == if (withValue) 2 else 1)
+    require(args.opt("scope") is String)
+    val scope = args.getString("scope")
+    require(SyncCredentialStore.validScope(scope))
+    val value = if (withValue) {
+      require(args.opt("value") is String)
+      args.getString("value").also { SyncCredentialStore.validateSession(it) }
+    } else null
+    return Pair(scope, value)
+  }
+
+  /** 仅由 Rust 原生桥调用；没有对应的 WebView 权限或前端命令。 */
+  @Command
+  fun loadSyncSession(invoke: Invoke) {
+    try {
+      val (scope, _) = sessionArgs(invoke, false)
+      val result = JSObject()
+      result.put("value", SyncCredentialStore.load(activity, scope) ?: JSONObject.NULL)
+      invoke.resolve(result)
+    } catch (_: Exception) {
+      invoke.reject("无法安全读取登录会话，请重新登录。")
+    }
+  }
+
+  @Command
+  fun storeSyncSession(invoke: Invoke) {
+    try {
+      val (scope, value) = sessionArgs(invoke, true)
+      SyncCredentialStore.store(activity, scope, requireNotNull(value))
+      invoke.resolve()
+    } catch (_: Exception) {
+      invoke.reject("无法安全保存登录会话，原有会话仍保留。")
+    }
+  }
+
+  @Command
+  fun deleteSyncSession(invoke: Invoke) {
+    try {
+      val (scope, _) = sessionArgs(invoke, false)
+      SyncCredentialStore.delete(activity, scope)
+      invoke.resolve()
+    } catch (_: Exception) {
+      invoke.reject("无法清除本机登录会话，请稍后重试。")
+    }
+  }
 }

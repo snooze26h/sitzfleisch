@@ -38,4 +38,17 @@ impl<R: Runtime> SitzfleischAndroid<R> {
     pub fn take_block_notice<T: DeserializeOwned>(&self) -> Result<T, PluginInvokeError> {
         self.0.run_mobile_plugin("takeBlockNotice", ())
     }
+
+    // 会话只在 Rust 与原生 Keystore 之间传递；这些方法不注册为 WebView 命令。
+    pub fn load_sync_session<T: DeserializeOwned>(&self, payload: impl Serialize) -> Result<T, PluginInvokeError> {
+        self.0.run_mobile_plugin("loadSyncSession", payload)
+    }
+
+    pub fn store_sync_session(&self, payload: impl Serialize) -> Result<(), PluginInvokeError> {
+        self.0.run_mobile_plugin("storeSyncSession", payload)
+    }
+
+    pub fn delete_sync_session(&self, payload: impl Serialize) -> Result<(), PluginInvokeError> {
+        self.0.run_mobile_plugin("deleteSyncSession", payload)
+    }
 }

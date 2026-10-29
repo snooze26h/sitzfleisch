@@ -1,7 +1,7 @@
 {
   "name": "sitzfleisch-x",
   "private": true,
-  "version": "0.14.2",
+  "version": "0.15.0",
   "type": "module",
   "scripts": {
     "dev": "vite",
@@ -15,6 +15,7 @@
     "morphdom": "^2.7.8"
   },
   "devDependencies": {
+    "@electric-sql/pglite": "0.5.12",
     "@tauri-apps/cli": "^2",
     "typescript": "~5.6.2",
     "vite": "^6.0.3"

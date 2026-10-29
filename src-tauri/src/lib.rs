@@ -41,6 +41,11 @@ mod alerts;
 mod alarm_store;
 mod clock_policy;
 mod android_shutdown;
+mod sync;
+mod sync_http;
+mod sync_store;
+mod sync_credentials;
+mod sync_clock;
 use clock_policy::{advance_time, resume_time, show_due_banners, TimePolicy};
 #[cfg(target_os = "android")]
 mod mobile;
@@ -56,6 +61,10 @@ struct BlockingStatus {
 #[cfg_attr(mobile, allow(dead_code))]
 struct Shared {
     state: Mutex<core::State>,
+    /// 锁顺序固定为 state → sync；网络串行锁不阻塞心跳和本机操作。
+    sync: Mutex<sync::Runtime>,
+    sync_network: Mutex<()>,
+    switching_account: AtomicBool,
     /// 退出只改变运行时屏蔽状态，不结束学习日或清空用户配置。
     exiting: AtomicBool,
     blocking_released: AtomicBool,
@@ -93,8 +102,8 @@ struct Shared {
 #[derive(Debug, PartialEq, Eq)]
 #[cfg_attr(mobile, allow(dead_code))]
 enum TrayMenuState {
-    Day { line: String, paused: Option<bool>, totals: String },
-    Idle { profile: Option<(String, String)> },
+    Day { line: String, paused: Option<bool>, totals: String, target: Option<sync::ActionTarget> },
+    Idle { profile: Option<(String, String)>, target: Option<sync::ActionTarget> },
 }
 
 /// 托盘菜单主行的文字。菜单和 shape 都从这里取，两边不会分叉。
@@ -137,33 +146,49 @@ fn default_profile(state: &core::State) -> Option<&core::ProfileDef> {
 fn tray_shape(state: &core::State) -> TrayMenuState {
     match &state.day {
         Some(day) => TrayMenuState::Day {
+            target: None,
             line: tray_menu_line(state, day),
             paused: day.timer.as_ref().map(|_| day.is_paused()),
             totals: format!("已学 {}", core::duration_text(day.net_seconds())),
         },
         None => TrayMenuState::Idle {
+            target: None,
             profile: default_profile(state).map(|p| (p.id.clone(), p.name.clone())),
         },
     }
 }
 
+#[cfg(desktop)]
+fn tray_shape_with_identity(state: &core::State, sync: &sync::Runtime) -> TrayMenuState {
+    let mut shape = tray_shape(state);
+    match &mut shape {
+        TrayMenuState::Day { target, .. } | TrayMenuState::Idle { target, .. } => *target = Some(sync.action_target(state)),
+    }
+    shape
+}
+
 /// 菜单栏菜单：跟着状态走。只在 `tray_shape` 变化时才需要重建。
 #[cfg(desktop)]
 fn build_tray_menu(app: &AppHandle, state: &TrayMenuState) -> tauri::Result<Menu<Wry>> {
+    use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
     let mut items: Vec<Box<dyn tauri::menu::IsMenuItem<Wry>>> = Vec::new();
     let text = |app: &AppHandle, id: &str, text: &str| MenuItem::with_id(app, id, text, false, None::<&str>);
     let action = |app: &AppHandle, id: &str, text: &str| MenuItem::with_id(app, id, text, true, None::<&str>);
+    let bound = |id: &str, target: &Option<sync::ActionTarget>| match target {
+        Some(target) => format!("{id}@{}", URL_SAFE_NO_PAD.encode(serde_json::to_vec(target).expect("计时操作目标可序列化"))),
+        None => id.to_owned(),
+    };
 
     items.push(Box::new(MenuItem::with_id(app, "show", "打开坐功", true, Some("CmdOrCtrl+O"))?));
     items.push(Box::new(PredefinedMenuItem::separator(app)?));
 
     match state {
-        TrayMenuState::Day { line, paused, totals } => {
+        TrayMenuState::Day { line, paused, totals, target } => {
             items.push(Box::new(text(app, "info", line)?));
             if let Some(paused) = paused {
-                items.push(Box::new(action(app, "toggle", if *paused { "继续" } else { "暂停" })?));
+                items.push(Box::new(action(app, &bound("toggle", target), if *paused { "继续" } else { "暂停" })?));
                 items.push(Box::new(action(app, "extend", "延长时间…")?));
-                items.push(Box::new(action(app, "finish", "结束这一格")?));
+                items.push(Box::new(action(app, &bound("finish", target), "结束这一格")?));
             } else {
                 items.push(Box::new(action(app, "show", "去开一格")?));
             }
@@ -171,12 +196,12 @@ fn build_tray_menu(app: &AppHandle, state: &TrayMenuState) -> tauri::Result<Menu
             // 已学时间只到分钟，一天里最多变几百次，不会打断菜单操作。
             items.push(Box::new(text(app, "totals", totals)?));
         }
-        TrayMenuState::Idle { profile } => {
+        TrayMenuState::Idle { profile, target } => {
             items.push(Box::new(text(app, "info", "今天还没开始")?));
             if let Some((id, name)) = profile {
                 // 计划只剩一份，按钮和开始页一样叫「开始今天」；拼计划名会拼出「开始今天日」。
                 let _ = name;
-                items.push(Box::new(action(app, &format!("start:{id}"), "开始今天")?));
+                items.push(Box::new(action(app, &bound(&format!("start:{id}"), target), "开始今天")?));
             }
         }
     }
@@ -216,23 +241,33 @@ fn show_main_window(app: &AppHandle) {
 
 #[cfg(desktop)]
 fn handle_tray_menu(app: &AppHandle, id: &str) {
+    use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
+    let (id, expected) = match id.split_once('@') {
+        Some((action, encoded)) if encoded.len() <= 2048 => {
+            let expected = URL_SAFE_NO_PAD.decode(encoded).ok().and_then(|bytes| serde_json::from_slice::<sync::ActionTarget>(&bytes).ok());
+            let Some(expected) = expected else { return; };
+            (action, Some(expected))
+        }
+        Some(_) => return,
+        None => (id, None),
+    };
     match id {
         "show" => show_main_window(app),
         "toggle" => {
-            let _ = mutate(app, |s| s.toggle_pause(now_unix()));
+            if mutate_observed(app, expected, sync::TargetCheck::Live, |s| s.toggle_pause(s.last_tick)).is_err() { show_main_window(app); }
         }
         "extend" => {
             show_main_window(app);
             let _ = app.emit("timer://extend", ());
         }
         "finish" => {
-            let _ = mutate(app, |s| s.finish_block(now_unix()));
+            if mutate_observed(app, expected, sync::TargetCheck::Live, |s| s.finish_block(s.last_tick)).is_err() { show_main_window(app); }
         }
         "quit" => quit_saving(app),
         other => {
             if let Some(profile) = other.strip_prefix("start:") {
                 let profile = profile.to_string();
-                let started = mutate(app, |s| s.start_day(&profile, now_unix())).is_ok();
+                let started = mutate_observed(app, expected, sync::TargetCheck::Live, |s| s.start_day(&profile, s.last_tick)).is_ok();
                 if started && blocking_wanted(&app.state::<Shared>()) {
                     spawn_apply_blocking(app);
                 }
@@ -255,6 +290,7 @@ struct LiveState {
 struct Snapshot {
     revision: u64,
     state: LiveState,
+    sync: sync::Status,
     /// 历史一满 60 天就有 270 KB 上下，每秒推一遍是白烧电。
     /// 所以只有首次拉取和命令的返回值带上它，心跳推送里是 null，界面沿用上一次的。
     history: Option<Vec<core::ArchivedDay>>,
@@ -275,14 +311,33 @@ fn time_policy() -> TimePolicy {
     if cfg!(mobile) { TimePolicy::WallClock } else { TimePolicy::Heartbeat }
 }
 
+fn runtime_clock(shared: &Shared, last_tick: i64) -> (i64, TimePolicy) {
+    let sync = shared.sync.lock().unwrap();
+    if sync.active() { (sync.now().max(last_tick), TimePolicy::WallClock) } else { (now_unix(), time_policy()) }
+}
+
+fn advance_current(shared: &Shared) {
+    let mut state = shared.state.lock().unwrap();
+    let (now, policy) = runtime_clock(shared, state.last_tick);
+    advance_time(&mut state, now, policy);
+}
+
 fn snapshot(shared: &Shared, with_history: bool) -> Snapshot {
     let state = shared.state.lock().unwrap();
+    // 结构体初始化里的临时 guard 会活到整个表达式结束；先一次取出两个值，避免重复锁 sync。
+    let (sync_status, state_path) = {
+        let sync = shared.sync.lock().unwrap();
+        let path = sync.account.as_ref().and_then(|account| sync.store.as_ref()?.account_path(&account.user.id).ok())
+            .unwrap_or_else(|| shared.path.clone());
+        (sync.status(&state), path.display().to_string())
+    };
     let mut blocking = shared.blocking.lock().unwrap().clone();
     blocking.browser = shared.browser_bridge.lock().unwrap()
         .status(&browser_blocking::Rules::from_state(&state, shared.exiting.load(Ordering::SeqCst)));
     Snapshot {
         // 与状态捕获一起排序；同一秒里的命令也有先后，不依赖时间戳。
         revision: shared.snapshot_revision.fetch_add(1, Ordering::Relaxed) + 1,
+        sync: sync_status,
         state: LiveState {
             schema: state.schema,
             last_tick: state.last_tick,
@@ -294,7 +349,7 @@ fn snapshot(shared: &Shared, with_history: bool) -> Snapshot {
         blocking,
         // 取锁顺序：state → write_protected → blocking → save_error，save_error 是最后一把。
         save_error: shared.save_error.lock().unwrap().clone(),
-        state_path: shared.path.display().to_string(),
+        state_path,
         initial_view: shared.qa_view.clone(),
         initial_scroll: shared.qa_scroll,
     }
@@ -334,7 +389,24 @@ fn save(shared: &Shared) {
     if shared.write_protected.lock().unwrap().is_some() {
         return;
     }
-    let json = core::to_json(&shared.state.lock().unwrap());
+    let json = {
+        let state = shared.state.lock().unwrap();
+        let sync = shared.sync.lock().unwrap();
+        if let Some(account) = &sync.account {
+            let mut account = account.clone();
+            account.clock_offset = sync.now().saturating_sub(now_unix());
+            let result = sync.store.as_ref().ok_or_else(|| "账号存储未就绪，已停止写入。".to_owned())
+                .and_then(|store| store.save(&account, &state));
+            *shared.save_error.lock().unwrap() = result.err();
+            return;
+        }
+        // 账号存档损坏时，不把临时显示的单机状态写回任何文件。
+        if let Some(error) = &sync.blocked {
+            *shared.save_error.lock().unwrap() = Some(error.clone());
+            return;
+        }
+        core::to_json(&state)
+    };
     let tmp = shared.path.with_extension("json.tmp");
     // 先把临时文件真正写到盘上再改名：断电或系统崩溃时，宁可留下上一份完整的存档，
     // 也不要一个改了名、内容却没落盘的空文件——那样下次启动只能进保护模式。
@@ -539,11 +611,19 @@ fn configure_tray_digits(tray: &tauri::tray::TrayIcon) -> tauri::Result<()> {
 }
 
 fn broadcast(app: &AppHandle) {
+    broadcast_with_history(app, false);
+}
+
+fn broadcast_full(app: &AppHandle) {
+    broadcast_with_history(app, true);
+}
+
+fn broadcast_with_history(app: &AppHandle, with_history: bool) {
     #[cfg(target_os = "android")]
     if mobile::is_suspended(app) { return; }
     let shared = app.state::<Shared>();
     // 心跳推送不带历史：历史只在命令返回和首次拉取时随快照走一遍。
-    let snap = snapshot(&shared, false);
+    let snap = snapshot(&shared, with_history);
     let _ = app.emit("state://update", &snap);
     // 原生菜单会同步等待主线程；带着应用锁调用会与主线程的命令互相等。
     // 到主线程后再取当前形状，排队的更新也不会把旧菜单装回去。
@@ -554,7 +634,7 @@ fn broadcast(app: &AppHandle) {
             let shared = handle.state::<Shared>();
             let (display, shape) = {
                 let state = shared.state.lock().unwrap();
-                (tray_display(&state), tray_shape(&state))
+                (tray_display(&state), tray_shape_with_identity(&state, &shared.sync.lock().unwrap()))
             };
             let Some(tray) = handle.tray_by_id("main") else { return };
             let previous = shared.tray_display.lock().unwrap().clone();
@@ -722,9 +802,9 @@ struct HeartbeatStep {
 
 /// `gap` 是距上一轮心跳的秒数：桌面就是 last_tick 的间隔；Android 另记心跳时刻，
 /// 因为命令和回前台取快照也会推进 last_tick，不能让它们把一段长空档「藏起来」。
-fn advance_heartbeat(state: &mut core::State, now: i64, gap: i64) -> HeartbeatStep {
-    let show_banners = show_due_banners(time_policy(), gap);
-    let focus_done = tick_reporting_finish(state, now, time_policy());
+fn advance_heartbeat(state: &mut core::State, now: i64, gap: i64, policy: TimePolicy) -> HeartbeatStep {
+    let show_banners = show_due_banners(policy, gap);
+    let focus_done = tick_reporting_finish(state, now, policy);
     #[cfg(target_os = "android")]
     let local_seconds = local_reminder_seconds(state);
     #[cfg(target_os = "android")]
@@ -745,11 +825,20 @@ fn advance_heartbeat(state: &mut core::State, now: i64, gap: i64) -> HeartbeatSt
     }
 }
 
-fn mutate(
+fn mutate_observed(app: &AppHandle, expected: Option<sync::ActionTarget>, check: sync::TargetCheck,
+    op: impl FnOnce(&mut core::State) -> core::RuleResult) -> Result<Snapshot, String> {
+    mutate_with_deleted(app, None, expected, check, op)
+}
+
+fn mutate_with_deleted(
     app: &AppHandle,
+    deleted_day: Option<(i64, Option<String>)>,
+    expected: Option<sync::ActionTarget>,
+    check: sync::TargetCheck,
     op: impl FnOnce(&mut core::State) -> core::RuleResult,
 ) -> Result<Snapshot, String> {
     let shared = app.state::<Shared>();
+    if shared.switching_account.load(Ordering::SeqCst) { return Err("正在切换账号，请稍候再操作。".into()); }
     if shared.exiting.load(Ordering::SeqCst) {
         #[cfg(desktop)]
         return Err("正在退出坐功，请等待网站屏蔽解除。".into());
@@ -758,14 +847,23 @@ fn mutate(
     }
     let (outcome, finished, show_banners) = {
         let mut state = shared.state.lock().unwrap();
-        let now = now_unix();
+        if shared.switching_account.load(Ordering::SeqCst) { return Err("正在切换账号，请稍候再操作。".into()); }
+        let (now, policy) = runtime_clock(&shared, state.last_tick);
         #[cfg(target_os = "android")]
         let gap = mobile::gap_since_heartbeat(app, now);
         #[cfg(not(target_os = "android"))]
         let gap = now.saturating_sub(state.last_tick);
-        let show_banners = show_due_banners(time_policy(), gap);
-        let finished = tick_reporting_finish(&mut state, now, time_policy());
-        (op(&mut state), finished, show_banners)
+        let show_banners = show_due_banners(policy, gap);
+        let finished = tick_reporting_finish(&mut state, now, policy);
+        shared.sync.lock().unwrap().check_target(&state, expected.as_ref(), &check)?;
+        let before = state.clone();
+        let deleted: Vec<String> = deleted_day.into_iter().flat_map(|(at, id)| state.history.iter()
+            .filter(move |archived| !archived.day.sync_id.is_empty() && id.as_ref().map_or(archived.day.started_at == at, |id| &archived.day.sync_id == id))
+            .map(|archived| archived.day.sync_id.clone())).collect();
+        let outcome = op(&mut state).map_err(str::to_owned)
+            .and_then(|()| shared.sync.lock().unwrap().changed(&mut state, &deleted));
+        if outcome.is_err() { *state = before; }
+        (outcome, finished, show_banners)
     };
     if finished && show_banners {
         notify_block_finished(app);
@@ -1072,7 +1170,8 @@ fn get_snapshot(app: AppHandle) -> Snapshot {
     #[cfg(target_os = "android")]
     {
         let mut state = shared.state.lock().unwrap();
-        advance_time(&mut state, now_unix(), time_policy());
+        let (now, policy) = runtime_clock(&shared, state.last_tick);
+        advance_time(&mut state, now, policy);
         drop(state);
         mobile::mark_dirty(&app);
     }
@@ -1093,8 +1192,8 @@ fn reset_browser_pairing(app: AppHandle) -> Result<String, String> {
 }
 
 #[tauri::command]
-fn start_day(profile_id: String, app: AppHandle) -> Result<Snapshot, String> {
-    let snap = mutate(&app, |s| s.start_day(&profile_id, now_unix()))?;
+fn start_day(profile_id: String, expected: Option<sync::ActionTarget>, app: AppHandle) -> Result<Snapshot, String> {
+    let snap = mutate_observed(&app, expected, sync::TargetCheck::Live, |s| s.start_day(&profile_id, s.last_tick))?;
     if blocking_wanted(&app.state::<Shared>()) {
         spawn_apply_blocking(&app);
     }
@@ -1107,9 +1206,10 @@ fn start_block(
     minutes: i64,
     tasks: Vec<core::TaskItem>,
     break_minutes: Option<i64>,
+    expected: Option<sync::ActionTarget>,
     app: AppHandle,
 ) -> Result<Snapshot, String> {
-    mutate(&app, |s| match break_minutes {
+    mutate_observed(&app, expected, sync::TargetCheck::Live, |s| match break_minutes {
         Some(rest) => s.start_block_with_break(&category_id, minutes, tasks.clone(), rest),
         None => s.start_block(&category_id, minutes, tasks.clone()),
     })
@@ -1117,18 +1217,24 @@ fn start_block(
 
 /// 换一份计划：进度与台账保留，只按新计划重铺配额。界面上没有入口，留给数据里存着多份的老档。
 #[tauri::command]
-fn switch_profile(profile_id: String, app: AppHandle) -> Result<Snapshot, String> {
-    mutate(&app, |s| s.switch_profile(&profile_id))
+fn switch_profile(profile_id: String, expected: Option<sync::ActionTarget>, app: AppHandle) -> Result<Snapshot, String> {
+    mutate_observed(&app, expected, sync::TargetCheck::Live, |s| s.switch_profile(&profile_id))
 }
 
 #[tauri::command]
-fn toggle_pause(app: AppHandle) -> Result<Snapshot, String> {
-    mutate(&app, |s| s.toggle_pause(now_unix()))
+fn toggle_pause(expected: Option<sync::ActionTarget>, app: AppHandle) -> Result<Snapshot, String> {
+    mutate_observed(&app, expected, sync::TargetCheck::Live, |s| s.toggle_pause(s.last_tick))
 }
 
 #[tauri::command]
-fn extend_block(minutes: i64, timer_started_at: Option<i64>, app: AppHandle) -> Result<Snapshot, String> {
-    mutate(&app, |s| {
+fn extend_block(minutes: i64, timer_started_at: Option<i64>, timer_id: Option<String>, expected: Option<sync::ActionTarget>, app: AppHandle) -> Result<Snapshot, String> {
+    mutate_observed(&app, expected, sync::TargetCheck::Live, |s| {
+        if app.state::<Shared>().sync.lock().unwrap().active()
+            && timer_id.as_deref().is_none_or(str::is_empty)
+        { return Err("当前计时已更新，请重新打开延长窗口"); }
+        if timer_id.as_ref().is_some_and(|expected| s.day.as_ref().and_then(|day| day.timer.as_ref()).is_none_or(|timer| &timer.sync_id != expected)) {
+            return Err("原来的计时已结束，请重新选择延长时间");
+        }
         if timer_started_at.is_some_and(|expected| s.day.as_ref().and_then(|d| d.timer.as_ref()).is_none_or(|t| t.started_at != expected)) {
             return Err("原来的计时已结束，请重新选择延长时间");
         }
@@ -1137,29 +1243,44 @@ fn extend_block(minutes: i64, timer_started_at: Option<i64>, app: AppHandle) -> 
 }
 
 #[tauri::command]
-fn finish_block(app: AppHandle) -> Result<Snapshot, String> {
-    mutate(&app, |s| s.finish_block(now_unix()))
+fn finish_block(expected: Option<sync::ActionTarget>, app: AppHandle) -> Result<Snapshot, String> {
+    mutate_observed(&app, expected, sync::TargetCheck::Live, |s| s.finish_block(s.last_tick))
 }
 
 #[tauri::command]
-fn set_completion_note(day_started_at: i64, entry_index: usize, ended_at: i64, note: String, app: AppHandle) -> Result<Snapshot, String> {
-    mutate(&app, |s| s.set_completion_note(day_started_at, entry_index, ended_at, &note))
+// 保留单机版的 IPC 参数，再补稳定身份和原备注，避免旧调用被默默定位到另一条记录。
+#[allow(clippy::too_many_arguments)]
+fn set_completion_note(day_started_at: i64, entry_index: usize, ended_at: i64, note: String,
+    day_id: Option<String>, entry_id: Option<String>, previous_note: Option<String>, expected: Option<sync::ActionTarget>, app: AppHandle) -> Result<Snapshot, String> {
+    mutate_observed(&app, expected, sync::TargetCheck::Identity, |s| {
+        if let (Some(day_id), Some(entry_id)) = (day_id.as_deref(), entry_id.as_deref()) {
+            if app.state::<Shared>().sync.lock().unwrap().active() {
+                let current_note = s.day.iter().chain(s.history.iter().map(|archived| &archived.day))
+                    .find(|day| day.sync_id == day_id).and_then(|day| day.ledger.iter().find(|entry| entry.sync_id == entry_id))
+                    .map(|entry| &entry.completion_note);
+                if current_note != Some(&previous_note) { return Err("这条完成记录已在另一台设备修改，请重新打开后核对"); }
+            }
+            return s.set_completion_note_by_id(day_id, entry_id, &note);
+        }
+        if app.state::<Shared>().sync.lock().unwrap().active() { return Err("记录已更新，请重新打开完成记录"); }
+        s.set_completion_note(day_started_at, entry_index, ended_at, &note)
+    })
 }
 
 #[tauri::command]
-fn end_break(app: AppHandle) -> Result<Snapshot, String> {
-    mutate(&app, |s| s.end_break())
+fn end_break(expected: Option<sync::ActionTarget>, app: AppHandle) -> Result<Snapshot, String> {
+    mutate_observed(&app, expected, sync::TargetCheck::Live, |s| s.end_break())
 }
 
 #[tauri::command]
-fn abandon_block(app: AppHandle) -> Result<Snapshot, String> {
-    mutate(&app, |s| s.abandon_block(now_unix()))
+fn abandon_block(expected: Option<sync::ActionTarget>, app: AppHandle) -> Result<Snapshot, String> {
+    mutate_observed(&app, expected, sync::TargetCheck::Live, |s| s.abandon_block(s.last_tick))
 }
 
 #[tauri::command]
-fn end_day(app: AppHandle) -> Result<Snapshot, String> {
+fn end_day(expected: Option<sync::ActionTarget>, app: AppHandle) -> Result<Snapshot, String> {
     let was_relevant = blocking_needs_sync(&app.state::<Shared>());
-    let snap = mutate(&app, |s| s.end_day(now_unix()))?;
+    let snap = mutate_observed(&app, expected, sync::TargetCheck::Live, |s| s.end_day(s.last_tick))?;
     if was_relevant {
         spawn_apply_blocking(&app);
     }
@@ -1167,9 +1288,9 @@ fn end_day(app: AppHandle) -> Result<Snapshot, String> {
 }
 
 #[tauri::command]
-fn abandon_day(app: AppHandle) -> Result<Snapshot, String> {
+fn abandon_day(expected: Option<sync::ActionTarget>, app: AppHandle) -> Result<Snapshot, String> {
     let was_relevant = blocking_needs_sync(&app.state::<Shared>());
-    let snap = mutate(&app, |s| s.abandon_day())?;
+    let snap = mutate_observed(&app, expected, sync::TargetCheck::Live, |s| s.abandon_day())?;
     if was_relevant {
         spawn_apply_blocking(&app);
     }
@@ -1177,9 +1298,9 @@ fn abandon_day(app: AppHandle) -> Result<Snapshot, String> {
 }
 
 #[tauri::command]
-fn update_preferences(prefs: core::Preferences, app: AppHandle) -> Result<Snapshot, String> {
+fn update_preferences(prefs: core::Preferences, expected: Option<sync::ActionTarget>, app: AppHandle) -> Result<Snapshot, String> {
     let hosts_changed = app.state::<Shared>().state.lock().unwrap().preferences.blocked_hosts != prefs.blocked_hosts;
-    let snap = mutate(&app, |s| s.update_preferences(prefs))?;
+    let snap = mutate_observed(&app, expected, sync::TargetCheck::Preferences, |s| s.update_preferences(prefs))?;
     let shared = app.state::<Shared>();
     let day_active = shared.state.lock().unwrap().day.is_some();
     // 只有学习日里整站列表真的变了才同步系统规则。之前取消过一次授权的话，
@@ -1191,8 +1312,12 @@ fn update_preferences(prefs: core::Preferences, app: AppHandle) -> Result<Snapsh
 }
 
 #[tauri::command]
-fn delete_history_day(started_at: i64, app: AppHandle) -> Result<Snapshot, String> {
-    mutate(&app, |s| s.delete_history_day(started_at))
+fn delete_history_day(started_at: i64, day_id: Option<String>, expected: Option<sync::ActionTarget>, app: AppHandle) -> Result<Snapshot, String> {
+    mutate_with_deleted(&app, Some((started_at, day_id.clone())), expected, sync::TargetCheck::Identity, |s| {
+        if let Some(id) = day_id.as_deref() { return s.delete_history_day_by_id(id); }
+        if app.state::<Shared>().sync.lock().unwrap().active() { return Err("记录已更新，请重新选择要删除的学习日"); }
+        s.delete_history_day(started_at)
+    })
 }
 
 #[tauri::command]
@@ -1325,7 +1450,11 @@ fn reapply_blocking(app: AppHandle) -> Snapshot {
 #[cfg(desktop)]
 #[tauri::command]
 fn reveal_state_file(shared: State<'_, Shared>) -> Result<(), String> {
-    let path = shared.path.clone();
+    let path = {
+        let sync = shared.sync.lock().unwrap();
+        sync.account.as_ref().and_then(|account| sync.store.as_ref()?.account_path(&account.user.id).ok())
+            .unwrap_or_else(|| shared.path.clone())
+    };
     #[cfg(target_os = "macos")]
     let ok = Command::new("open").arg("-R").arg(&path).status();
     #[cfg(target_os = "windows")]
@@ -1698,7 +1827,7 @@ fn decide_quit(save_error: Option<String>) -> QuitDecision {
 #[cfg(desktop)]
 fn quit_saving(app: &AppHandle) {
     let shared = app.state::<Shared>();
-    shared.state.lock().unwrap().tick(now_unix());
+    advance_current(&shared);
     save(&shared);
     // 独立语句：guard 在这个分号处就还回去了，下面的窗口与退出操作不带任何锁。
     let error = shared.save_error.lock().unwrap().clone();
@@ -1725,7 +1854,7 @@ async fn quit_after_save(app: AppHandle) -> Result<(), String> {
         if shared.exiting.swap(true, Ordering::SeqCst) {
             return Err("正在退出坐功，请等待网站屏蔽解除。".into());
         }
-        shared.state.lock().unwrap().tick(now_unix());
+        advance_current(&shared);
         save(&shared);
         if let Some(reason) = shared.save_error.lock().unwrap().clone() {
             shared.exiting.store(false, Ordering::SeqCst);
@@ -1742,7 +1871,7 @@ async fn quit_after_save(app: AppHandle) -> Result<(), String> {
 #[tauri::command]
 fn quit_leaving_blocking(app: AppHandle) -> Result<(), String> {
     let shared = app.state::<Shared>();
-    shared.state.lock().unwrap().tick(now_unix());
+    advance_current(&shared);
     save(&shared);
     if let Some(reason) = shared.save_error.lock().unwrap().clone() {
         return Err(reason);
@@ -1780,7 +1909,10 @@ fn final_save_on_exit(shared: &Shared) {
     if !should_save_on_exit(*shared.declined_final_save.lock().unwrap()) {
         return;
     }
-    advance_time(&mut shared.state.lock().unwrap(), now_unix(), time_policy());
+    let mut state = shared.state.lock().unwrap();
+    let (now, policy) = runtime_clock(shared, state.last_tick);
+    advance_time(&mut state, now, policy);
+    drop(state);
     save(shared);
 }
 
@@ -1848,7 +1980,8 @@ pub fn run() {
                 }
             };
             let path = dir.join("state.json");
-            let (state, protection) = load_initial(&path);
+            let (mut state, protection) = load_initial(&path);
+            let sync = if protection.is_none() { sync::Runtime::open(&dir, &mut state) } else { sync::Runtime::disabled() };
 
             // 建窗前先只读体检；Ready 后按保留的学习日恢复规则或清理残留。
             #[cfg(desktop)]
@@ -1864,6 +1997,9 @@ pub fn run() {
             let (qa_view, qa_scroll) = qa_launch_args();
             app.manage(Shared {
                 state: Mutex::new(state),
+                sync: Mutex::new(sync),
+                sync_network: Mutex::new(()),
+                switching_account: AtomicBool::new(false),
                 exiting: AtomicBool::new(false),
                 blocking_released: AtomicBool::new(false),
                 isolated,
@@ -1884,6 +2020,7 @@ pub fn run() {
             });
             #[cfg(target_os = "android")]
             app.manage(mobile::MobileShared::new(dir.join("alarms.json")));
+            sync::start(app.handle());
             #[cfg(desktop)]
             browser_blocking::start(app.handle(), isolated);
             #[cfg(target_os = "macos")]
@@ -1893,7 +2030,10 @@ pub fn run() {
             {
                 let menu = {
                     let shared = app.state::<Shared>();
-                    let shape = tray_shape(&shared.state.lock().unwrap());
+                    let shape = {
+                        let state = shared.state.lock().unwrap();
+                        tray_shape_with_identity(&state, &shared.sync.lock().unwrap())
+                    };
                     let menu = build_tray_menu(app.handle(), &shape)?;
                     *shared.tray_shape.lock().unwrap() = Some(shape);
                     menu
@@ -1937,13 +2077,13 @@ pub fn run() {
                     let step = {
                         let shared = handle.state::<Shared>();
                         let mut state = shared.state.lock().unwrap();
-                        let now = now_unix();
+                        let (now, policy) = runtime_clock(&shared, state.last_tick);
                         #[cfg(target_os = "android")]
                         let gap = mobile::heartbeat_gap(&handle, now);
                         #[cfg(not(target_os = "android"))]
                         let gap = now.saturating_sub(state.last_tick);
                         #[cfg_attr(not(target_os = "android"), allow(unused_mut))]
-                        let mut step = advance_heartbeat(&mut state, now, gap);
+                        let mut step = advance_heartbeat(&mut state, now, gap, policy);
                         // 保护模式下内存里是出厂偏好，不是用户的设置：不拿它去覆盖原生侧的屏蔽规则。
                         #[cfg(target_os = "android")]
                         if shared.write_protected.lock().unwrap().is_none() {
@@ -2034,6 +2174,13 @@ pub fn run() {
         }
     });
     builder.invoke_handler(tauri::generate_handler![
+            sync::sync_send_code,
+            sync::sync_verify_code,
+            sync::sync_connect,
+            sync::sync_retry,
+            sync::sync_resolve,
+            sync::sync_sign_out,
+            sync::sync_cancel_sign_in,
             get_snapshot,
             browser_pairing_code,
             reset_browser_pairing,
@@ -2148,6 +2295,9 @@ mod tests {
             fs::create_dir(&dir).unwrap();
             Self(Shared {
                 state: Mutex::new(state),
+                sync: Mutex::new(sync::Runtime::disabled()),
+                sync_network: Mutex::new(()),
+                switching_account: AtomicBool::new(false),
                 exiting: AtomicBool::new(false),
                 blocking_released: AtomicBool::new(false),
                 isolated: true,
@@ -2362,6 +2512,21 @@ mod tests {
     }
 
     #[test]
+    fn snapshot_with_sync_status_and_storage_path_does_not_reenter_the_same_lock() {
+        let fixture = std::sync::Arc::new(TestShared::new(core::State::new(1_000)));
+        let worker_fixture = fixture.clone();
+        let (sent, received) = mpsc::channel();
+        let worker = thread::spawn(move || {
+            let snap = snapshot(&worker_fixture.0, true);
+            sent.send((snap.revision, snap.state_path)).unwrap();
+        });
+        let (revision, path) = received.recv_timeout(Duration::from_secs(2)).expect("快照不能因重复取同步锁而挂起");
+        assert_eq!(revision, 1);
+        assert_eq!(path, fixture.0.path.display().to_string());
+        worker.join().unwrap();
+    }
+
+    #[test]
     fn snapshots_order_commands_even_when_the_clock_does_not_advance() {
         let fixture = TestShared::new(core::State::new(1_000));
         let first = snapshot(&fixture.0, true);
@@ -2412,6 +2577,7 @@ mod tests {
             let day = state.day.as_mut().unwrap();
             for _ in 0..12 {
                 day.ledger.push(core::LedgerEntry {
+                    sync_id: String::new(),
                     category: "main".into(),
                     seconds: 60,
                     accepted: true,
@@ -2807,7 +2973,7 @@ mod tests {
         let after = tray_shape(&state);
         assert_ne!(before, after, "计划名称变了也必须更新菜单");
         drop(state);
-        assert!(matches!(after, TrayMenuState::Idle { profile: Some((_, name)) } if name == "新名字"));
+        assert!(matches!(after, TrayMenuState::Idle { profile: Some((_, name)), .. } if name == "新名字"));
     }
 
     #[test]
