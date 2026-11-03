@@ -178,59 +178,20 @@ test("共享数据库 RPC、权限、幂等与输入校验", async (t) => {
       for (const device of [null, "", "b".repeat(31), "b".repeat(1024)]) await denied(() => write(2, operation(9), fixture, device), "22023");
     });
 
-    await t.test("文档、嵌套字段和超限输入全部拒绝，失败不修改数据或操作记录", async () => {
+    await t.test("文档外层、多余键和超限输入全部拒绝，失败不修改数据或操作记录", async () => {
       const before = await operationCount(accountA);
       await asRole("authenticated", accountA);
-      const invalid = [null, [], {}, { ...fixture, schema: 2 }, { ...fixture, schema: 1.5 }, { ...fixture, last_tick: -1 }, { ...fixture, last_tick: 253402300800 }];
+      const invalid = [
+        null, [], {}, "text", { ...fixture, schema: 2 }, { ...fixture, schema: 1.5 }, { ...fixture, schema: "1" },
+        { ...fixture, last_tick: "1" }, { ...fixture, day: [] }, { ...fixture, history: {} }, { ...fixture, deleted_day_ids: null },
+      ];
       const bad = (edit) => { const doc = structuredClone(fixture); edit(doc); invalid.push(doc); };
       bad((doc) => { doc.access_token = "synthetic-must-never-be-stored"; });
+      bad((doc) => { delete doc.deleted_day_ids; });
       bad((doc) => { doc.preferences.blocked_hosts = ["example.invalid"]; });
-      bad((doc) => { delete doc.preferences.categories[0].name; });
-      bad((doc) => { doc.preferences.categories[0].name = " "; });
-      bad((doc) => { doc.preferences.categories[0].name = "测试\u0007"; });
-      bad((doc) => { doc.preferences.categories[0].id = "../outside"; });
-      bad((doc) => { doc.preferences.categories.push(structuredClone(doc.preferences.categories[0])); });
-      bad((doc) => {
-        const category = structuredClone(doc.preferences.categories[0]); category.id = "writing";
-        doc.preferences.categories.push(category);
-        doc.preferences.profiles[0].quotas.push({ category: "writing", minutes: -1 });
-      });
-      bad((doc) => { doc.preferences.profiles[0].quotas[0].category = "missing"; });
-      bad((doc) => { doc.preferences.default_profile_id = "missing"; });
-      bad((doc) => { doc.day.sync_id = "a".repeat(129); });
-      bad((doc) => { doc.day.timer.sync_id = doc.day.ledger[0].sync_id; });
-      bad((doc) => { doc.day.timer.elapsed_seconds = 1801; });
-      bad((doc) => { doc.day.timer.total_seconds = "1800"; });
-      bad((doc) => { doc.day.timer.break_minutes = -1; });
-      bad((doc) => { doc.day.timer.category = "missing"; });
-      bad((doc) => { doc.day.seated_since_relief = 1; });
-      bad((doc) => { doc.day.cups = 34560001; });
-      bad((doc) => { doc.day.suspend_seconds = 61; });
-      bad((doc) => { doc.day.categories = []; });
-      bad((doc) => { doc.day.categories[0].accepted_seconds = 301; });
-      bad((doc) => { doc.day.ledger[0].seconds = 0; });
-      bad((doc) => { doc.day.ledger[0].accepted = 1; });
-      bad((doc) => { doc.day.ledger[0].ended_at = 1; });
-      bad((doc) => { doc.day.ledger[0].tasks[0].done = "true"; });
-      bad((doc) => { doc.day.ledger[0].tasks[0].text = " \n\t"; });
-      bad((doc) => { doc.day.ledger[0].tasks[0].text = "x".repeat(501); });
-      bad((doc) => { doc.day.ledger[0].completion_note = "x".repeat(2001); });
-      bad((doc) => { doc.day.ledger[0].completion_note = { refresh_token: "synthetic" }; });
-      bad((doc) => { doc.day.pauses[0].auto = null; });
-      bad((doc) => { doc.day.pauses.unshift({ started_at: 1700000000, ended_at: null, auto: false }); });
-      bad((doc) => { doc.day.timer = null; });
-      bad((doc) => { doc.day.break_until = 1700000700; });
-      bad((doc) => { doc.day.rests.push({ started_at: 30, ended_at: 20 }); });
-      bad((doc) => { doc.deleted_day_ids.push(doc.day.sync_id); });
-      bad((doc) => { doc.deleted_day_ids.push(`${deviceA}-d-99`, `${deviceA}-d-99`); });
-      bad((doc) => { doc.deleted_day_ids = Array.from({ length: 10001 }, (_, i) => `${deviceA}-d-${i + 100}`); });
-      bad((doc) => { doc.history = Array(1001).fill({ day: doc.day, ended_at: doc.last_tick }); });
-      bad((doc) => { doc.history = [{ day: structuredClone(doc.day), ended_at: doc.last_tick }]; doc.day = null; });
-      bad((doc) => {
-        doc.day.timer = null; doc.day.pauses[0].ended_at = null;
-        doc.history = [{ day: doc.day, ended_at: doc.last_tick }]; doc.day = null;
-      });
-      bad((doc) => { doc.preferences.categories[0].block_rationale = "大".repeat(700000); });
+      bad((doc) => { delete doc.preferences.categories; });
+      bad((doc) => { doc.preferences = []; });
+      bad((doc) => { doc.preferences.categories[0].block_rationale = "大".repeat(800000); });
       for (let i = 0; i < invalid.length; i++) {
         await denied(() => write(2, operation(100 + i), invalid[i]), "22023");
       }
@@ -239,35 +200,18 @@ test("共享数据库 RPC、权限、幂等与输入校验", async (t) => {
       assert.equal(await operationCount(accountA), before);
     });
 
-    await t.test("文本校验不依赖数据库区域设置，并与客户端的字符规则一致", async () => {
+    await t.test("逐字段规则只留在客户端：云端只剩外层校验，不再有第二份字段规则", async () => {
       await asRole("admin");
-      const definition = (await pg.query(
-        "select pg_catalog.pg_get_functiondef('sitz_sync_private.assert_text(jsonb,integer,boolean,boolean)'::regprocedure) as body",
-      )).rows[0].body;
-      assert.doesNotMatch(definition, /\[\[:/, "POSIX 字符类随 lc_ctype 变化，不能用于协议校验");
-      const accepts = async (text, nonempty, multiline) => {
-        try {
-          await pg.query("select sitz_sync_private.assert_text($1::jsonb, 80, $2, $3)", [JSON.stringify(text), nonempty, multiline]);
-          return true;
-        } catch (error) {
-          assert.equal(error.code, "22023");
-          return false;
-        }
-      };
-      // 与 core/tests/sync.rs 的 text_rules_match_the_database_contract 使用同一组样例。
-      const cases = [
-        ["数学\u2028", true, false, true], ["段落\u2029结束", true, true, true], ["👩\u200d💻", true, false, true],
-        ["名\u00a0字", true, false, true], ["\u200b", true, false, true], ["换行\n", true, true, true], ["", false, false, true],
-        ["测试\u0007", true, false, false], ["测试\u0085", true, true, false], ["测试\u009f", true, false, false],
-        ["换行\n", true, false, false], ["\u3000\u00a0", true, false, false], ["\u2028", true, false, false], ["\n\t", true, true, false],
-      ];
-      for (const [text, nonempty, multiline, expected] of cases) {
-        assert.equal(await accepts(text, nonempty, multiline), expected, JSON.stringify({ text, nonempty, multiline }));
-      }
+      const helpers = (await pg.query(
+        "select p.proname from pg_catalog.pg_proc p join pg_catalog.pg_namespace n on n.oid = p.pronamespace where n.nspname = 'sitz_sync_private' order by 1",
+      )).rows.map((row) => row.proname);
+      assert.deepEqual(helpers, ["assert_document"]);
+      // 嵌套字段由客户端严格解析把关；外层合法的文档云端照收，客户端接受的行分隔符也不会被误拒。
       await asRole("authenticated", accountC);
-      const named = structuredClone(fixture);
-      named.preferences.categories[0].name = "数学\u2028";
-      assert.equal((await write(0, operation(999), named)).applied, true, "客户端接受的行分隔符不能被云端拒绝");
+      const nested = structuredClone(fixture);
+      nested.preferences.categories[0].name = "数学\u2028";
+      nested.day.timer.elapsed_seconds = nested.day.timer.total_seconds + 1;
+      assert.equal((await write(0, operation(999), nested)).applied, true);
       await asRole("admin");
       await pg.query("delete from sitz_sync_private.documents where user_id=$1", [accountC]);
     });

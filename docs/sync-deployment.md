@@ -15,14 +15,19 @@
 
 ## 2. 安装数据库迁移
 
-在目标项目的 SQL Editor 中按文件名顺序运行 `supabase/migrations/` 下的全部迁移：先 [202610270001_shared_sync.sql](../supabase/migrations/202610270001_shared_sync.sql)，再 [202611020001_locale_independent_text.sql](../supabase/migrations/202611020001_locale_independent_text.sql)。已经运行过第一份的项目只需补跑第二份：它把文本校验改为与数据库区域设置无关的明确码点，避免行分隔符等客户端接受的字符被云端拒绝。迁移自带事务，失败时不会留下半套权限；再次运行会保留已有文档和操作记录。
+新项目在 SQL Editor 中按文件名顺序运行 `supabase/migrations/` 下的全部迁移：[202610270001_shared_sync.sql](../supabase/migrations/202610270001_shared_sync.sql)、[202611020001_locale_independent_text.sql](../supabase/migrations/202611020001_locale_independent_text.sql)、[202611030001_envelope_only_validation.sql](../supabase/migrations/202611030001_envelope_only_validation.sql)。
+
+已经运行过第一份的项目只需补跑最后一份。它把云端校验收窄到文档外层（对象、schema、顶层与 `preferences` 的键集合、大小上限），逐字段规则只留在客户端，之后改字段不必再改数据库。第二份因此不必再补；补了也无害。已部署的 0.15.0 / 0.15.2 客户端无需更新，原来能写入的文档照常接受。
+
+迁移自带事务，失败时不会留下半套权限；再次运行会保留已有文档和操作记录。
 
 如果已用 PostgreSQL 的 service 配置安全保存了目标数据库连接，也可以执行：
 
 ```bash
 psql 'service=sitzfleisch-sync' -v ON_ERROR_STOP=1 \
   -f supabase/migrations/202610270001_shared_sync.sql \
-  -f supabase/migrations/202611020001_locale_independent_text.sql
+  -f supabase/migrations/202611020001_locale_independent_text.sql \
+  -f supabase/migrations/202611030001_envelope_only_validation.sql
 ```
 
 迁移会创建：
@@ -129,7 +134,7 @@ gh workflow run build.yml --repo snooze26h/sitzfleisch --ref YOUR_REVIEWED_BRANC
 
 账号存档与原单机存档分开保存。退出账号后回到原单机数据，不会把前一个账号的数据自动放到下一个账号里。发生冲突时，先保留恢复副本，再选择冲突内容；不同历史记录继续合并。
 
-云端文档上限为 2 MiB（以数据库的 JSONB 文本序列化大小计算），共享历史最多 1000 个学习日、删除标记最多 10000 个。超过限制会拒绝该次写入并保留已有数据，不会自动删历史或放弃删除标记。遇到容量错误时先导出/备份，再安排协议升级或归档方案。
+共享文档上限为 2 MiB（以数据库的 JSONB 文本序列化大小计算），共享历史最多 1000 个学习日、删除标记最多 10000 个。这些上限由客户端在上传前检查，云端另有 2 MiB 加 256 KiB 的硬上限。超过限制会拒绝该次写入并保留已有数据，不会自动删历史或放弃删除标记。遇到容量错误时先导出/备份，再安排协议升级或归档方案。
 
 ## 6. 验证与上线边界
 

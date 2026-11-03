@@ -45,11 +45,11 @@
 1. `sitz_sync_read(p_known_revision bigint default -1)`：返回对象 `{revision, document, server_time}`。无云端文档时 revision=0、document=null；版本与已知版本相同时 document=null；否则返回文档。
 2. `sitz_sync_write(p_expected_revision bigint, p_operation_id text, p_device_id text, p_document jsonb)`：返回 `{applied, revision, committed_revision, document, server_time}`。成功或同一请求重试时 applied=true，committed_revision 是该操作原提交的版本；冲突时 applied=false、committed_revision=null，并返回最新文档。响应始终包含当前完整文档，便于确认丢失后的追赶。
 3. 同一 operation_id 配不同文档/设备/基线必须拒绝，不能伪装成成功。账号取自 `auth.uid()`，客户端不提交 user_id。匿名角色无权调用，authenticated 只能调用这两个 RPC；原始表禁止客户端写入。
-4. 文档上限 2 MiB；共享历史上限 1000 个学习日，删除标记上限 10000。输入不能包含额外的设备配置或凭据字段。按每天 8 格的合成数据，2 MiB 大约容纳 400 个学习日，通常先于 1000 天的条数上限达到；占用 90% 起在账号页提示清理。
-5. 文本校验使用明确码点，不依赖数据库区域设置：控制字符为 Unicode Cc（多行字段允许换行、回车、制表符），空白为 Unicode White_Space，与客户端 Rust 的 `char::is_control`/`char::is_whitespace` 一致。
+4. 文档上限 2 MiB；共享历史上限 1000 个学习日，删除标记上限 10000。这些上限和逐字段规则都由客户端的严格解析执行。云端只校验文档外层：是对象、schema 为 1、顶层与 `preferences` 的键集合，大小不超过 2 MiB 再加 256 KiB 余量。额外的设备配置或凭据字段会被拒绝。按每天 8 格的合成数据，2 MiB 大约容纳 400 个学习日，通常先于 1000 天的条数上限达到；占用 90% 起在账号页提示清理。
+5. 文本校验只在客户端，使用明确码点：控制字符为 Unicode Cc（多行字段允许换行、回车、制表符），空白为 Unicode White_Space，即 Rust 的 `char::is_control`/`char::is_whitespace`。云端曾保留一份逐字段的 PL/pgSQL 校验，因数据库区域设置与客户端不一致误拒过文本，2026-11-03 起由 `202611030001` 删除。
 
 ## 验收
 
-核心测试覆盖旧数据标识迁移、设备设置隔离、跨设备计时投影、同格只记一次、历史合并、删除标记、冲突和损坏输入。集成测试用本地假 HTTP 服务覆盖登录、刷新、超时、重复提交、版本冲突、提交时继续操作、重启恢复、退出/换账号隔离。数据库测试覆盖匿名拒绝、用户隔离、直接写入拒绝、CAS、幂等和输入限制。
+核心测试覆盖旧数据标识迁移、设备设置隔离、跨设备计时投影、同格只记一次、历史合并、删除标记、冲突和损坏输入。集成测试用本地假 HTTP 服务覆盖登录、刷新、超时、重复提交、版本冲突、提交时继续操作、重启恢复、退出/换账号隔离。数据库测试覆盖匿名拒绝、用户隔离、直接写入拒绝、CAS、幂等和文档外层校验。
 
 在隔离预览中验证桌面与手机宽度的登录、同步、待同步和冲突界面；执行受影响的 TypeScript/Rust/安全检查，尝试 Android 编译。没有真实云端项目和双设备实测前，不宣称已完成生产云端或真机验收。

@@ -832,10 +832,10 @@ fn two_devices_starting_different_days_keep_one_and_archive_the_other() {
     phone_wins.validate().unwrap();
 }
 
-/// 与 scripts/check-sync-db.mjs 的云端文本校验使用同一组样例：两边判断不一致时，
-/// 客户端接受的内容会被云端整份拒绝，待上传的修改就再也传不上去。
+/// 文本规则只在客户端（云端只校验文档外层）：用明确码点判断，不随系统区域设置变化。
+/// 控制字符为 Unicode Cc（多行字段允许换行、回车、制表符），空白为 Unicode White_Space。
 #[test]
-fn text_rules_match_the_database_contract() {
+fn text_rules_use_explicit_code_points() {
     let (_, base) = archived(1_000, A);
     let with = |edit: &dyn Fn(&mut SyncDocument)| {
         let mut document = base.clone();
