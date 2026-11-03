@@ -23,6 +23,15 @@ for (const name of ["build", "check"]) {
   } else assert(!workflow.includes("contents: write"));
 }
 
+// 网页界面只开放实际用到的核心能力。新用到 Tauri 的 JS 接口时，要同时在这里和 capability 里显式加上。
+const capability = JSON.parse(await readFile(join(root, "src-tauri/capabilities/default.json"), "utf8"));
+assert.deepEqual(capability.permissions, [
+  "core:event:allow-listen", "core:event:allow-unlisten", "core:window:allow-set-title",
+  "core:app:allow-register-listener", "core:app:allow-remove-listener",
+], "界面权限不能放宽成 core:default");
+const api = await readFile(join(root, "src/api.ts"), "utf8");
+assert.deepEqual([...new Set([...api.matchAll(/@tauri-apps\/api\/([a-z]+)/g)].map((match) => match[1]))].sort(), ["app", "core", "event", "window"]);
+
 const installer = await readFile(join(root, "scripts/install-hosts-helper.sh"), "utf8");
 const helper = await readFile(join(root, "scripts/hosts-helper.sh"));
 const digest = createHash("sha256").update(helper).digest("hex");
@@ -48,4 +57,4 @@ if (process.platform === "darwin") {
   } finally { await rm(directory, { recursive: true, force: true }); }
 }
 
-console.log("安全边界检查通过：Action 提交锁定、任务权限、助手摘要与篡改拒绝。");
+console.log("安全边界检查通过：Action 提交锁定、任务权限、界面权限、助手摘要与篡改拒绝。");

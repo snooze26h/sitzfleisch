@@ -1,12 +1,15 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "Capability for the main window",
+  "description": "主窗口只开放界面实际用到的核心能力：接收后台事件、设窗口标题、安卓返回键。托盘、菜单、发事件、窗口与应用管理等一律不开放；应用自己的命令不受这里限制。",
   "windows": [
     "main"
   ],
   "permissions": [
-    "core:default",
-    "core:window:allow-set-title"
+    "core:event:allow-listen",
+    "core:event:allow-unlisten",
+    "core:window:allow-set-title",
+    "core:app:allow-register-listener",
+    "core:app:allow-remove-listener"
   ]
 }
