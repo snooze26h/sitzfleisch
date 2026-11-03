@@ -3497,7 +3497,7 @@ checksum = "8ee5873ec9cce0195efcb7a4e9507a04cd49aec9c83d0389df45b1ef7ba2e649"
 
 [[package]]
 name = "sitzfleisch-core"
-version = "0.15.2"
+version = "0.15.3"
 dependencies = [
  "serde",
  "serde_json",
@@ -3506,7 +3506,7 @@ dependencies = [
 
 [[package]]
 name = "sitzfleisch-x"
-version = "0.15.2"
+version = "0.15.3"
 dependencies = [
  "base64 0.22.1",
  "block2",

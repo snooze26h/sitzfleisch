@@ -1,7 +1,7 @@
 {
   "name": "sitzfleisch-x",
   "private": true,
-  "version": "0.15.2",
+  "version": "0.15.3",
   "type": "module",
   "scripts": {
     "dev": "vite",
