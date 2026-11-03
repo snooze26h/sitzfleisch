@@ -208,9 +208,29 @@ export interface AppState {
   day: Day | null;
 }
 
+/** 「下一格」建议，带着能说出口的理由。只由规则引擎算（core::suggest），菜单栏和界面同一份。 */
+export interface Suggestion {
+  category: string;
+  minutes: number;
+  reason: string;
+  pressing: boolean;
+}
+
+/** 规则引擎随快照发来的今天的安排：界面不再自己另算一份。 */
+export interface DayPlan {
+  /** 今天的配额都满了时为空。 */
+  suggestion: Suggestion | null;
+  /** 每个项目这一格的默认时长（统一块长与剩余配额都已算进去）。 */
+  block_minutes: Record<string, number>;
+  /** 按现在的节奏还要坐多久，不含暂停。 */
+  remaining_wall_seconds: number;
+}
+
 export interface Snapshot {
   revision: number;
   state: AppState;
+  /** 没开始今天时为空。 */
+  plan: DayPlan | null;
   /**
    * 历史满 60 天有 270 KB 上下，每秒推一遍是白烧电。
    * 心跳推送里是 null，界面沿用上一次的（见 `applySnapshot`）；

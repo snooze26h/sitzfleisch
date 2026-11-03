@@ -8,6 +8,8 @@ import type { ActionTarget, Day, Preferences, Snapshot, View } from "./types";
 import { MAX_BLOCK_MINUTES, MIN_BLOCK_MINUTES, MAX_COMPLETION_NOTE_CHARS, SYSTEM_SETTINGS_TARGETS, type SystemSettingsTarget } from "./types";
 import { SHORT_NAME_WIDTH, dayLabel, displayWidth, duration, esc, nowUnix } from "./format";
 import {
+  blockMinutesOf,
+  suggestion,
   enterShortcut,
   MAX_PROJECTS,
   QUIT_DIALOG_ID,
@@ -26,7 +28,6 @@ import {
 } from "./state";
 import { btn } from "./components";
 import { icon } from "./icons";
-import { blockMinutes, suggest } from "./scheduler";
 import { mergeSnapshot } from "./snapshots";
 import { markdownForDay } from "./markdown";
 import { mobileTabs, sidebar } from "./views/shell";
@@ -80,7 +81,7 @@ function reconcileSelection() {
   const d = day();
   if (!d || d.timer) return;
   if (ui.selectedCategory && d.categories.some((c) => c.id === ui.selectedCategory)) return;
-  ui.selectedCategory = suggest(d, prefs(), ui.now)?.category ?? d.categories[0]?.id ?? null;
+  ui.selectedCategory = suggestion()?.category ?? d.categories[0]?.id ?? null;
   ui.minutesDraft = null;
 }
 
@@ -1280,7 +1281,7 @@ async function startBlock() {
   const d = day();
   if (!d || d.timer) return;
   const p = prefs();
-  const s = suggest(d, p, ui.now);
+  const s = suggestion();
   // 今天的安排全部走完了：完成页上没有开始键，⌘↩ 也不该悄悄再开一格。
   if (!s) return;
   const selected = ui.selectedCategory ?? s?.category ?? null;
@@ -1289,7 +1290,7 @@ async function startBlock() {
     toast("这个项目不在今天的计划里。");
     return;
   }
-  const minutes = ui.minutesDraft ?? (selected === s?.category && s ? s.minutes : blockMinutes(cat, p));
+  const minutes = ui.minutesDraft ?? (selected === s.category ? s.minutes : blockMinutesOf(cat.id));
   const breakMinutes = ui.breakDraft ?? p.break_minutes;
   const snap = await act("start_block", { categoryId: cat.id, minutes, tasks: [], breakMinutes });
   if (!snap) return;

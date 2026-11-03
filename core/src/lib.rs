@@ -1264,11 +1264,11 @@ fn normalized_completion_note(note: &str) -> Result<String, &'static str> {
     Ok(note.replace("\r\n", "\n").replace('\r', "\n").trim().to_string())
 }
 
-// ---------- 「下一格」建议（与界面里的 TS 版同一套规则，菜单栏用） ----------
+// ---------- 「下一格」建议（界面与菜单栏共用这一份；界面经快照里的 DayPlan 拿到结果） ----------
 
 const FRESH_WINDOW: i64 = 3 * 3600;
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct Suggestion {
     pub category: String,
     pub minutes: i64,
@@ -1395,6 +1395,42 @@ pub fn suggest(day: &Day, prefs: &Preferences, _now: i64) -> Option<Suggestion> 
         reason = format!("趁清醒先做，还差 {}。", duration_text(remaining));
     }
     Some(make(best, reason, false))
+}
+
+/// 按现在的节奏，把剩余配额按各自块长切格，格间按休息时长算，得到还要坐多久（不含暂停）。
+pub fn estimated_remaining_wall_seconds(day: &Day, prefs: &Preferences) -> i64 {
+    let mut focus = 0;
+    let mut blocks = 0;
+    for c in &day.categories {
+        let remaining = remaining_seconds(c);
+        if remaining <= 0 {
+            continue;
+        }
+        let block = (effective_block_minutes(prefs, &c.id) * 60).max(60);
+        let rounded = (remaining + 59) / 60 * 60;
+        focus += rounded;
+        blocks += (rounded + block - 1) / block;
+    }
+    focus + (blocks - 1).max(0) * prefs.break_minutes * 60
+}
+
+/// 界面要的「下一格」信息，随快照一起发出去，界面不再自己另算一份。
+#[derive(Clone, Debug, Serialize)]
+pub struct DayPlan {
+    /// 今天的配额都满了时为空。
+    pub suggestion: Option<Suggestion>,
+    /// 每个项目这一格的默认时长（统一块长与剩余配额都已算进去）：用户另挑项目时用。
+    pub block_minutes: std::collections::BTreeMap<String, i64>,
+    /// 按现在的节奏还要坐多久（不含暂停），界面拿它报预计收工时间。
+    pub remaining_wall_seconds: i64,
+}
+
+pub fn day_plan(day: &Day, prefs: &Preferences, now: i64) -> DayPlan {
+    DayPlan {
+        suggestion: suggest(day, prefs, now),
+        block_minutes: day.categories.iter().map(|c| (c.id.clone(), block_minutes(c, prefs))).collect(),
+        remaining_wall_seconds: estimated_remaining_wall_seconds(day, prefs),
+    }
 }
 
 // ---------- hosts 屏蔽规则（纯变换，落盘与提权由外壳负责） ----------
@@ -2269,6 +2305,40 @@ mod tests {
         assert!(!s.pressing);
         assert_eq!(duration_text(5 * 3600 + 35 * 60), "5 小时 35 分");
         assert_eq!(duration_text(45), "45 秒");
+    }
+
+    #[test]
+    fn scheduler_boundaries_and_day_plan() {
+        let mut state = State::new(1_000);
+        state.preferences.categories.push(def("reading", "阅读", 50, "book-open", "dailyFloor"));
+        state.preferences.categories[0].role = "dailyFloor".into();
+        state.preferences.categories[0].default_block_minutes = 50;
+        state.preferences.profiles[0].quotas = vec![quota("main", 60), quota("reading", 60)];
+        state.start_day("standard", 1_000).unwrap();
+        let mut day = state.day.clone().unwrap();
+        let prefs = state.preferences.clone();
+        assert_eq!(suggest(&day, &prefs, 1_000).unwrap().category, "main", "两个最低保障项目并列时保留计划中的第一个");
+        day.categories.reverse();
+        assert_eq!(suggest(&day, &prefs, 1_000).unwrap().category, "reading");
+        day.categories.reverse();
+        let mut almost = day.categories[0].clone();
+        almost.quota_minutes = 1;
+        almost.accepted_seconds = 59;
+        assert_eq!(block_minutes(&almost, &prefs), 1, "只剩一秒也按一分钟建议");
+        let mut uniform = prefs.clone();
+        uniform.uniform_block_minutes = 37;
+        assert_eq!(block_minutes(&day.categories[0], &uniform), 37, "统一块长保持精确分钟");
+        // 两项各剩 60 分钟、块长 50：各切两格共四格、三段休息。
+        let plan = day_plan(&day, &prefs, 1_000);
+        assert_eq!(plan.block_minutes.get("main"), Some(&50));
+        assert_eq!(plan.remaining_wall_seconds, 120 * 60 + 3 * prefs.break_minutes * 60);
+        assert_eq!(plan.suggestion.as_ref().map(|s| s.category.as_str()), Some("main"));
+        for category in &mut day.categories {
+            category.accepted_seconds = category.quota_minutes * 60;
+        }
+        let done = day_plan(&day, &prefs, 1_000);
+        assert!(done.suggestion.is_none(), "配额都满了就没有下一格");
+        assert_eq!(done.remaining_wall_seconds, 0);
     }
 
     #[test]

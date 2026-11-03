@@ -45,7 +45,6 @@ node scripts/check-snapshot-order.mjs
 node scripts/check-sync-ui.mjs
 node scripts/check-sync-db.mjs
 node scripts/check-short-name.mjs
-node scripts/check-scheduler.mjs
 node scripts/check-timeline.mjs
 node scripts/check-blocking-rules.mjs
 node --test browser-extension/*.test.mjs

@@ -290,6 +290,8 @@ struct LiveState {
 struct Snapshot {
     revision: u64,
     state: LiveState,
+    /// 「下一格」建议、各项目默认块长和预计还要坐多久：规则只在 core 里算一份，菜单栏和界面共用。
+    plan: Option<core::DayPlan>,
     sync: sync::Status,
     /// 历史一满 60 天就有 270 KB 上下，每秒推一遍是白烧电。
     /// 所以只有首次拉取和命令的返回值带上它，心跳推送里是 null，界面沿用上一次的。
@@ -338,6 +340,7 @@ fn snapshot(shared: &Shared, with_history: bool) -> Snapshot {
         // 与状态捕获一起排序；同一秒里的命令也有先后，不依赖时间戳。
         revision: shared.snapshot_revision.fetch_add(1, Ordering::Relaxed) + 1,
         sync: sync_status,
+        plan: state.day.as_ref().map(|day| core::day_plan(day, &state.preferences, state.last_tick)),
         state: LiveState {
             schema: state.schema,
             last_tick: state.last_tick,

@@ -23,6 +23,7 @@ import type {
   SystemStatus,
   SyncStatus,
   TaskItem,
+  DayPlan,
 } from "../types";
 import { MAX_BLOCK_MINUTES, MIN_BLOCK_MINUTES, SUSPEND_GAP_SECONDS, MAX_COMPLETION_NOTE_CHARS, NOTIFICATION_CHANNELS, SYSTEM_SETTINGS_TARGETS, type SystemSettingsTarget } from "../types";
 import { version } from "../../package.json";
@@ -30,6 +31,7 @@ import { MAX_BLOCK_RULES, normalizeHost, normalizeUrl } from "../blocking";
 import { MAX_BLOCKED_APPS, validPackageName } from "../app-blocking";
 import { captureActionTarget, normalizedSyncStatus, SYNC_MUTATION_COMMANDS, validSyncEmail } from "../sync";
 import { completionEntryIndex } from "../record-identity";
+import { duration } from "../format";
 
 const HISTORY_LIMIT = 60;
 const params = new URLSearchParams(location.hash.replace(/^#/, ""));
@@ -790,11 +792,35 @@ function syncReply(): Snapshot {
 
 // ---------- 对外 ----------
 
+/**
+ * 预览用的「下一格」。真正的规则只在 Rust 规则引擎里（core::day_plan，按角色、清醒窗口和最低保障打分），
+ * 界面随快照拿结果；浏览器预览没有规则引擎，这里只按剩余最多的项目给一个够截图和点按用的近似。
+ */
+function previewPlan(day: Day): DayPlan {
+  const prefs = state.preferences;
+  const remainingOf = (c: CategoryState) => Math.max(0, c.quota_minutes * 60 - c.accepted_seconds);
+  const blockOf = (c: CategoryState) => {
+    const preferred = prefs.uniform_block_minutes > 0 ? prefs.uniform_block_minutes : prefs.categories.find((x) => x.id === c.id)?.default_block_minutes ?? 50;
+    const left = Math.ceil(remainingOf(c) / 60);
+    return left <= 0 ? preferred : Math.max(MIN_BLOCK_MINUTES, Math.min(preferred, left));
+  };
+  const open = day.categories.filter((c) => remainingOf(c) > 0);
+  const best = open.reduce<CategoryState | null>((top, c) => (!top || remainingOf(c) > remainingOf(top) ? c : top), null);
+  const focus = open.reduce((sum, c) => sum + Math.ceil(remainingOf(c) / 60) * 60, 0);
+  const blocks = open.reduce((sum, c) => sum + Math.ceil(Math.ceil(remainingOf(c) / 60) / blockOf(c)), 0);
+  return {
+    suggestion: best && { category: best.id, minutes: blockOf(best), reason: `落后最多，还差 ${duration(remainingOf(best))}。`, pressing: false },
+    block_minutes: Object.fromEntries(day.categories.map((c) => [c.id, blockOf(c)])),
+    remaining_wall_seconds: focus + Math.max(0, blocks - 1) * prefs.break_minutes * 60,
+  };
+}
+
 function snapshot(withHistory = true): Snapshot {
   const { history, ...live } = structuredClone(state);
   return {
     revision: ++snapshotRevision,
     state: live,
+    plan: live.day ? previewPlan(live.day) : null,
     history: withHistory ? history : null,
     write_protected: writeProtected,
     blocking: structuredClone(blocking),

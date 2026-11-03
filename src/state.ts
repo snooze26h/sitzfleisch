@@ -1,6 +1,7 @@
 // 界面自己的状态（不落盘）：当前页、草稿、展开项、菜单与对话框。
 
-import type { ActionTarget, ArchivedDay, CategoryDef, CategoryState, Day, InstalledApp, PlatformInfo, Preferences, Snapshot, SystemStatus, View } from "./types";
+import type { ActionTarget, ArchivedDay, CategoryDef, CategoryState, Day, InstalledApp, PlatformInfo, Preferences, Snapshot, Suggestion, SystemStatus, View } from "./types";
+import { MIN_BLOCK_MINUTES } from "./types";
 import { nowUnix, shortNameFrom } from "./format";
 
 /** 处理完这一下之后要不要留着框：返回 `"keep"` 就留着（重试还没成功），否则关掉。 */
@@ -132,6 +133,16 @@ export const ui = {
 /** 保存与开始的快捷键提示：Mac 写 ⌘↩，Windows 上是 Ctrl+Enter。 */
 export function enterShortcut(): string {
   return ui.platform?.os === "macos" ? "⌘↩" : "Ctrl+Enter";
+}
+
+/** 「下一格」建议；没开始今天或配额都满了时为空。 */
+export function suggestion(): Suggestion | null {
+  return ui.snap?.plan?.suggestion ?? null;
+}
+
+/** 这个项目这一格的默认时长，由规则引擎随快照算好。 */
+export function blockMinutesOf(id: string): number {
+  return ui.snap?.plan?.block_minutes[id] ?? MIN_BLOCK_MINUTES;
 }
 
 export function hasFeature(feature: keyof PlatformInfo["features"]): boolean {

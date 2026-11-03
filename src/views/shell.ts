@@ -4,10 +4,9 @@ import { clock, esc, meter } from "../format";
 import { icon } from "../icons";
 import { brandIcon, brandMark } from "../brand";
 import { dayMoon } from "../moon";
-import { suggest } from "../scheduler";
 import type { View } from "../types";
 import { settingsSections } from "./settings";
-import { breakRemaining, day, iconOf, isPaused, nameOf, netSeconds, pauseNowSeconds, prefs, quotaSeconds, resting, shortName, ui } from "../state";
+import { breakRemaining, day, iconOf, isPaused, nameOf, netSeconds, pauseNowSeconds, quotaSeconds, resting, shortName, suggestion, ui } from "../state";
 
 const NAV: [View, string][] = [
   ["today", "今天"],
@@ -77,7 +76,7 @@ function nowBlock(): string {
     title = nameOf(t.category, d);
     value = clock(Math.max(0, t.total_seconds - t.elapsed_seconds));
   } else {
-    const s = suggest(d, prefs(), ui.now);
+    const s = suggestion();
     ic = s ? iconOf(s.category) : "check";
     tint = s ? "muted" : "stroke";
     title = s ? "下一格" : "今日达成";

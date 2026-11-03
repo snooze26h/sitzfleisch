@@ -21,11 +21,13 @@ import {
   select,
   sessionRow,
 } from "../components";
-import { blockMinutes, estimatedRemainingWallSeconds, remainingSeconds, suggest } from "../scheduler";
 import { appBlocking } from "../app-blocking";
 import { syncIndicator } from "./sync";
 import {
+  blockMinutesOf,
   enterShortcut,
+  remainingOf,
+  suggestion,
   BREAK_OPTIONS,
   breakRemaining,
   day,
@@ -108,13 +110,13 @@ function inChooser(d: Day): boolean {
 }
 
 function activeBoard(d: Day): string {
-  const suggestion = inChooser(d) ? suggest(d, prefs(), ui.now) : null;
+  const next = inChooser(d) ? suggestion() : null;
   // 四块排成两行两列：这一格 | 今天这一轮月，今日配额 | 今天的总读数。
   // 左右两列上下各自对齐，窗口第一屏里放得下「此刻」和「今天」两个尺度。
   const moon = `<div class="moon-cell moon-stage" id="day-moon">${dayMoon(d)}</div>`;
   // 先说已经坏掉的（提醒不响、屏蔽没生效），再说划掉之后才会坏的。
   const notificationWarning = reminderWarning() || appBlockingWarning() || backgroundWarning();
-  return `<section class="today-top${ui.compact && suggestion ? " choosing" : ""}${ui.compact && notificationWarning ? " with-warning" : ""}" id="today-top">${focusPanel(d)}${moon}${quotaPanel(d, suggestion?.category ?? null)}${dayReadings(d)}${notificationWarning}</section>
+  return `<section class="today-top${ui.compact && next ? " choosing" : ""}${ui.compact && notificationWarning ? " with-warning" : ""}" id="today-top">${focusPanel(d)}${moon}${quotaPanel(d, next?.category ?? null)}${dayReadings(d)}${notificationWarning}</section>
     ${diagramBlock()}
     ${d.ledger.length ? logBlock(d) : ""}`;
 }
@@ -189,7 +191,7 @@ function focusPanel(d: Day): string {
   else if (d.timer) inner = runningPanel(d, d.timer);
   else inner = nextBlockPanel(d);
   if (d.timer) phase = isPaused(d) ? "paused" : "flow";
-  else if (!suggest(d, prefs(), ui.now)) phase = "done";
+  else if (!suggestion()) phase = "done";
   else phase = resting(d) ? "rest" : "ready";
   return `<section class="focus" id="focus" data-phase="${phase}">${inner}</section>`;
 }
@@ -224,19 +226,18 @@ function runningPanel(d: Day, t: BlockTimer): string {
 function nextBlockPanel(d: Day): string {
   const p = prefs();
   const restingNow = resting(d);
-  const suggestion = suggest(d, p, ui.now);
-  if (!suggestion) return completeBlock(d);
-  const selected = ui.selectedCategory && d.categories.some((c) => c.id === ui.selectedCategory) ? ui.selectedCategory : suggestion.category;
-  const cat = d.categories.find((c) => c.id === selected)!;
-  const minutes = ui.minutesDraft ?? (selected === suggestion.category ? suggestion.minutes : blockMinutes(cat, p));
+  const next = suggestion();
+  if (!next) return completeBlock(d);
+  const selected = ui.selectedCategory && d.categories.some((c) => c.id === ui.selectedCategory) ? ui.selectedCategory : next.category;
+  const minutes = ui.minutesDraft ?? (selected === next.category ? next.minutes : blockMinutesOf(selected));
   const brk = ui.breakDraft ?? p.break_minutes;
   // 头上这一行说清现在是停着还是在休息：图标就是暂停键和茶杯，不用要人去猜的小方块。
   const pausedStrip = restingNow
     ? `<div class="pause-strip resting">${icon("coffee", 18)}<span>休息中，还剩 <b class="mono">${esc(clock(breakRemaining(d)))}</b></span>${btn("不休息了", { kind: "quiet", cls: "sm", action: "end-break" })}</div>`
     : `<div class="pause-strip">${icon("pause", 18)}<span>已暂停 <b class="mono">${esc(clock(idleNowSeconds(d)))}</b></span></div>`;
-  const suggestionLine = `<div class="suggestion${suggestion.pressing ? " pressing" : ""}">
-      ${suggestion.pressing ? icon("triangle-alert", 18) : ""}
-      <div class="text"><b>建议 ${esc(nameOf(suggestion.category, d))} · ${suggestion.minutes} 分钟</b><span>${esc(suggestion.reason)}</span></div>
+  const suggestionLine = `<div class="suggestion${next.pressing ? " pressing" : ""}">
+      ${next.pressing ? icon("triangle-alert", 18) : ""}
+      <div class="text"><b>建议 ${esc(nameOf(next.category, d))} · ${next.minutes} 分钟</b><span>${esc(next.reason)}</span></div>
     </div>`;
   const controls = `<div class="controls-row">
       ${labelled("时长", minuteInput({ change: "minutes", value: minutes, min: MIN_BLOCK_MINUTES, max: MAX_BLOCK_MINUTES, label: "专注时长" }))}
@@ -253,16 +254,15 @@ function completeBlock(d: Day): string {
 }
 
 function quotaPanel(d: Day, suggested: string | null): string {
-  const p = prefs();
   const selectable = inChooser(d) && !!suggested;
   // 和上面的项目选择器同一个选中项：没手动挑过就是建议的那个。
   const chosen = ui.selectedCategory && d.categories.some((c) => c.id === ui.selectedCategory) ? ui.selectedCategory : suggested;
   const t = d.timer;
   let estimate = "";
   if (inChooser(d)) {
-    const remaining = d.categories.reduce((sum, c) => sum + remainingSeconds(c), 0);
+    const remaining = d.categories.reduce((sum, c) => sum + remainingOf(c), 0);
+    const wall = ui.snap?.plan?.remaining_wall_seconds ?? 0;
     if (remaining > 0) {
-      const wall = estimatedRemainingWallSeconds(d, p);
       estimate = `<p class="estimate">还要 ${esc(duration(wall))}，约 ${esc(wallClock(ui.now + wall))} 收工</p>`;
     }
   }
