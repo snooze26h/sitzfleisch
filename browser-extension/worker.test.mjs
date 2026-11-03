@@ -728,3 +728,19 @@ test("返回消息不接受 popup、自选目标或过时页面，不能覆盖�
   assert.deepEqual(await goBack(h, 1, page), { ok: false });
   assert.equal(h.updates.length, 0);
 });
+
+test("放行页面频繁改网址时不再每次都认证，要拦的网址仍先确认主程序在线", async () => {
+  const h = harness({ initialTabs: [{ id: 1, url: favorite }] });
+  await h.boot();
+  const before = h.requests.length;
+  for (let i = 0; i < 20; i += 1) {
+    h.chromeApi.webNavigation.onBeforeNavigate.emit({ tabId: 1, frameId: 0, url: favorite, timeStamp: 10 + i });
+  }
+  await tick(); await tick();
+  assert.equal(h.requests.length, before, "两秒内刚确认过，放行的网址不再重新握手");
+  h.state.fetch = async () => { throw new Error("app exited"); };
+  h.tabs.get(1).url = recommend;
+  h.chromeApi.webNavigation.onBeforeNavigate.emit({ tabId: 1, frameId: 0, url: recommend, timeStamp: 100 });
+  await h.blocker.sync(); await tick();
+  assert.equal(h.tabs.get(1).url, recommend, "要拦的网址先确认主程序在线，退出后不拿旧规则拦人");
+});

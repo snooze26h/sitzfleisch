@@ -6,6 +6,8 @@ export const SESSION_URL = "http://127.0.0.1:47832/v1/session";
 export const CACHE_KEY = "sitzfleisch.rules.v1";
 export const ALARM_NAME = "sitzfleisch.sync.v1";
 const MAX_RESPONSE_BYTES = 2 * 1024 * 1024;
+// 导航触发的复核间隔：这么短时间内主程序退出，下一次导航或 30 秒定时同步仍会解除。
+const RECONFIRM_MS = 2000;
 
 async function readResponse(response, code, nonce, sessionOnly = false) {
   if (!/^[0-9a-f]{64}$/.test(response.headers.get("x-sitzfleisch-proof") || "")) throw new Error("authentication-error");
@@ -56,6 +58,8 @@ export function createBlocker({ chromeApi, fetchImpl = fetch, now = Date.now, ti
   let pairingStorageAvailable = false;
   let appliedRevision = null;
   let lastSyncAt = null;
+  // 本 worker 里最近一次确认主程序在线的时刻；只在内存里，新 worker 必须重新确认。
+  let confirmedAt = null;
   let connection = "waiting";
   let error = null;
   let syncFlight = null;
@@ -242,9 +246,11 @@ export function createBlocker({ chromeApi, fetchImpl = fetch, now = Date.now, ti
       if (enforcementFailureGeneration !== failureGeneration) throw new Error("navigation-apply-failed");
       appliedRevision = next.revision;
       lastSyncAt = syncedAt;
+      confirmedAt = now();
       connection = "connected";
       error = null;
     } catch (cause) {
+      confirmedAt = null;
       if (cause?.message === "authentication-error") phase = "authentication-error";
       connection = phase === "connection-error" ? "disconnected" : rules ? "cache" : "waiting";
       error = phase;
@@ -282,6 +288,7 @@ export function createBlocker({ chromeApi, fetchImpl = fetch, now = Date.now, ti
     rules = released;
     appliedRevision = null;
     lastSyncAt = null;
+    confirmedAt = null;
     return sync();
   }
 
@@ -295,11 +302,15 @@ export function createBlocker({ chromeApi, fetchImpl = fetch, now = Date.now, ti
   function inspectEvent(tabId, url, timestamp, committed = false) {
     const version = nextNavigation(tabId, timestamp);
     if (version === null) return;
+    const inspect = () => inspectTab(tabId, version, url, committed);
     // 新导航先确认主程序仍在线，避免退出后的旧缓存先拦截、再立即放行。
     // 本轮已收到有效响应时可直接检查，保留应用过程中的并发导航错误追踪。
-    const flight = sync();
-    const inspect = () => inspectTab(tabId, version, url, committed);
-    void (rulesConfirmedInFlight ? inspect() : flight.then(inspect)).catch(() => {
+    // 不会被拦、也不是阻止页的网址，两秒内刚确认过主程序在线就直接检查：页面频繁改网址（滚动联动、
+    // 定时 replaceState）时每次都完整认证一轮，既拖慢浏览器，也会耗尽主程序的防重放名额，
+    // 被当成身份验证失败而解除全部屏蔽。要拦或要放行阻止页的网址仍先确认，不拿旧规则拦人。
+    const fresh = !syncFlight && connection === "connected" && confirmedAt !== null && now() - confirmedAt < RECONFIRM_MS
+      && typeof url === "string" && rules !== null && !matchesUrl(rules, url) && originalBlockedUrl(url, blockedPage) === null;
+    void (fresh || rulesConfirmedInFlight ? inspect() : sync().then(inspect)).catch(() => {
       enforcementFailureGeneration += 1;
       appliedRevision = null;
       if (connection !== "disconnected") connection = rules ? "cache" : "waiting";

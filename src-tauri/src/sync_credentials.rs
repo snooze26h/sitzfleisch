@@ -94,21 +94,22 @@ mod implementation {
     struct SessionReply { value: Option<String> }
 
     pub(super) fn load(app: &tauri::AppHandle, _data_dir: &Path, scope: &str) -> Result<Option<Vec<u8>>, String> {
-        let reply: SessionReply = app.sitzfleisch_android()
-            .load_sync_session(serde_json::json!({ "scope": scope }))
+        // 走 plugin_call：同步网络线程持着锁调用这里，划掉应用时的 panic 不能毒化同步锁。
+        let reply: SessionReply = crate::mobile::plugin_call(|| app.sitzfleisch_android()
+            .load_sync_session(serde_json::json!({ "scope": scope })))
             .map_err(|_| READ_FAILED.to_owned())?;
         Ok(reply.value.map(String::into_bytes))
     }
 
     pub(super) fn store(app: &tauri::AppHandle, _data_dir: &Path, scope: &str, value: &str) -> Result<(), String> {
-        app.sitzfleisch_android()
-            .store_sync_session(serde_json::json!({ "scope": scope, "value": value }))
+        crate::mobile::plugin_call(|| app.sitzfleisch_android()
+            .store_sync_session(serde_json::json!({ "scope": scope, "value": value })))
             .map_err(|_| WRITE_FAILED.into())
     }
 
     pub(super) fn delete(app: &tauri::AppHandle, _data_dir: &Path, scope: &str) -> Result<(), String> {
-        app.sitzfleisch_android()
-            .delete_sync_session(serde_json::json!({ "scope": scope }))
+        crate::mobile::plugin_call(|| app.sitzfleisch_android()
+            .delete_sync_session(serde_json::json!({ "scope": scope })))
             .map_err(|_| DELETE_FAILED.into())
     }
 }

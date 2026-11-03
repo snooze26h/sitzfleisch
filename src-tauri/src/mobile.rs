@@ -82,7 +82,8 @@ fn remove_stale_temporaries(alarms_path: &Path) {
     }
 }
 
-fn plugin_call<T, E: std::fmt::Display>(call: impl FnOnce() -> Result<T, E>) -> Result<T, String> {
+/// Activity 已销毁时（划掉应用、退出途中）wry 会 panic；包一层，别让持锁的调用方把锁毒化。
+pub(crate) fn plugin_call<T, E: std::fmt::Display>(call: impl FnOnce() -> Result<T, E>) -> Result<T, String> {
     catch_unwind(AssertUnwindSafe(call))
         .map_err(|_| "Android 系统接口暂不可用，请回到前台后重试。".to_owned())?
         .map_err(|error| error.to_string())

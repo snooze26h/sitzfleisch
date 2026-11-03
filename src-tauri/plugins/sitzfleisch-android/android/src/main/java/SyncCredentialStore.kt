@@ -6,6 +6,7 @@ import android.security.keystore.KeyProperties
 import android.util.Base64
 import org.json.JSONObject
 import org.json.JSONTokener
+import java.security.GeneralSecurityException
 import java.security.KeyStore
 import javax.crypto.Cipher
 import javax.crypto.KeyGenerator
@@ -48,6 +49,29 @@ internal object SyncCredentialStore {
         .build())
     }.generateKey()
 
+  /** 由 Keystore 生成随机 IV；同一令牌多次保存也不能复用 GCM nonce。
+   *  别名还在但密钥已用不了（系统升级、Keystore 损坏后常见）时删掉重建一次：旧密文本来就解不开、
+   *  而且正要被覆盖；不重建的话每次登录都存不进会话，只能清应用数据。 */
+  private fun encryptor(scope: String): Cipher {
+    val store = keyStore()
+    fun encrypting(key: SecretKey): Cipher =
+      Cipher.getInstance("AES/GCM/NoPadding").also { it.init(Cipher.ENCRYPT_MODE, key) }
+    val existing = try {
+      existingKey(store, scope)
+    } catch (_: GeneralSecurityException) {
+      runCatching { store.deleteEntry(ALIAS_PREFIX + scope) }
+      null
+    }
+    if (existing != null) {
+      try {
+        return encrypting(existing)
+      } catch (_: GeneralSecurityException) {
+        runCatching { store.deleteEntry(ALIAS_PREFIX + scope) }
+      }
+    }
+    return encrypting(newKey(scope))
+  }
+
   private fun aad(scope: String): ByteArray =
     "sitzfleisch-sync-session-v1:$scope".toByteArray(Charsets.UTF_8)
 
@@ -88,10 +112,7 @@ internal object SyncCredentialStore {
     validateSession(value)
     val preferences = context.applicationContext.getSharedPreferences(PREFERENCES, Context.MODE_PRIVATE)
     val previous = preferences.getString(scope, null)
-    val key = existingKey(keyStore(), scope) ?: newKey(scope)
-    val cipher = Cipher.getInstance("AES/GCM/NoPadding")
-    // 由 Keystore 生成随机 IV；同一令牌多次保存也不能复用 GCM nonce。
-    cipher.init(Cipher.ENCRYPT_MODE, key)
+    val cipher = encryptor(scope)
     cipher.updateAAD(aad(scope))
     val plaintext = value.toByteArray(Charsets.UTF_8)
     val encrypted = try { cipher.doFinal(plaintext) } finally { plaintext.fill(0) }
