@@ -1903,6 +1903,20 @@ async function start() {
   }
 }
 
+/** 读数用界面字体的表格数字。部分安卓厂商字体没有 tnum，数字宽窄不一，倒计时会每秒左右跳；量到这种情况就退回等宽字体。 */
+function settleDigitFont() {
+  const probe = document.createElement("span");
+  probe.style.cssText = "position:absolute;visibility:hidden;white-space:nowrap;font-size:40px;font-family:var(--font-num);font-variant-numeric:tabular-nums";
+  document.body.append(probe);
+  probe.textContent = "1111";
+  const narrow = probe.getBoundingClientRect().width;
+  probe.textContent = "0000";
+  const wide = probe.getBoundingClientRect().width;
+  probe.remove();
+  if (Math.abs(wide - narrow) > 0.5) document.documentElement.classList.add("mono-digits");
+}
+
+settleDigitFont();
 void start().catch((error) => {
   app.innerHTML = `<p role="alert">无法启动坐功：${esc(String(error))}。请重新打开应用。</p>`;
 });

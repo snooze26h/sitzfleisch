@@ -35,6 +35,9 @@
   --control-border: #8a8172;
   --control-soft: rgba(231, 223, 208, 0.26);
   --font-ui: -apple-system, BlinkMacSystemFont, "SF Pro Text", system-ui, "PingFang SC", "Microsoft YaHei", sans-serif;
+  /* 读数用界面字体的表格数字：位宽固定、倒计时不左右跳，又不像终端里的等宽字（斜杠 0、宽字母、中文夹在里面字距松散）。
+     字体没有 tnum 特性时（部分安卓厂商字体），main.ts 给根元素加 mono-digits，退回等宽字体。 */
+  --font-num: var(--font-ui);
   --font-mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, "PingFang SC", "Microsoft YaHei", monospace;
   /* 只给页题这几行用宋体——印书的字；Windows 没有就回到界面字体。 */
   --font-display: "Songti SC", "STSong", "Source Han Serif SC", "Noto Serif CJK SC", "Noto Serif SC", var(--font-ui);
@@ -43,6 +46,8 @@
   --page-y: 36px;
   color-scheme: dark;
 }
+
+:root.mono-digits { --font-num: var(--font-mono); }
 
 * {
   box-sizing: border-box;
@@ -109,7 +114,7 @@ textarea {
 .content::-webkit-scrollbar-thumb:hover { background: rgba(231, 223, 208, 0.24); }
 }
 
-.mono { font-family: var(--font-mono); font-variant-numeric: tabular-nums; }
+.mono { font-family: var(--font-num); font-variant-numeric: tabular-nums; }
 .ic { flex: none; display: inline-block; vertical-align: -0.2em; }
 .sel { user-select: text; -webkit-user-select: text; cursor: text; }
 .hair { height: 1px; background: var(--hair); flex: none; }
@@ -229,11 +234,11 @@ textarea {
 .now-line .ic.high { color: var(--ink-high); }
 .now-line .nm { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .now-line .tag { font-style: normal; font-size: 14px; margin-left: auto; }
-.now-text .val { font-family: var(--font-mono); font-variant-numeric: tabular-nums; font-size: 24px; line-height: 1.2; color: var(--ink-high); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.now-text .val { font-family: var(--font-num); font-variant-numeric: tabular-nums; font-size: 24px; line-height: 1.2; color: var(--ink-high); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 /* 暂停秒表走赭石：它是「时间在流走但没算数」的那一个。 */
 .now-text .val.caution { color: var(--caution); }
 .now-net { display: flex; align-items: baseline; justify-content: space-between; }
-.now-net .val { font-family: var(--font-mono); font-variant-numeric: tabular-nums; font-size: 14px; font-weight: 500; color: var(--ink-body); }
+.now-net .val { font-family: var(--font-num); font-variant-numeric: tabular-nums; font-size: 14px; font-weight: 500; color: var(--ink-body); }
 .now-net .val i { font-style: normal; font-size: 12.5px; font-weight: 400; color: var(--ink-faint); }
 
 .content {
@@ -283,10 +288,10 @@ textarea {
 
 .reading { display: flex; flex-direction: column; gap: 2px; white-space: nowrap; flex: none; }
 .reading.trailing { align-items: flex-end; }
-.reading .val { font-family: var(--font-mono); font-variant-numeric: tabular-nums; font-size: 17px; color: var(--ink-high); line-height: 1.2; }
+.reading .val { font-family: var(--font-num); font-variant-numeric: tabular-nums; font-size: 17px; color: var(--ink-high); line-height: 1.2; }
 
 .big-reading { display: flex; align-items: baseline; flex-wrap: wrap; gap: 6px 14px; }
-.big-reading .val { font-family: var(--font-mono); font-variant-numeric: tabular-nums; font-size: 84px; font-weight: 450; letter-spacing: -3px; line-height: 1; color: var(--ink-high); }
+.big-reading .val { font-family: var(--font-num); font-variant-numeric: tabular-nums; font-size: 84px; font-weight: 450; letter-spacing: -2px; line-height: 1; color: var(--ink-high); }
 .big-reading .unit { font-size: 15px; font-weight: 500; letter-spacing: 0.4px; color: var(--ink-muted); }
 .big-reading.caution .val { color: var(--caution); }
 .big-reading.muted .val { color: var(--ink-muted); }
@@ -383,7 +388,7 @@ textarea {
 .switch input:disabled + .knob { opacity: 0.45; }
 
 .stepper { display: inline-flex; align-items: center; gap: 4px; flex: none; }
-.stepper .val { font-family: var(--font-mono); font-variant-numeric: tabular-nums; font-size: 15px; color: var(--ink-high); min-width: 4.2em; text-align: center; }
+.stepper .val { font-family: var(--font-num); font-variant-numeric: tabular-nums; font-size: 15px; color: var(--ink-high); min-width: 4.2em; text-align: center; }
 .stepper button { width: 32px; height: 34px; display: inline-flex; align-items: center; justify-content: center; border-radius: 7px; color: var(--ink-muted); box-shadow: inset 0 0 0 1px var(--control-border); }
 @media (hover: hover) {
 .stepper button:hover { background: rgba(231, 223, 208, 0.07); color: var(--ink-high); }
@@ -407,7 +412,7 @@ textarea {
 
 .field.sm { padding: 8px 10px; font-weight: 500; }
 .field.md { padding: 10px 12px; }
-.field.mono { font-family: var(--font-mono); }
+.field.mono { font-family: var(--font-num); }
 .field::placeholder { color: var(--ink-faint); }
 .field:focus { box-shadow: inset 0 0 0 1px var(--stroke); outline: 2px solid rgba(231, 223, 208, 0.35); outline-offset: 2px; }
 .field[aria-invalid="true"] { box-shadow: inset 0 0 0 1px var(--caution); }
@@ -418,7 +423,7 @@ textarea.field { resize: none; height: 96px; font-size: 15px; line-height: 1.5; 
 .labelled { display: inline-flex; align-items: center; gap: 10px; }
 
 .minute-input { display: inline-flex; align-items: center; gap: 6px; flex: none; }
-.minute-input .field { width: 64px; min-height: 38px; text-align: center; font-family: var(--font-mono); font-variant-numeric: tabular-nums; font-size: 16px; padding: 7px 4px; appearance: textfield; -moz-appearance: textfield; }
+.minute-input .field { width: 64px; min-height: 38px; text-align: center; font-family: var(--font-num); font-variant-numeric: tabular-nums; font-size: 16px; padding: 7px 4px; appearance: textfield; -moz-appearance: textfield; }
 .minute-input input::-webkit-inner-spin-button, .minute-input input::-webkit-outer-spin-button { -webkit-appearance: none; margin: 0; }
 .minute-input button { display: inline-flex; align-items: center; justify-content: center; width: 32px; height: 38px; border-radius: 8px; color: var(--ink-body); box-shadow: inset 0 0 0 1px var(--control-border); }
 @media (hover: hover) {
@@ -502,7 +507,7 @@ textarea.field { resize: none; height: 96px; font-size: 15px; line-height: 1.5; 
 /* 刚计入的那一段先是朱红，一秒多之后冷成骨白的灰。 */
 .q-row.pulse .q-ash { background: var(--ember); transition: none; }
 
-.q-num { justify-self: end; display: inline-flex; align-items: baseline; gap: 5px; font-family: var(--font-mono); font-variant-numeric: tabular-nums; font-size: 14px; color: var(--ink-faint); white-space: nowrap; }
+.q-num { justify-self: end; display: inline-flex; align-items: baseline; gap: 5px; font-family: var(--font-num); font-variant-numeric: tabular-nums; font-size: 14px; color: var(--ink-faint); white-space: nowrap; }
 .q-num b { font-size: 15px; font-weight: 500; color: var(--ink-high); }
 /* 配额满了：香烧到了头，数字换成「✓ 已满 30m」。 */
 .q-num.full { gap: 6px; color: var(--stroke); }
@@ -536,7 +541,7 @@ textarea.field { resize: none; height: 96px; font-size: 15px; line-height: 1.5; 
 /* 按停时火头换成实心赭石：空心小方块读起来像一个说不清的框。 */
 .block-stick-wrap.held .bs-ember { background: var(--caution); }
 
-.strip-foot { display: flex; gap: 8px; margin-top: 10px; font-family: var(--font-mono); font-variant-numeric: tabular-nums; font-size: 14px; color: var(--ink-muted); }
+.strip-foot { display: flex; gap: 8px; margin-top: 10px; font-family: var(--font-num); font-variant-numeric: tabular-nums; font-size: 14px; color: var(--ink-muted); }
 .strip-foot .mid { flex: 1; text-align: center; }
 .block-stick-wrap.held .strip-foot .mid { color: var(--caution); }
 
@@ -620,14 +625,14 @@ textarea.field { resize: none; height: 96px; font-size: 15px; line-height: 1.5; 
 }
 .plan-row .edit button:active { background: rgba(231, 223, 208, 0.11); }
 .plan-row .edit button:disabled { opacity: 0.3; background: transparent; }
-.plan-input.field { width: 82px; min-height: 40px; padding: 6px 4px; font-family: var(--font-mono); font-variant-numeric: tabular-nums; font-size: 18px; text-align: center; appearance: textfield; -moz-appearance: textfield; }
+.plan-input.field { width: 82px; min-height: 40px; padding: 6px 4px; font-family: var(--font-num); font-variant-numeric: tabular-nums; font-size: 18px; text-align: center; appearance: textfield; -moz-appearance: textfield; }
 .plan-input::-webkit-inner-spin-button, .plan-input::-webkit-outer-spin-button { appearance: none; margin: 0; }
 .plan-row.off .plan-input { color: var(--ink-muted); }
-.plan-row .hrs { text-align: right; font-family: var(--font-mono); font-variant-numeric: tabular-nums; font-size: 15px; color: var(--ink-muted); }
+.plan-row .hrs { text-align: right; font-family: var(--font-num); font-variant-numeric: tabular-nums; font-size: 15px; color: var(--ink-muted); }
 .plan-row.off .hrs { color: var(--ink-faint); }
 
 .plan-total { display: flex; align-items: baseline; justify-content: space-between; gap: 16px; }
-.plan-total .num { font-family: var(--font-mono); font-variant-numeric: tabular-nums; font-size: 40px; font-weight: 500; line-height: 1.1; color: var(--ink-high); }
+.plan-total .num { font-family: var(--font-num); font-variant-numeric: tabular-nums; font-size: 40px; font-weight: 500; line-height: 1.1; color: var(--ink-high); }
 
 /* ---------- 运行台 ---------- */
 
@@ -663,7 +668,7 @@ textarea.field { resize: none; height: 96px; font-size: 15px; line-height: 1.5; 
 .pause-strip > .ic { flex: none; color: var(--ink-faint); }
 .pause-strip.resting > .ic { color: var(--caution); }
 .pause-strip > span { display: inline-flex; align-items: baseline; flex-wrap: wrap; gap: 4px 10px; }
-.pause-strip b { font-family: var(--font-mono); font-variant-numeric: tabular-nums; font-size: 26px; font-weight: 400; line-height: 1.1; color: var(--ink-high); }
+.pause-strip b { font-family: var(--font-num); font-variant-numeric: tabular-nums; font-size: 26px; font-weight: 400; line-height: 1.1; color: var(--ink-high); }
 .pause-strip.resting b { color: var(--caution); }
 .pause-strip .btn { margin-left: auto; }
 
@@ -682,8 +687,8 @@ textarea.field { resize: none; height: 96px; font-size: 15px; line-height: 1.5; 
 .day-readings .section-head .trail { margin: -6px -6px -6px auto; }
 .net { display: flex; flex-direction: column; gap: 4px; white-space: nowrap; }
 .net .figure { display: flex; align-items: baseline; gap: 8px; }
-.net .figure .val { font-family: var(--font-mono); font-variant-numeric: tabular-nums; font-size: 40px; font-weight: 400; line-height: 1.1; color: var(--ink-high); }
-.net .figure .of { font-family: var(--font-mono); font-size: 16px; color: var(--ink-faint); }
+.net .figure .val { font-family: var(--font-num); font-variant-numeric: tabular-nums; font-size: 40px; font-weight: 400; line-height: 1.1; color: var(--ink-high); }
+.net .figure .of { font-family: var(--font-num); font-size: 16px; color: var(--ink-faint); }
 .net.secondary .figure .val { font-size: 28px; color: var(--ink-muted); }
 
 .quota-block { display: flex; flex-direction: column; }
@@ -708,7 +713,7 @@ textarea.field { resize: none; height: 96px; font-size: 15px; line-height: 1.5; 
 .session .meta .nm { font-size: 16px; font-weight: 600; color: var(--ink-body); }
 .session.rejected .meta .nm { color: var(--ink-muted); }
 .session .meta .dur { font-size: 15px; color: var(--ink-muted); }
-.session .meta .at { font-family: var(--font-mono); font-variant-numeric: tabular-nums; font-size: 14px; color: var(--ink-faint); }
+.session .meta .at { font-family: var(--font-num); font-variant-numeric: tabular-nums; font-size: 14px; color: var(--ink-faint); }
 .session .meta .badge { font-size: 14px; font-weight: 600; letter-spacing: 0.6px; color: var(--caution); }
 .session-note { margin: 4px 0; font-size: 16px; line-height: 1.7; color: var(--ink-body); white-space: pre-wrap; overflow-wrap: anywhere; user-select: text; -webkit-user-select: text; }
 .session-edit { align-self: flex-start; margin-left: -11px; }
@@ -736,7 +741,7 @@ textarea.field { resize: none; height: 96px; font-size: 15px; line-height: 1.5; 
 .wall-wd { display: flex; align-items: center; justify-content: flex-end; font-size: 13px; color: var(--ink-faint); }
 /* 月份和月面的左缘对齐，而不是和格子的边对齐：月面半径是画布的 440/1024（design/yue/moon.json），
    左缘离格边 72/1024 格，一格 8 个格距，也就是 0.5625 个格距。 */
-.wall-mo { align-self: end; padding-left: calc(var(--wu) * 0.5625px); font-family: var(--font-mono); font-size: 13px; font-weight: 500; line-height: 1; color: var(--ink-faint); white-space: nowrap; }
+.wall-mo { align-self: end; padding-left: calc(var(--wu) * 0.5625px); font-family: var(--font-num); font-size: 13px; font-weight: 500; line-height: 1; color: var(--ink-faint); white-space: nowrap; }
 .day-cell { display: flex; align-items: center; justify-content: center; border-radius: 50%; }
 .day-cell .moon { width: 100%; height: 100%; }
 button.day-cell { transition: background 0.15s ease-out, box-shadow 0.15s ease-out; }
@@ -759,7 +764,7 @@ button.day-cell:active { background: rgba(231, 223, 208, 0.1); }
 .wall-key dt { display: flex; align-items: center; gap: 14px; font-size: 15px; color: var(--ink-body); }
 .wall-key .k-mark { display: flex; align-items: center; justify-content: center; width: 24px; height: 24px; flex: none; }
 .wall-key .k-mark .moon { width: 24px; height: 24px; }
-.wall-key dd { margin: 0; font-family: var(--font-mono); font-variant-numeric: tabular-nums; font-size: 17px; color: var(--ink-high); white-space: nowrap; }
+.wall-key dd { margin: 0; font-family: var(--font-num); font-variant-numeric: tabular-nums; font-size: 17px; color: var(--ink-high); white-space: nowrap; }
 .wall-key dd span { margin-left: 6px; font-family: var(--font-ui); font-size: 14px; color: var(--ink-muted); }
 
 .archive { display: flex; flex-direction: column; border-top: 1px solid var(--hair-strong); }
@@ -779,8 +784,8 @@ button.day-cell:active { background: rgba(231, 223, 208, 0.1); }
 .archive-row .comp i b { position: absolute; left: 0; top: 0; bottom: 0; background: var(--stroke); }
 .archive-row .comp i.idle { opacity: 0.35; }
 .archive-row .nums { display: flex; flex-direction: column; align-items: flex-end; gap: 2px; }
-.archive-row .nums b { font-family: var(--font-mono); font-variant-numeric: tabular-nums; font-size: 19px; font-weight: 500; color: var(--ink-high); }
-.archive-row .nums span { font-family: var(--font-mono); font-size: 13px; color: var(--ink-muted); white-space: nowrap; }
+.archive-row .nums b { font-family: var(--font-num); font-variant-numeric: tabular-nums; font-size: 19px; font-weight: 500; color: var(--ink-high); }
+.archive-row .nums span { font-family: var(--font-num); font-size: 13px; color: var(--ink-muted); white-space: nowrap; }
 .archive-detail { display: flex; flex-direction: column; gap: 22px; padding: 22px 14px 26px 68px; border-bottom: 1px solid var(--hair); }
 .archive-detail .sessions { display: flex; flex-direction: column; }
 .archive-detail .actions { display: flex; align-items: center; gap: 10px; }
@@ -809,7 +814,7 @@ button.day-cell:active { background: rgba(231, 223, 208, 0.1); }
 .sync-form-field { display: flex; flex-direction: column; gap: 8px; max-width: 420px; }
 .sync-form-field label { font-size: 15px; font-weight: 500; color: var(--ink-body); }
 .sync-form-field .field { width: 100%; min-width: 0; }
-.sync-form-field .sync-code { max-width: 240px; font-family: var(--font-mono); font-size: 16px; letter-spacing: 3px; }
+.sync-form-field .sync-code { max-width: 240px; font-family: var(--font-num); font-variant-numeric: tabular-nums; font-size: 16px; letter-spacing: 3px; }
 .sync-actions { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; }
 .sync-actions .btn { min-height: 44px; white-space: normal; text-align: center; }
 .sync-error, .sync-attention { font-size: 15px; line-height: 1.75; overflow-wrap: anywhere; }
@@ -1005,7 +1010,7 @@ button.day-cell:active { background: rgba(231, 223, 208, 0.1); }
 .completion-error { color: var(--signal-line); overflow-wrap: anywhere; }
 .extension-editor { display: flex; flex-direction: column; gap: 12px; font-size: 15px; }
 .extension-value { display: flex; align-items: center; gap: 10px; }
-.extension-value .field { width: 100px; font-size: 18px; font-family: var(--font-mono); }
+.extension-value .field { width: 100px; font-size: 18px; font-family: var(--font-num); }
 .extension-presets { display: flex; flex-wrap: wrap; gap: 8px; }
 
 @media (prefers-reduced-motion: reduce) {
@@ -1035,7 +1040,7 @@ button.day-cell:active { background: rgba(231, 223, 208, 0.1); }
   .page { gap: 40px; }
   .today-top { grid-template-columns: minmax(0, 1fr) 248px; column-gap: 40px; }
   .start-board { --start-art: 248px; column-gap: 40px; }
-  .big-reading .val { font-size: 68px; letter-spacing: -2px; }
+  .big-reading .val { font-size: 68px; letter-spacing: -1.5px; }
   .t-masthead { font-size: 40px; }
   .suggestion .text b { font-size: 22px; }
   .focus .btn-row { gap: 8px; }

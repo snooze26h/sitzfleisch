@@ -18,6 +18,12 @@ const EMBER_INK = "#fff5e7";
 const CAUTION = "#c6a367";
 const BED = "#141411";
 
+/** 刻度字跟着读数字体走（styles.css 的 --font-num，计算值里 var() 已展开）；启动时可能已退回等宽，所以每次现读。 */
+function numFont(px: number): string {
+  const family = getComputedStyle(document.documentElement).getPropertyValue("--font-num").trim();
+  return `500 ${px}px ${family || "system-ui, sans-serif"}`;
+}
+
 /** 轨高、轴高、总高：界面那边要拿总高定容器，别两处各写一套。 */
 const TRACK_H = 46;
 const AXIS_H = 22;
@@ -94,7 +100,7 @@ export function drawDiagram(
   const hours = span / 3600;
   // 一天拉长之后半点线会糊成一片，那时只留整点。
   const halfHours = hours <= 6;
-  ctx.font = `500 13px ui-monospace, "SF Mono", Menlo, monospace`;
+  ctx.font = numFont(13);
   ctx.textBaseline = "middle";
   ctx.textAlign = "center";
   const tickLabelWidth = ctx.measureText("00:00").width;
@@ -223,7 +229,7 @@ export function drawDiagram(
   }
 
   // 6. 两端的钟点，写在轨下面，省得靠中间的刻度倒推一天从几点开始。
-  ctx.font = `500 13px ui-monospace, "SF Mono", Menlo, monospace`;
+  ctx.font = numFont(13);
   ctx.fillStyle = INK_FAINT;
   ctx.textAlign = "left";
   ctx.fillText(fromText, 0, trackBottom + 13);
