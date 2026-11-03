@@ -1,9 +1,11 @@
 name: check
 
 # 平时的 push 也要有检查：打包那个 workflow 只在 tag 和手动触发时跑，
-# 等到发版才发现 tsc 挂了就太晚了。
+# 等到发版才发现 tsc 挂了就太晚了。tag 推送不再跑这里：build.yml 已经在 macOS 与 Windows 上跑全套测试，
+# 再跑一遍只是重复花时间。
 on:
   push:
+    branches: ["**"]
   pull_request:
 
 permissions:

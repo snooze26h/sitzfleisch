@@ -142,7 +142,6 @@ macOS 发布包是 Apple 芯片与 Intel 通用二进制。当前仅做 ad-hoc �
 ```bash
 npm run tauri android build -- --debug --apk --target aarch64
 npm run tauri android build -- --apk --target aarch64 --ci
-python3 -m unittest discover -s src-tauri/gen/android/tests -v
 ```
 
 第二条是 release 构建：启用 R8，只有配置了本地密钥时才签名；无配置时仍可构建，未签名产物不能用于正式安装或发布。调试包 ID 为 `com.snooze26h.sitzfleisch.x.debug`，正式包 ID 为 `com.snooze26h.sitzfleisch.x`，数据独立。
