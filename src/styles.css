@@ -114,7 +114,7 @@ textarea {
 .content::-webkit-scrollbar-thumb:hover { background: rgba(231, 223, 208, 0.24); }
 }
 
-.mono { font-family: var(--font-num); font-variant-numeric: tabular-nums; }
+.mono { font-family: var(--font-mono); font-variant-numeric: tabular-nums; }
 .ic { flex: none; display: inline-block; vertical-align: -0.2em; }
 .sel { user-select: text; -webkit-user-select: text; cursor: text; }
 .hair { height: 1px; background: var(--hair); flex: none; }
@@ -412,7 +412,7 @@ textarea {
 
 .field.sm { padding: 8px 10px; font-weight: 500; }
 .field.md { padding: 10px 12px; }
-.field.mono { font-family: var(--font-num); }
+.field.mono { font-family: var(--font-mono); }
 .field::placeholder { color: var(--ink-faint); }
 .field:focus { box-shadow: inset 0 0 0 1px var(--stroke); outline: 2px solid rgba(231, 223, 208, 0.35); outline-offset: 2px; }
 .field[aria-invalid="true"] { box-shadow: inset 0 0 0 1px var(--caution); }
@@ -890,6 +890,7 @@ button.day-cell:active { background: rgba(231, 223, 208, 0.1); }
 .website-block .blocking-input-label { display: block; padding-bottom: 8px; font-size: 14px; color: var(--ink-muted); }
 .host-add { display: flex; align-items: center; gap: 10px; }
 .host-add .field { flex: 1; min-width: 0; }
+.website-block .host-add.pairing { padding-top: 12px; }
 .website-block .blocking-note { font-size: 15px; color: var(--ink-muted); line-height: 1.6; padding-top: 8px; overflow-wrap: anywhere; }
 .website-block .blocking-note.caution { color: var(--caution); }
 .website-block .blocking-conflict { margin-top: 14px; padding: 12px 14px; border-radius: 8px; box-shadow: inset 0 0 0 1px rgba(198, 163, 103, 0.55); font-size: 15px; color: var(--caution); line-height: 1.6; overflow-wrap: anywhere; }
@@ -897,7 +898,7 @@ button.day-cell:active { background: rgba(231, 223, 208, 0.1); }
 .blocking-group-heading > b { font-size: 16px; font-weight: 600; color: var(--ink-high); }
 .blocking-group-heading .t-note { margin-right: auto; }
 .blocking-rule-list { display: flex; flex-direction: column; padding-top: 14px; }
-.blocking-rule { display: flex; align-items: flex-start; gap: 12px; padding: 12px 0; border-top: 1px solid var(--hair); }
+.blocking-rule { display: flex; align-items: center; gap: 12px; padding: 12px 0; border-top: 1px solid var(--hair); }
 .blocking-rule:last-child { border-bottom: 1px solid var(--hair); }
 .blocking-rule .rule-content { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 4px; }
 .blocking-rule .rule-kind { font-size: 13px; color: var(--ink-muted); }
@@ -918,10 +919,9 @@ button.day-cell:active { background: rgba(231, 223, 208, 0.1); }
 .problem-block .titles b { font-size: 15px; font-weight: 600; color: var(--caution); }
 .problem-block .titles span { font-size: 15px; color: var(--ink-muted); }
 
-.status-dot { display: inline-flex; align-items: center; gap: 8px; font-size: 14px; font-weight: 500; color: var(--ink-muted); }
-.status-dot i { width: 8px; height: 8px; background: var(--stroke); display: inline-block; }
-/* 有问题时换成实心赭石，不用空心框：空心小方块读起来像一个说不清的记号。 */
-.status-dot.problem i { background: var(--caution); }
+/* 状态直接写成字；有问题时加一枚警示图标并转成赭石，不再用读不出含义的小方块。 */
+.status-label { display: inline-flex; align-items: center; gap: 6px; font-size: 14px; font-weight: 500; color: var(--ink-muted); }
+.status-label.problem { color: var(--caution); }
 
 /* ---------- 保护模式 / 保存失败 ---------- */
 

@@ -195,13 +195,13 @@ function wholeSiteBrowserState(): BlockState {
 }
 
 function statusLabel(state: BlockState): string {
-  return `<span class="status-dot${state.problem ? " problem" : ""}"><i aria-hidden="true"></i>${esc(state.title)}</span>`;
+  return `<span class="status-label${state.problem ? " problem" : ""}">${state.problem ? icon("triangle-alert", 14) : ""}${esc(state.title)}</span>`;
 }
 
 function ruleRows(kind: "host" | "url", values: string[]): string {
   if (!values.length) return `<p class="blocking-note">${kind === "url" ? "还没有精确网址规则。" : "还没有整站规则。"}</p>`;
   return `<div class="blocking-rule-list">${values.map((value) => `<div class="blocking-rule">
-    <span class="rule-content"><span class="rule-kind">${kind === "url" ? "精确网址" : "整个网站"}</span><span class="rule-value mono sel">${esc(value)}</span></span>
+    <span class="rule-content"><span class="rule-value mono sel">${esc(value)}</span></span>
     ${btn("解除", { kind: "quiet-danger", action: "remove-rule", data: { kind, value }, title: `解除${kind === "url" ? "精确网址" : "整站"}规则 ${value}（需要两步确认）` })}
   </div>`).join("")}</div>`;
 }
@@ -244,7 +244,7 @@ function websiteBlock(): string {
     ${warning}
     <div class="blocking-group-heading"><b>精确网址</b><span class="t-note">只拦这一个网址</span>${statusLabel(browserState)}</div>
     ${browserState.detail ? `<p class="blocking-note${browserState.problem ? " caution" : ""}">${esc(browserState.detail)}</p>` : ""}
-    <div class="host-add">${btn("复制扩展配对码", { kind: "plate", action: "copy-browser-pairing", disabled: !inTauri || !ui.snap!.blocking.browser.available })}${btn("重新生成配对码", { kind: "quiet", action: "reset-browser-pairing", disabled: !inTauri || !ui.snap!.blocking.browser.available })}</div>
+    <div class="host-add pairing">${btn("复制扩展配对码", { kind: "plate", action: "copy-browser-pairing", disabled: !inTauri || !ui.snap!.blocking.browser.available })}${btn("重新生成配对码", { kind: "quiet", action: "reset-browser-pairing", disabled: !inTauri || !ui.snap!.blocking.browser.available })}</div>
     <p class="blocking-note">在扩展弹窗中粘贴一次即可连接。重新生成会使已有浏览器配对失效，需要重新配对。</p>
     ${ruleEditor("url")}
     ${ruleRows("url", p.blocked_urls)}
