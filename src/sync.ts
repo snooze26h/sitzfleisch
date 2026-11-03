@@ -30,7 +30,7 @@ export function observedCommandArgs(command: string, args: Record<string, unknow
 }
 
 function emptyStatus(): SyncStatus {
-  return { configured: false, account_id: null, phase: "unconfigured", email: null, revision: 0, pending: false, last_synced_at: null, error: null, migration: null, conflict: null, recovery_path: null };
+  return { configured: false, account_id: null, phase: "unconfigured", email: null, revision: 0, pending: false, last_synced_at: null, error: null, migration: null, conflict: null, recovery_path: null, capacity_percent: null };
 }
 
 /** 不猜测半份状态；坏 IPC 数据给出可见错误，不能显示成“已同步”。 */
@@ -57,7 +57,10 @@ export function normalizedSyncStatus(value: unknown): SyncStatus {
     || typeof c.local_active !== "boolean" || typeof c.remote_active !== "boolean"
     || !Array.isArray(c.fields) || c.fields.length > 128 || !c.fields.every((f) => typeof f === "string" && f.length <= 256))) return invalid();
   if (s.phase === "awaiting_import" && !m || s.phase === "conflict" && !c) return invalid();
-  return { ...s, account_id: accountId } as SyncStatus;
+  // 旧版快照没有容量字段，按未知处理。
+  const capacity = s.capacity_percent === undefined ? null : s.capacity_percent;
+  if (!(capacity === null || Number.isSafeInteger(capacity) && capacity >= 0 && capacity <= 1000)) return invalid();
+  return { ...s, account_id: accountId, capacity_percent: capacity } as SyncStatus;
 }
 
 export function validSyncEmail(value: string): boolean {

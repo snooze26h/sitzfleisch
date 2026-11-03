@@ -9,12 +9,18 @@ use crate::{ArchivedDay, CategoryDef, Day, Preferences, ProfileDef, State, TaskI
 
 pub const SYNC_SCHEMA: u32 = 1;
 pub const MAX_DOCUMENT_BYTES: usize = 2 * 1024 * 1024;
+/// 新操作最多把共享文档写到这里；余下 64 KiB 留给自然到时的投影和另一端的合并，
+/// 文档不会因为一次到点结算就越过云端上限。
+pub const CAPTURE_LIMIT_BYTES: usize = MAX_DOCUMENT_BYTES - 64 * 1024;
 pub const MAX_HISTORY_DAYS: usize = 1000;
 pub const MAX_DELETED_DAYS: usize = 10_000;
 pub const MAX_UNIX_SECONDS: i64 = 253_402_300_799;
 const MAX_DAY_CATEGORIES: usize = 128;
 const MAX_LEDGER_ENTRIES: usize = 10_000;
 const MAX_SPANS: usize = 20_000;
+const TOO_LARGE: &str = "同步文档超过 2 MiB，原数据已保留";
+const CAPACITY_REACHED: &str =
+    "共享记录已接近 2 MiB 容量上限，这次修改没有保存。请先在历史页删除一些不再需要的旧学习日。";
 
 /// 白名单字段保证网站/应用屏蔽、声音、系统权限和提醒偏好不会搭便车上传。
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -117,7 +123,10 @@ impl<'de> Deserialize<'de> for SyncDocument {
             history: raw.history,
             deleted_day_ids: raw.deleted_day_ids,
         };
-        document.validate().map_err(serde::de::Error::custom)?;
+        // 本机账号存档也走这里；体积上限属于上传协议，由网络入口另行检查。
+        document
+            .validate_structure()
+            .map_err(serde::de::Error::custom)?;
         Ok(document)
     }
 }
@@ -147,14 +156,34 @@ impl std::fmt::Display for MergeConflict {
 impl std::error::Error for MergeConflict {}
 
 impl SyncDocument {
+    /// 网络协议入口：结构之外还要满足云端的体积上限。
     pub fn from_json(raw: &str) -> Result<Self, String> {
         if raw.len() > MAX_DOCUMENT_BYTES {
-            return Err("同步文档超过 2 MiB，原数据已保留".into());
+            return Err(TOO_LARGE.into());
         }
-        serde_json::from_str(raw).map_err(|_| "同步数据格式或内容无效".into())
+        let document: Self =
+            serde_json::from_str(raw).map_err(|_| "同步数据格式或内容无效".to_owned())?;
+        document.validate()?;
+        Ok(document)
     }
 
+    /// 上传与接收云端文档时使用的完整校验。
     pub fn validate(&self) -> Result<(), String> {
+        self.validate_structure()?;
+        if self.jsonb_len()? > MAX_DOCUMENT_BYTES {
+            return Err(TOO_LARGE.into());
+        }
+        Ok(())
+    }
+
+    /// 与云端 `octet_length(document::text)` 相同的字节数。
+    pub fn jsonb_len(&self) -> Result<usize, String> {
+        serialized_jsonb_len(self)
+    }
+
+    /// 本机存档、投影与合并只要求结构有效。体积是上传协议的限制：自然到时多出的几百字节，
+    /// 不能让已经保存的草稿打不开、合并不了，或让冲突无法解决。
+    pub fn validate_structure(&self) -> Result<(), String> {
         if self.schema != SYNC_SCHEMA {
             return Err("不支持的同步协议版本，请更新应用".into());
         }
@@ -187,9 +216,6 @@ impl SyncDocument {
                 return Err("已删除的学习日不能同时存在".into());
             }
         }
-        if serialized_jsonb_len(self)? > MAX_DOCUMENT_BYTES {
-            return Err("同步文档超过 2 MiB，原数据已保留".into());
-        }
         Ok(())
     }
 
@@ -209,7 +235,7 @@ impl SyncDocument {
         }
         timestamp(state.last_tick)?;
         if let Some(previous) = previous {
-            previous.validate()?;
+            previous.validate_structure()?;
         }
         let mut migrated = state.clone();
         adopt_known_ids(&mut migrated, previous);
@@ -241,14 +267,24 @@ impl SyncDocument {
             deleted_day_ids: deleted.into_iter().collect(),
         };
         document.normalize();
-        document.validate()?;
+        document.validate_structure()?;
+        let size = document.jsonb_len()?;
+        if size > CAPTURE_LIMIT_BYTES {
+            // 已经超过时仍允许删除旧记录、缩短文字等让文档变小的操作，否则用户没有办法腾出空间。
+            let grew = match previous {
+                Some(previous) => size > previous.jsonb_len()?,
+                None => true,
+            };
+            if grew {
+                return Err(CAPACITY_REACHED.into());
+            }
+        }
         *state = migrated;
         Ok(document)
     }
 
     /// 只替换共享字段。设备偏好、喝水去重游标和当前设备已消费的提醒计数不从远端覆盖。
     pub fn apply(&self, state: &mut State, now: i64) -> Result<(), String> {
-        self.validate()?;
         timestamp(now)?;
         let projected = self.projected(now)?;
         let mut updated = state.clone();
@@ -269,7 +305,7 @@ impl SyncDocument {
 
     /// 投影只推进到更晚的时刻，不让校时回拨将已记过的秒数再记一次。
     pub fn projected(&self, now: i64) -> Result<Self, String> {
-        self.validate()?;
+        self.validate_structure()?;
         timestamp(now)?;
         let target = now.max(self.last_tick);
         let mut state = State::new(self.last_tick);
@@ -281,7 +317,7 @@ impl SyncDocument {
         projected.last_tick = target;
         projected.day = state.day;
         projected.normalize();
-        projected.validate()?;
+        projected.validate_structure()?;
         Ok(projected)
     }
 
@@ -320,6 +356,8 @@ impl SyncDocument {
 }
 
 /// 三方比较先把三个时间锚点投影到同一秒，自然走时不是用户冲突。
+/// 学习日按稳定标识逐条比较：进行中、已归档、已删除是同一条记录的不同状态。
+/// 一端收工后新开的学习日因此不会和另一端的旧学习日争同一个位置。
 pub fn merge(
     base: &SyncDocument,
     local: &SyncDocument,
@@ -347,53 +385,71 @@ pub fn merge(
         choice,
         &mut conflicts,
     );
-    let day = pick(
-        &base.day,
-        &local.day,
-        &remote.day,
-        "day",
-        choice,
-        &mut conflicts,
-    );
-    let base_history = history_map(&base);
-    let local_history = history_map(&local);
-    let remote_history = history_map(&remote);
-    let ids: BTreeSet<&String> = base_history
+    let base_days = day_records(&base);
+    let local_days = day_records(&local);
+    let remote_days = day_records(&remote);
+    let ids: BTreeSet<&String> = base_days
         .keys()
-        .chain(local_history.keys())
-        .chain(remote_history.keys())
+        .chain(local_days.keys())
+        .chain(remote_days.keys())
         .collect();
+    let mut current = Vec::new();
     let mut history = Vec::new();
     let mut deleted_day_ids = Vec::new();
     for id in ids {
-        let before = base_history
-            .get(id)
-            .cloned()
-            .unwrap_or(HistoryRecord::Absent);
-        // 没有删除标记的缺项不是删除；旧版设备可能只缓存最近60天。
-        let left = local_history.get(id).unwrap_or(&before);
-        let right = remote_history.get(id).unwrap_or(&before);
-        let picked = pick(
-            &before,
-            left,
-            right,
-            &format!("history:{id}"),
-            choice,
-            &mut conflicts,
-        );
-        match picked {
-            HistoryRecord::Present(archived) => history.push(*archived),
-            HistoryRecord::Deleted => deleted_day_ids.push(id.clone()),
-            HistoryRecord::Absent => (),
+        let before = base_days.get(id).cloned().unwrap_or(DayRecord::Absent);
+        // 进行中的学习日在一端消失，是那一端放弃了它；归档缺项则不是删除，旧版设备可能只缓存最近60天。
+        let missing = if matches!(before, DayRecord::Current(_)) {
+            DayRecord::Absent
+        } else {
+            before.clone()
+        };
+        let left = local_days.get(id).unwrap_or(&missing);
+        let right = remote_days.get(id).unwrap_or(&missing);
+        let field = if [&before, left, right]
+            .into_iter()
+            .any(|record| matches!(record, DayRecord::Current(_)))
+        {
+            "day".to_owned()
+        } else {
+            format!("history:{id}")
+        };
+        match pick(&before, left, right, &field, choice, &mut conflicts) {
+            DayRecord::Current(day) => current.push(*day),
+            DayRecord::Archived(archived) => history.push(*archived),
+            DayRecord::Deleted => deleted_day_ids.push(id.clone()),
+            DayRecord::Absent => (),
         }
     }
+    // 进行中的记录只可能来自两端各自的当前学习日。两端分别开始了不同的学习日时只能保留一个，
+    // 未选的那一天按此刻收工归档，已经记下的专注不随冲突选择丢失。
+    let day = if current.len() > 1 {
+        conflicts.push("day".into());
+        match choice {
+            None => None,
+            Some(choice) => {
+                let chosen = match choice {
+                    MergeChoice::Local => &local.day,
+                    MergeChoice::Remote => &remote.day,
+                }
+                .as_ref()
+                .map(|day| day.sync_id.clone());
+                let (kept, others): (Vec<Day>, Vec<Day>) = current
+                    .into_iter()
+                    .partition(|day| Some(&day.sync_id) == chosen.as_ref());
+                for other in others {
+                    history.push(archive_day(other, target)?);
+                }
+                kept.into_iter().next()
+            }
+        }
+    } else {
+        current.pop()
+    };
+    conflicts.sort();
+    conflicts.dedup();
     if !conflicts.is_empty() && choice.is_none() {
         return Err(MergeConflict { fields: conflicts });
-    }
-    if let Some(active) = &day {
-        // 同一天一端收工、另一端继续时，已由 day 的冲突选择决定生命周期，不能两处各记一遍。
-        history.retain(|archived| archived.day.sync_id != active.sync_id);
-        deleted_day_ids.retain(|id| id != &active.sync_id);
     }
     let mut document = SyncDocument {
         schema: SYNC_SCHEMA,
@@ -404,10 +460,26 @@ pub fn merge(
         deleted_day_ids,
     };
     document.normalize();
-    document.validate().map_err(|reason| MergeConflict {
-        fields: vec![reason],
-    })?;
+    document
+        .validate_structure()
+        .map_err(|reason| MergeConflict {
+            fields: vec![reason],
+        })?;
     Ok(document)
+}
+
+/// 与本机收工相同：正在走的格按已走时长计入，休息截到这一刻，未结束的暂停闭合。
+fn archive_day(day: Day, at: i64) -> Result<ArchivedDay, MergeConflict> {
+    let failed = |reason: &str| MergeConflict {
+        fields: vec![reason.to_owned()],
+    };
+    let mut state = State::new(at);
+    state.day = Some(day);
+    state.end_day(at).map_err(failed)?;
+    state
+        .history
+        .pop()
+        .ok_or_else(|| failed("另一端的学习日无法归档"))
 }
 
 fn merge_preferences(
@@ -457,25 +529,29 @@ fn merge_preferences(
 }
 
 #[derive(Clone, Serialize)]
-enum HistoryRecord {
-    Present(Box<ArchivedDay>),
+enum DayRecord {
+    Current(Box<Day>),
+    Archived(Box<ArchivedDay>),
     Deleted,
     Absent,
 }
 
-fn history_map(document: &SyncDocument) -> BTreeMap<String, HistoryRecord> {
+fn day_records(document: &SyncDocument) -> BTreeMap<String, DayRecord> {
     let mut records: BTreeMap<_, _> = document
         .history
         .iter()
         .map(|archived| {
             (
                 archived.day.sync_id.clone(),
-                HistoryRecord::Present(Box::new(archived.clone())),
+                DayRecord::Archived(Box::new(archived.clone())),
             )
         })
         .collect();
     for id in &document.deleted_day_ids {
-        records.insert(id.clone(), HistoryRecord::Deleted);
+        records.insert(id.clone(), DayRecord::Deleted);
+    }
+    if let Some(day) = &document.day {
+        records.insert(day.sync_id.clone(), DayRecord::Current(Box::new(day.clone())));
     }
     records
 }

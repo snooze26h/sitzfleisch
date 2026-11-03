@@ -253,6 +253,8 @@ export interface SyncStatus {
     remote_active: boolean;
   } | null;
   recovery_path: string | null;
+  /** 共享文档占云端 2 MiB 上限的百分比；未登录时为 null。 */
+  capacity_percent: number | null;
 }
 
 /** 业务操作作用于用户看到的那一份状态；每秒走时不改变这份操作目标。 */

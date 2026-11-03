@@ -49,20 +49,21 @@ impl AccountFile {
             || !(0..=9_007_199_254_740_991).contains(&self.revision)
             || self.clock_offset.unsigned_abs() > core::sync::MAX_UNIX_SECONDS as u64
         { return Err("账号存档版本或身份无效，原文件已保留。".into()); }
-        self.base.validate()?;
-        self.draft.validate()?;
+        // 体积只限制上传：合并后略超上限的草稿仍须能打开，用户才能删除旧记录腾出空间。
+        self.base.validate_structure()?;
+        self.draft.validate_structure()?;
         self.state = core::from_json(&core::to_json(&self.state)).map_err(|_| "账号计时存档无效，原文件已保留。")?;
         if let Some(pending) = &self.pending {
             if !valid_id(&pending.operation_id) || pending.expected_revision != self.revision {
                 return Err("待同步请求的版本无效，原文件已保留。".into());
             }
-            pending.document.validate()?;
+            pending.document.validate_structure()?;
         }
         if let Some(remote) = &self.conflict {
             if remote.revision < self.revision || remote.server_time <= 0 || remote.server_time > 32_503_680_000 {
                 return Err("冲突记录无效，原文件已保留。".into());
             }
-            remote.document.validate()?;
+            remote.document.validate_structure()?;
         }
         Ok(())
     }
@@ -85,8 +86,30 @@ pub struct Store {
 }
 
 impl Store {
+    /// 同一服务地址和数据目录得到同一命名空间；凭据也按它隔离。
+    pub fn scope(data_dir: &Path, service_url: &str) -> String {
+        format!("{:x}", Sha256::digest(format!("{service_url}\n{}", data_dir.display())))[..32].to_owned()
+    }
+
+    /// 存储无法安全打开时只看账号选择记录在不在；看不清时按“在”处理，避免把账号数据当成单机数据覆盖。
+    pub fn may_have_active_account(data_dir: &Path, service_url: &str) -> bool {
+        let path = data_dir.join("sync").join(Self::scope(data_dir, service_url)).join("active.json");
+        !matches!(fs::symlink_metadata(path), Err(error) if error.kind() == std::io::ErrorKind::NotFound)
+    }
+
+    /// 账号存档读不出来时退出账号：只移除选择记录，账号文件原样留给恢复。
+    /// 不读取内容，所以不要求它的权限或格式完好；符号链接只删除链接本身。
+    pub fn forget_active(data_dir: &Path, scope: &str) -> Result<(), String> {
+        let path = data_dir.join("sync").join(scope).join("active.json");
+        match fs::symlink_metadata(&path) {
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Ok(metadata) if !metadata.is_dir() => fs::remove_file(&path).map_err(|_| "无法清除账号选择记录，请重试。".into()),
+            _ => Err("无法清除账号选择记录，请检查同步目录。".into()),
+        }
+    }
+
     pub fn open(data_dir: &Path, service_url: &str) -> Result<Self, String> {
-        let scope = format!("{:x}", Sha256::digest(format!("{service_url}\n{}", data_dir.display())))[..32].to_owned();
+        let scope = Self::scope(data_dir, service_url);
         let root = data_dir.join("sync");
         private_directory(&root)?;
         let directory = root.join(&scope);
@@ -142,6 +165,8 @@ impl Store {
     pub fn save(&self, account: &AccountFile, state: &core::State) -> Result<(), String> {
         let mut file = account.clone();
         file.state = state.clone();
+        // 历史以草稿为准，打开账号时从草稿恢复；这里再存一份只会让每次保存多写一整份历史。
+        file.state.history = Vec::new();
         let bytes = serde_json::to_vec(&file).map_err(|_| "账号存档编码失败。")?;
         if bytes.len() as u64 > MAX_ACCOUNT_BYTES { return Err("账号存档超过容量限制，待同步数据已保留在内存中，请先导出备份。".into()); }
         atomic_write(&self.account_path(&account.user.id)?, &bytes)

@@ -11,6 +11,12 @@ use sitzfleisch_core::sync::SyncDocument;
 
 const MAX_REPLY_BYTES: u64 = 2 * 1024 * 1024 + 64 * 1024;
 const MAX_AUTH_BYTES: u64 = 32 * 1024;
+const WRITE_PATH: &str = "/rest/v1/rpc/sitz_sync_write";
+
+/// 访问令牌失效或刷新令牌被拒。RPC 遇到它先刷新一次，刷新也被拒才需要重新登录。
+pub const EXPIRED: &str = "登录已过期，请重新登录；本机记录已保留。";
+/// 云端校验确定不接受这份文档；原样重发不会成功，需要等内容改变后再生成新请求。
+pub const REJECTED: &str = "云端没有接受这次上传，可能含有云端暂不支持的字符或超出容量。本机记录已保留；修改相关内容或点“立即同步”后会再试。";
 
 #[derive(Clone)]
 pub struct Config {
@@ -167,9 +173,13 @@ impl Http {
         if !response.status().is_success() {
             if path == "/auth/v1/token?grant_type=refresh_token"
                 && matches!(response.status(), StatusCode::BAD_REQUEST | StatusCode::UNAUTHORIZED)
-            { return Err("登录已过期，请重新登录；本机记录已保留。".into()); }
+            { return Err(EXPIRED.into()); }
+            // PostgREST 把文档校验失败（22023）映射为 400；网关拒绝过大的请求体为 413。
+            if path == WRITE_PATH && matches!(response.status(), StatusCode::BAD_REQUEST | StatusCode::PAYLOAD_TOO_LARGE) {
+                return Err(REJECTED.into());
+            }
             return Err(match response.status() {
-                StatusCode::UNAUTHORIZED => "登录已过期，请重新登录；本机记录已保留。",
+                StatusCode::UNAUTHORIZED => EXPIRED,
                 StatusCode::FORBIDDEN => "云端拒绝了访问，请检查项目权限或重新登录。",
                 StatusCode::TOO_MANY_REQUESTS => "请求过于频繁，请稍后再试。",
                 StatusCode::NOT_FOUND => "云端同步接口尚未部署，请先完成数据库部署。",
@@ -216,8 +226,9 @@ impl Http {
     }
 
     pub fn write(&self, session: &Session, revision: i64, operation_id: &str, device_id: &str, document: &SyncDocument) -> Result<WriteReply, String> {
-        document.validate()?;
-        let result: WriteReply = serde_json::from_value(self.post("/rest/v1/rpc/sitz_sync_write", Some(session), json!({
+        // 生成请求前已检查过；这里再挡一次，不把注定被拒的文档发出去。
+        document.validate().map_err(|_| REJECTED.to_owned())?;
+        let result: WriteReply = serde_json::from_value(self.post(WRITE_PATH, Some(session), json!({
             "p_expected_revision":revision,"p_operation_id":operation_id,"p_device_id":device_id,"p_document":document,
         }), MAX_REPLY_BYTES)?).map_err(|_| "云端同步响应格式无效。")?;
         validate_reply(result.revision, result.server_time, result.document.as_ref())?;
@@ -360,6 +371,26 @@ mod tests {
         assert!(http.read(&test_session(), -1).is_err());
         assert!(http.read(&test_session(), -1).err().unwrap().contains("过大"));
         assert_eq!(server.join().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn deterministic_write_rejections_and_expired_tokens_are_distinguishable() {
+        let mut state = sitzfleisch_core::State::new(1000);
+        let document = SyncDocument::capture(&mut state, None, &"a".repeat(32), &[]).unwrap();
+        let (url, server) = server(vec![
+            response(400, json!({"code":"22023","message":"同步文档文本长度或字符无效"})),
+            response(413, json!({})),
+            response(401, json!({})),
+            response(400, json!({})),
+        ]);
+        let http = Http::new(Config::testing(&url)).unwrap();
+        let write = || http.write(&test_session(), 0, &"b".repeat(32), &"c".repeat(32), &document).err().unwrap();
+        assert_eq!(write(), REJECTED, "文档校验失败不能当成网络错误无限重试");
+        assert_eq!(write(), REJECTED);
+        assert_eq!(write(), EXPIRED);
+        let read = http.read(&test_session(), -1).err().unwrap();
+        assert!(read != REJECTED && read != EXPIRED, "读取请求的 400 不是文档被拒");
+        assert_eq!(server.join().unwrap().len(), 4);
     }
 
     #[test]

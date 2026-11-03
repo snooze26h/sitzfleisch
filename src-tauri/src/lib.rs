@@ -326,7 +326,7 @@ fn snapshot(shared: &Shared, with_history: bool) -> Snapshot {
     let state = shared.state.lock().unwrap();
     // 结构体初始化里的临时 guard 会活到整个表达式结束；先一次取出两个值，避免重复锁 sync。
     let (sync_status, state_path) = {
-        let sync = shared.sync.lock().unwrap();
+        let mut sync = shared.sync.lock().unwrap();
         let path = sync.account.as_ref().and_then(|account| sync.store.as_ref()?.account_path(&account.user.id).ok())
             .unwrap_or_else(|| shared.path.clone());
         (sync.status(&state), path.display().to_string())
@@ -1103,20 +1103,26 @@ fn spawn_apply_blocking(app: &AppHandle) {
 }
 
 #[cfg(desktop)]
-fn apply_latest_blocking(shared: &Shared, apply: impl FnOnce(&[String], bool)) {
+fn apply_latest_blocking(shared: &Shared, mut apply: impl FnMut(&[String], bool)) {
     let _serial = shared.blocking_lock.lock().unwrap_or_else(|e| e.into_inner());
-    // 先标忙再取状态，取完后即使最后一个域名被删，也会安排后续清理。
-    {
-        let mut blocking = shared.blocking.lock().unwrap();
-        blocking.busy = true;
-        blocking.error = None;
-    }
-    // 等待授权的间隙可能已经收工或重新开日；开关和域名必须一起从当前状态取。
-    let (hosts, enable) = {
+    loop {
+        // 先标忙再取状态，取完后即使最后一个域名被删，也会安排后续清理。
+        {
+            let mut blocking = shared.blocking.lock().unwrap();
+            blocking.busy = true;
+            blocking.error = None;
+        }
+        let (hosts, enable) = {
+            let state = shared.state.lock().unwrap();
+            (state.preferences.blocked_hosts.clone(), state.day.is_some() && !shared.exiting.load(Ordering::SeqCst))
+        };
+        apply(&hosts, enable);
+        // 系统授权期间也能收到手机的收工/开日。忙碌时同步侧不另起写入，
+        // 当前写入完成后必须追上最新目标；目标没变则结束，包括授权被取消的情况。
         let state = shared.state.lock().unwrap();
-        (state.preferences.blocked_hosts.clone(), state.day.is_some() && !shared.exiting.load(Ordering::SeqCst))
-    };
-    apply(&hosts, enable);
+        let latest_enable = state.day.is_some() && !shared.exiting.load(Ordering::SeqCst);
+        if hosts == state.preferences.blocked_hosts && enable == latest_enable { break; }
+    }
 }
 
 #[cfg(desktop)]
@@ -1132,6 +1138,14 @@ fn blocking_needs_sync(shared: &Shared) -> bool {
         blocking.active || blocking.busy
     };
     active_or_busy || blocking_wanted(shared)
+}
+
+#[cfg(desktop)]
+fn blocking_needs_remote_sync(shared: &Shared) -> bool {
+    let wanted = blocking_wanted(shared);
+    let blocking = shared.blocking.lock().unwrap();
+    // 之前的写入错误不能挡住远端收工的清理；启用失败仍由用户主动重试，避免反复弹授权。
+    !blocking.busy && wanted != blocking.active && (blocking.error.is_none() || !wanted)
 }
 
 // 手机不接管系统 hosts，也不启动桌面扩展桥；保留共用调用点与快照结构。
@@ -1280,7 +1294,7 @@ fn abandon_block(expected: Option<sync::ActionTarget>, app: AppHandle) -> Result
 #[tauri::command]
 fn end_day(expected: Option<sync::ActionTarget>, app: AppHandle) -> Result<Snapshot, String> {
     let was_relevant = blocking_needs_sync(&app.state::<Shared>());
-    let snap = mutate_observed(&app, expected, sync::TargetCheck::Live, |s| s.end_day(s.last_tick))?;
+    let snap = mutate_observed(&app, expected, sync::TargetCheck::Day, |s| s.end_day(s.last_tick))?;
     if was_relevant {
         spawn_apply_blocking(&app);
     }
@@ -1290,7 +1304,7 @@ fn end_day(expected: Option<sync::ActionTarget>, app: AppHandle) -> Result<Snaps
 #[tauri::command]
 fn abandon_day(expected: Option<sync::ActionTarget>, app: AppHandle) -> Result<Snapshot, String> {
     let was_relevant = blocking_needs_sync(&app.state::<Shared>());
-    let snap = mutate_observed(&app, expected, sync::TargetCheck::Live, |s| s.abandon_day())?;
+    let snap = mutate_observed(&app, expected, sync::TargetCheck::Day, |s| s.abandon_day())?;
     if was_relevant {
         spawn_apply_blocking(&app);
     }
@@ -1981,7 +1995,9 @@ pub fn run() {
             };
             let path = dir.join("state.json");
             let (mut state, protection) = load_initial(&path);
-            let sync = if protection.is_none() { sync::Runtime::open(&dir, &mut state) } else { sync::Runtime::disabled() };
+            // 账号模式只读写账号文件：单机存档损坏不妨碍打开已登录的账号，退出账号时会重新检查它。
+            let sync = sync::Runtime::open(&dir, &mut state);
+            let protection = protection.filter(|_| !sync.active());
 
             // 建窗前先只读体检；Ready 后按保留的学习日恢复规则或清理残留。
             #[cfg(desktop)]
@@ -2090,7 +2106,9 @@ pub fn run() {
                             step.block_rules = Some(platform::AppBlockRules::from_preferences(&state.preferences.app_blocking));
                         }
                         drop(state);
-                        if ticks.is_multiple_of(30) {
+                        // 账号模式下业务变化随操作和同步立即保存，这里只补存提醒计数等本机字段；
+                        // 长历史的账号文件不必每 30 秒整份重写。
+                        if ticks.is_multiple_of(30) && (ticks.is_multiple_of(300) || !shared.sync.lock().unwrap().active()) {
                             save(&shared);
                         }
                         step
@@ -2403,6 +2421,91 @@ mod tests {
         assert!(fixture.0.isolated);
         assert!(release_system_blocking(&fixture.0).is_ok());
         assert!(fixture.0.state.lock().unwrap().day.is_some());
+    }
+
+    #[test]
+    fn remote_day_end_during_hosts_install_is_reconciled_before_returning() {
+        let fixture = TestShared::new(state_with_day());
+        let shared = &fixture.0;
+        shared.state.lock().unwrap().preferences.blocked_hosts = vec!["live.example.com".into()];
+        let path = shared.data_dir.join("test.hosts");
+        let original = "127.0.0.1 localhost\n192.0.2.10 custom.example # keep\n";
+        fs::write(&path, original).unwrap();
+        let mut applied = Vec::new();
+        apply_latest_blocking(shared, |hosts, enable| {
+            if applied.is_empty() {
+                assert!(shared.blocking.lock().unwrap().busy);
+                // 授权还没返回时，手机收工已同步到当前状态；旧写入随后才完成。
+                let mut state = shared.state.lock().unwrap();
+                state.end_day(1_001).unwrap();
+            }
+            let result = sync_hosts_file(&path, hosts, enable, |content| fs::write(&path, content).map_err(|e| e.to_string()));
+            assert!(result.is_ok());
+            record_blocking_result(shared, &result);
+            applied.push(enable);
+        });
+        assert_eq!(applied, vec![true, false], "写入完成后必须接着解除，不能等另一条云端变更");
+        assert_eq!(fs::read_to_string(&path).unwrap(), original);
+        assert!(!shared.blocking.lock().unwrap().active);
+    }
+
+    #[test]
+    fn remote_day_start_during_hosts_cleanup_is_reconciled_before_returning() {
+        let fixture = TestShared::new(core::State::new(1_000));
+        let shared = &fixture.0;
+        let hosts = vec!["live.example.com".into()];
+        shared.state.lock().unwrap().preferences.blocked_hosts = hosts.clone();
+        let path = shared.data_dir.join("test.hosts");
+        let original = "127.0.0.1 localhost\n";
+        fs::write(&path, core::render_hosts(original, &hosts, true)).unwrap();
+        let mut applied = Vec::new();
+        apply_latest_blocking(shared, |hosts, enable| {
+            if applied.is_empty() {
+                shared.state.lock().unwrap().start_day("standard", 1_001).unwrap();
+            }
+            let result = sync_hosts_file(&path, hosts, enable, |content| fs::write(&path, content).map_err(|e| e.to_string()));
+            assert!(result.is_ok());
+            record_blocking_result(shared, &result);
+            applied.push(enable);
+        });
+        assert_eq!(applied, vec![false, true]);
+        assert_eq!(fs::read_to_string(&path).unwrap(), core::render_hosts(original, &hosts, true));
+        assert!(shared.blocking.lock().unwrap().active);
+    }
+
+    #[test]
+    fn remote_day_end_cleans_residual_hosts_even_after_an_earlier_error() {
+        let fixture = TestShared::new(state_with_day());
+        let shared = &fixture.0;
+        shared.state.lock().unwrap().preferences.blocked_hosts = vec!["live.example.com".into()];
+        {
+            let mut blocking = shared.blocking.lock().unwrap();
+            blocking.active = true;
+            blocking.error = Some("上一次写入未完成".into());
+        }
+        assert!(!blocking_needs_remote_sync(shared));
+        shared.state.lock().unwrap().end_day(1_001).unwrap();
+        assert!(blocking_needs_remote_sync(shared), "原有错误不能让手机收工后的解除请求丢失");
+        shared.blocking.lock().unwrap().busy = true;
+        assert!(!blocking_needs_remote_sync(shared), "正在写入时由当前 worker 收尾，不重复起线程");
+        record_blocking_result(shared, &Ok(false));
+        assert!(!blocking_needs_remote_sync(shared), "解除完成后，其他云端更新不应再次申请系统授权");
+    }
+
+    #[test]
+    fn unchanged_hosts_target_does_not_retry_denied_authorization() {
+        let fixture = TestShared::new(state_with_day());
+        let shared = &fixture.0;
+        shared.state.lock().unwrap().preferences.blocked_hosts = vec!["live.example.com".into()];
+        let mut calls = 0;
+        apply_latest_blocking(shared, |_, _| {
+            calls += 1;
+            let mut blocking = shared.blocking.lock().unwrap();
+            blocking.busy = false;
+            blocking.error = Some("用户取消系统授权".into());
+        });
+        assert_eq!(calls, 1);
+        assert!(!blocking_needs_remote_sync(shared), "失败后保持提示，不因无关云端变更反复弹授权");
     }
 
     fn advance_awake_seconds(state: &mut core::State, seconds: i64) {

@@ -58,6 +58,20 @@ function migrationPanel(s: SyncStatus): string {
   </div>`;
 }
 
+/** 已选账号的存档读不出来：本机暂停保存，只提供退出账号这一个出口，不显示无法完成的登录表单。 */
+function blockedPanel(): string {
+  return `<p class="sync-note">这台设备上的账号存档暂时无法读取，为避免覆盖，已暂停保存和同步。可以退出这个账号，回到这台设备原来的单机记录；账号存档会原样保留，修复后重新登录即可继续。</p>
+    <div class="sync-actions">${btn("退出账号，使用本机记录", { action: "sync-sign-out", disabled: ui.syncBusy })}</div>`;
+}
+
+/** 新操作在约 96.9% 处停止（余量留给自然到时与合并），提前提醒清理旧记录。 */
+function capacityNote(s: SyncStatus): string {
+  const percent = s.capacity_percent;
+  if (percent === null || percent < 90) return "";
+  const state = percent >= 96 ? "，新的修改会被拒绝" : "。到达上限后不能再新增记录";
+  return `<p class="sync-attention">共享记录已用 ${Math.min(percent, 100)}% 容量${state}。请在历史页删除一些不再需要的旧学习日。</p>`;
+}
+
 function conflictPanel(s: SyncStatus): string {
   const c = s.conflict!;
   const changed = [...new Set(c.fields.map((field) => field.startsWith("preferences") ? "项目与计划"
@@ -66,7 +80,7 @@ function conflictPanel(s: SyncStatus): string {
     <h2>两端都改过，需要选一份</h2>
     ${changed ? `<p class="sync-attention">涉及${esc(changed)}。</p>` : ""}
     ${comparison(c.local_days, c.remote_days, c.local_active, c.remote_active)}
-    <p class="sync-note">处理前会在本机保存两份恢复副本。两边独立的历史仍会合并；只有冲突部分采用你选的那一份。</p>
+    <p class="sync-note">处理前会在本机保存两份恢复副本。两边独立的历史仍会合并；同一份记录两端都改过时，采用你选的那一份。两端各自开始了不同的学习日时，选中的继续进行，另一天按此刻收工归档。</p>
     <div class="sync-actions">${btn("采用云端的冲突内容", { kind: "plate", action: "sync-resolve", data: { choice: "remote" }, disabled: ui.syncBusy })}${btn("采用本机的冲突内容", { kind: "plate", action: "sync-resolve", data: { choice: "local" }, disabled: ui.syncBusy })}</div>
   </div>`;
 }
@@ -74,10 +88,11 @@ function conflictPanel(s: SyncStatus): string {
 export function accountPanel(): string {
   const s = normalizedSyncStatus(ui.snap?.sync);
   if (!s.configured) return `<div class="settings-panel sync-panel"><p class="sync-note">${s.error ? esc(s.error) : "此版本尚未配置云同步，部署后可用。"}</p><p class="sync-note">当前项目、计时和记录继续保存在这台设备上。</p></div>`;
-  const signingIn = s.phase === "signed_out" || s.phase === "reauth" || (!s.email && s.phase === "error");
+  const blocked = s.phase === "error" && !s.account_id;
+  const signingIn = s.phase === "signed_out" || s.phase === "reauth";
   const status = `<div class="sync-account"><div>${s.email ? `<b class="sync-email">${esc(s.email)}</b>` : ""}<span class="sync-phase${caution(s) ? " caution" : ""}" role="status">${esc(syncLabel(s))}</span></div>${s.email && s.phase !== "awaiting_import" ? btn("退出登录", { kind: "quiet", action: "sync-sign-out", disabled: ui.syncBusy }) : ""}</div>`;
-  const details = signingIn ? loginForm(s) : s.phase === "awaiting_import" ? migrationPanel(s) : s.phase === "conflict" ? conflictPanel(s)
-    : `<p class="sync-note">${s.pending ? "有改动等待上传，联网后会继续同步。跨设备接力前，请确认两端都显示“已同步”。" : "项目、当天进度和记录共用一份。共享计时在合盖和锁屏后继续，手动暂停才会停下。"}</p>
+  const details = blocked ? blockedPanel() : signingIn ? loginForm(s) : s.phase === "awaiting_import" ? migrationPanel(s) : s.phase === "conflict" ? conflictPanel(s)
+    : `${capacityNote(s)}<p class="sync-note">${s.pending ? "有改动等待上传，联网后会继续同步。跨设备接力前，请确认两端都显示“已同步”。" : "项目、当天进度和记录共用一份。共享计时在合盖和锁屏后继续，手动暂停才会停下。"}</p>
       ${s.last_synced_at !== null ? `<p class="sync-note">最近同步：${esc(new Date(s.last_synced_at * 1000).toLocaleString("zh-CN", { hour12: false }))}</p>` : ""}
       <div class="sync-actions">${btn(ui.syncBusy ? "正在同步…" : "立即同步", { action: "sync-retry", icon: "refresh-cw", disabled: ui.syncBusy })}</div>`;
   return `<div class="settings-panel sync-panel" aria-busy="${ui.syncBusy}">${status}${details}

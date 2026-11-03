@@ -89,6 +89,25 @@ try {
   assert.equal(syncLabel({ ...conflict, phase: "offline" }), "离线 · 待同步");
   assert.equal(syncLabel({ ...conflict, phase: "offline", pending: false }), "离线");
 
+  assert.match(html, /另一天按此刻收工归档/, "冲突说明不能承诺只替换冲突部分却丢掉另一端新开的学习日");
+
+  const legacyCapacity = { ...conflict, phase: "synced", conflict: null, email: "reader@example.com", error: null, recovery_path: null };
+  delete legacyCapacity.capacity_percent;
+  assert.equal(normalizedSyncStatus(legacyCapacity).capacity_percent, null, "旧快照没有容量字段时按未知处理");
+  for (const bad of [-1, 1.5, "90", 1001]) assert.equal(normalizedSyncStatus({ ...legacyCapacity, capacity_percent: bad }).phase, "error");
+  put({ ...legacyCapacity, capacity_percent: 50 });
+  assert.doesNotMatch(accountPanel(), /容量/);
+  put({ ...legacyCapacity, capacity_percent: 93 });
+  assert.match(accountPanel(), /已用 93% 容量。到达上限后不能再新增记录/);
+  put({ ...legacyCapacity, capacity_percent: 112 });
+  assert.match(accountPanel(), /已用 100% 容量，新的修改会被拒绝/);
+
+  put({ ...base, configured: true, phase: "error", error: "账号存档无法解析，原文件已保留。" });
+  const blockedPanel = accountPanel();
+  assert.match(blockedPanel, /data-action="sync-sign-out"/, "账号存档读不出来时必须能退出账号回到单机记录");
+  assert.doesNotMatch(blockedPanel, /for="sync-email"/, "无法完成的登录表单不能代替退出出口");
+  assert.match(blockedPanel, /账号存档无法解析/);
+
   const firstRecord = { sync_id: "a-entry", category: "reading", seconds: 60, accepted: true, tasks: [], started_at: 100, ended_at: 160, completion_note: "first" };
   const secondRecord = { ...firstRecord, sync_id: "b-entry", completion_note: "second" };
   const firstDay = { sync_id: "a-day", started_at: 100, categories: [{ id: "reading", name: "阅读" }], ledger: [firstRecord, secondRecord] };
@@ -123,7 +142,7 @@ try {
   otherAccount.sync.account_id = "00000000-0000-4000-8000-000000000002";
   assert.notEqual(captureActionTarget(otherAccount).account_id, frozen.expected.account_id, "云端版本相同也不能跨账号复用旧确认");
   assert.equal(observedCommandArgs("end_day", frozen, otherAccount).expected.account_id, sharedSnapshot.sync.account_id, "旧确认必须把原账号交给后端拒绝，不能改绑新账号");
-  console.log("同步界面检查通过：坏状态拒绝、输入边界、禁用与重发、迁移选择、冲突恢复、HTML 转义、同秒记录定位与陈旧操作目标保护。");
+  console.log("同步界面检查通过：坏状态拒绝、输入边界、禁用与重发、迁移选择、冲突恢复与说明、容量提示、账号存档损坏出口、HTML 转义、同秒记录定位与陈旧操作目标保护。");
 } finally {
   rmSync(output, { recursive: true, force: true });
 }

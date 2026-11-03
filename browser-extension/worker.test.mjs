@@ -371,6 +371,72 @@ test("首次连接超时不阻止访问，AbortController 结束网络等待", a
   assert.equal(h.data[CACHE_KEY].appliedRevision, null);
 });
 
+for (const stage of ["session-headers", "session-body", "rules-headers", "rules-body"]) {
+  test(`${stage} 短暂超时后重试成功，已有屏蔽页不被放开`, async () => {
+    const h = harness({ initialTabs: [{ id: 1, url: recommend }], timeoutMs: 20 });
+    await h.boot();
+    const before = h.updates.length;
+    const session = stage.startsWith("session");
+    const field = session ? "sessionFetch" : "fetch";
+    const authField = session ? "authenticateSession" : "authenticate";
+    const original = h.state[field];
+    let attempts = 0;
+    h.state[field] = async (url, options) => {
+      attempts += 1;
+      if (attempts > 1) {
+        h.state[authField] = true;
+        return original(url, options);
+      }
+      if (stage.endsWith("headers")) {
+        return new Promise((_resolve, reject) => {
+          options.signal.addEventListener("abort", () => reject(new DOMException("Aborted", "AbortError")), { once: true });
+        });
+      }
+      // 让 worker 先拿到响应头，再在读正文时遇到超时；测试签名器不能提前把流读完。
+      h.state[authField] = false;
+      return new Response(new ReadableStream({
+        start(controller) {
+          options.signal.addEventListener("abort", () => controller.error(new DOMException("Aborted", "AbortError")), { once: true });
+        },
+      }), { headers: { "content-type": "application/json", "x-sitzfleisch-proof": "a".repeat(64) } });
+    };
+    const flight = h.blocker.sync();
+    assert.equal(flight, h.blocker.sync(), "重试仍属于同一轮同步");
+    await flight;
+    assert.equal(attempts, 2);
+    assert.equal(h.blocker.status().connection, "connected");
+    assert.equal(h.blocker.status().active, true);
+    assert.equal(h.updates.length, before, "不能先恢复原网页，再重新拦截");
+    assert.match(h.tabs.get(1).url, /blocked.html/);
+  });
+}
+
+test("正文连续超时与连接失败一致：有界重试后解除，后续恢复连接仍可屏蔽", async () => {
+  const h = harness({ initialTabs: [{ id: 1, url: recommend }], timeoutMs: 20 });
+  await h.boot();
+  h.state.authenticate = false;
+  let attempts = 0;
+  h.state.fetch = async (_url, options) => {
+    attempts += 1;
+    return new Response(new ReadableStream({
+      start(controller) {
+        options.signal.addEventListener("abort", () => controller.error(new DOMException("Aborted", "AbortError")), { once: true });
+      },
+    }), { headers: { "content-type": "application/json", "x-sitzfleisch-proof": "a".repeat(64) } });
+  };
+  await h.blocker.sync();
+  assert.equal(attempts, 2, "只重试一次，真正断开后仍可解除");
+  assert.equal(h.blocker.status().connection, "disconnected");
+  assert.equal(h.blocker.status().active, false);
+  assert.equal(h.data[CACHE_KEY].appliedRevision, null);
+  assert.equal(h.tabs.get(1).url, recommend);
+  h.state.authenticate = true;
+  h.state.fetch = async () => response(snapshot());
+  await h.blocker.sync();
+  assert.equal(h.blocker.status().connection, "connected");
+  assert.match(h.tabs.get(1).url, /blocked.html/);
+});
+
 test("存储或标签应用失败撤销 ACK，下一次请求不声称已成功应用", async () => {
   const h = harness();
   await h.boot();

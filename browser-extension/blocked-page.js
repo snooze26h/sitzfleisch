@@ -1,7 +1,7 @@
 import { blockedPageContext } from "./rules.js";
 import { describeStatus } from "./status.js";
 
-export function initializeBlockedPage({ chromeApi, document, location, timeoutMs = 5000 }) {
+export function initializeBlockedPage({ chromeApi, document, location, timeoutMs = 8000 }) {
   const context = blockedPageContext(location.href, chromeApi.runtime.getURL("blocked.html"));
   const original = context?.original;
   const detail = document.getElementById("detail");
@@ -11,7 +11,7 @@ export function initializeBlockedPage({ chromeApi, document, location, timeoutMs
   let updating = false;
   let leaving = false;
 
-  // worker 重启、扩展重新加载等情况下也要结束等待，并给出可以离开的入口。
+  // 留出两次各 3 秒的同步请求；worker 不响应时仍结束等待，并给出离开入口。
   async function request(message) {
     let timer;
     try {

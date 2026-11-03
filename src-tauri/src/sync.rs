@@ -6,10 +6,10 @@ use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 use serde_json::json;
-use sitzfleisch_core::{self as core, sync::{merge, MergeChoice, SyncDocument}};
+use sitzfleisch_core::{self as core, sync::{merge, MergeChoice, SyncDocument, MAX_DOCUMENT_BYTES}};
 use tauri::{AppHandle, Manager};
 
-use crate::sync_http::{Config, Http, Session, WriteReply};
+use crate::sync_http::{Config, Http, Session, WriteReply, EXPIRED, REJECTED};
 use crate::sync_store::{new_id, AccountFile, PendingWrite, RemoteVersion, Store};
 use crate::{Snapshot, Shared};
 
@@ -25,7 +25,11 @@ pub struct ActionTarget {
     pub break_until: Option<i64>,
 }
 
-pub enum TargetCheck { Identity, Live, Preferences }
+/// Live 要求计时目标完全一致。Day 只认学习日和打开时看到的那一格：那一格自然到时、休息结束
+/// 或另一端暂停都不使收工确认失效；另一端已经开始的新一格仍会使它失效。
+pub enum TargetCheck { Identity, Live, Day, Preferences }
+
+const OVER_CAPACITY: &str = "共享记录超过 2 MiB 上限，暂时无法上传。请在历史页删除一些不再需要的旧学习日，删除后会自动继续同步；本机记录已保留。";
 
 struct AccountTransition<'a>(&'a Shared);
 
@@ -44,9 +48,11 @@ impl Drop for AccountTransition<'_> {
 
 fn save_before_switch(shared: &Shared) -> Result<(), String> {
     // begin 已阻止新业务操作；已持有 state 的旧操作会先完成，这次 save 会保存它的最终结果。
+    // 单机存档处于保护模式时，内存里只是不写盘的出厂状态，切换到已有账号不会丢失任何记录；
+    // 把单机数据迁入账号的入口另行拒绝保护模式。
     crate::advance_current(shared);
     crate::save(shared);
-    if shared.save_error.lock().unwrap().is_some() || shared.write_protected.lock().unwrap().is_some() {
+    if shared.save_error.lock().unwrap().is_some() {
         return Err("请先保存当前记录，再切换账号；尚未保存的内容仍留在本机。".into());
     }
     Ok(())
@@ -116,6 +122,30 @@ pub struct Status {
     migration: Option<MigrationSummary>,
     conflict: Option<ConflictSummary>,
     recovery_path: Option<String>,
+    /// 共享文档占云端上限的百分比；接近上限时提前提示清理旧记录。
+    capacity_percent: Option<u32>,
+}
+
+/// 由账号文档推导的状态。长历史下投影与合并要几十毫秒，只在文档变化后重算一次，
+/// 每秒的界面快照直接读取；改动 base、draft、revision 或 conflict 后必须清空。
+struct Summary {
+    unsent: bool,
+    conflict: Option<Vec<String>>,
+    bytes: Option<usize>,
+}
+
+impl Summary {
+    fn of(account: &AccountFile, now: i64) -> Self {
+        let conflict = account.conflict.as_ref().map(|remote| {
+            let mut fields: Vec<String> = merge(&account.base, &account.draft, &remote.document, now, None)
+                .err().map(|error| error.fields).unwrap_or_default().into_iter()
+                .map(|field| if field.starts_with("history") { "history".into() } else { field })
+                .collect();
+            fields.sort(); fields.dedup(); fields.truncate(8);
+            fields
+        });
+        Self { unsent: account.revision == 0 || !account.draft.equivalent(&account.base, now), conflict, bytes: account.draft.jsonb_len().ok() }
+    }
 }
 
 pub struct Runtime {
@@ -135,35 +165,62 @@ pub struct Runtime {
     clock_anchor: Option<(u64, i64)>,
     worker: Option<thread::Thread>,
     last_code_sent: Option<u64>,
+    /// 云端或上传前检查确定不会接受当前草稿；内容改变或手动重试前不再重复上传。
+    rejected: Option<String>,
+    summary: Option<Summary>,
+    /// 刷新后轮换的会话还没写进安全存储；每轮先补写，不能退回已经用掉的旧刷新令牌。
+    session_unsaved: bool,
 }
 
 impl Runtime {
     pub fn disabled() -> Self {
         Self { config: None, store: None, account: None, session: None, candidate: None,
             import_remote: None, blocked: None, error: None, needs_login: false, online: false,
-            last_synced_at: None, recovery_path: None, clock_offset: 0, clock_anchor: None, worker: None, last_code_sent: None }
+            last_synced_at: None, recovery_path: None, clock_offset: 0, clock_anchor: None, worker: None, last_code_sent: None,
+            rejected: None, summary: None, session_unsaved: false }
     }
 
     pub fn open(data_dir: &Path, state: &mut core::State) -> Self {
+        match Config::compiled() {
+            Ok(config) => Self::open_with(config, data_dir, state),
+            Err(error) => Self { error: Some(error), ..Self::disabled() },
+        }
+    }
+
+    /// 只有已选账号的存档读不出来时才停止保存（blocked）；从未登录的设备遇到同步目录问题仍按单机使用。
+    fn open_with(config: Option<Config>, data_dir: &Path, state: &mut core::State) -> Self {
         let mut runtime = Self::disabled();
-        let result = (|| -> Result<(), String> {
-            runtime.config = Config::compiled()?;
-            let Some(config) = &runtime.config else { return Ok(()); };
-            let store = Store::open(data_dir, &config.url)?;
-            if let Some(user) = store.active_user()? {
-                let mut account = store.load(&user)?.ok_or("当前账号存档缺失，已停止自动覆盖。")?;
-                let mut restored = account.state.clone();
+        let Some(config) = config else { return runtime; };
+        let url = config.url.clone();
+        runtime.config = Some(config);
+        let store = match Store::open(data_dir, &url) {
+            Ok(store) => store,
+            Err(error) => {
+                if Store::may_have_active_account(data_dir, &url) { runtime.blocked = Some(error); } else { runtime.error = Some(error); }
+                return runtime;
+            }
+        };
+        let loaded = store.active_user().and_then(|user| match user {
+            Some(user) => store.load(&user)?.ok_or_else(|| "当前账号存档缺失，已停止自动覆盖。".to_owned()).map(Some),
+            None => Ok(None),
+        });
+        match loaded {
+            Ok(Some(mut account)) => {
                 runtime.clock_offset = account.clock_offset;
-                account.draft.apply(&mut restored, runtime.now())?;
+                let mut restored = account.state.clone();
+                // 账号文件不重复保存历史，历史以草稿为准。
+                restored.history = account.draft.history.clone();
+                // 投影失败时仍打开上次保存的状态，保留重试与退出登录的出口，不让整个应用停摆。
+                if let Err(error) = account.draft.apply(&mut restored, runtime.now()) { runtime.error = Some(error); }
                 account.state = restored.clone();
                 *state = restored;
                 runtime.account = Some(account);
                 runtime.needs_login = true;
             }
-            runtime.store = Some(store);
-            Ok(())
-        })();
-        if let Err(error) = result { runtime.blocked = Some(error); }
+            Ok(None) => (),
+            Err(error) => runtime.blocked = Some(error),
+        }
+        runtime.store = Some(store);
         runtime
     }
 
@@ -193,10 +250,15 @@ impl Runtime {
             || expected.break_until.is_some_and(|at| !(0..=core::sync::MAX_UNIX_SECONDS).contains(&at))
         { return Err("操作目标无效，请刷新后重试。".into()); }
         if matches!(check, TargetCheck::Preferences) && expected.revision != account.revision { return Err("另一台设备刚更新了记录，请核对当前内容后重试。".into()); }
-        if matches!(check, TargetCheck::Live) && (expected.day_id.as_deref() != state.day.as_ref().map(|day| day.sync_id.as_str())
-            || expected.timer_id.as_deref() != state.day.as_ref().and_then(|day| day.timer.as_ref().map(|timer| timer.sync_id.as_str()))
+        let day_id = state.day.as_ref().map(|day| day.sync_id.as_str());
+        let timer_id = state.day.as_ref().and_then(|day| day.timer.as_ref().map(|timer| timer.sync_id.as_str()));
+        if matches!(check, TargetCheck::Live) && (expected.day_id.as_deref() != day_id
+            || expected.timer_id.as_deref() != timer_id
             || expected.paused != state.day.as_ref().is_some_and(core::Day::is_paused)
             || expected.break_until != state.day.as_ref().and_then(|day| day.break_until))
+        { return Err("当前计时已经改变，请核对后重新操作。".into()); }
+        if matches!(check, TargetCheck::Day) && (expected.day_id.as_deref() != day_id
+            || timer_id.is_some_and(|timer| expected.timer_id.as_deref() != Some(timer)))
         { return Err("当前计时已经改变，请核对后重新操作。".into()); }
         Ok(())
     }
@@ -206,10 +268,13 @@ impl Runtime {
             crate::now_unix().saturating_add(self.clock_offset))
     }
 
-    fn calibrate(&mut self, server_time: i64) {
+    /// 返回校时是否让当前时刻移动了 2 秒以上；服务端时间本身有一秒抖动，抖动不必重新投影。
+    fn calibrate(&mut self, server_time: i64) -> bool {
+        let before = self.now();
         self.clock_offset = server_time.saturating_sub(crate::now_unix());
         self.clock_anchor = crate::sync_clock::continuous_seconds().map(|ticks| (ticks, server_time));
         if let Some(account) = &mut self.account { account.clock_offset = self.clock_offset; }
+        self.now().abs_diff(before) >= 2
     }
 
     fn reproject(&self, state: &mut core::State) -> Result<(), String> {
@@ -219,24 +284,26 @@ impl Runtime {
 
     pub fn wake(&self) { if let Some(worker) = &self.worker { worker.unpark(); } }
 
-    pub fn status(&self, state: &core::State) -> Status {
-        let pending = self.account.as_ref().is_some_and(|account| account.pending.is_some()
-            || account.revision == 0 || !account.draft.equivalent(&account.base, self.now()));
-        let conflict = self.account.as_ref().and_then(|account| account.conflict.as_ref().map(|remote| {
-            let mut fields: Vec<String> = merge(&account.base, &account.draft, &remote.document, self.now(), None)
-                .err().map(|error| error.fields).unwrap_or_default().into_iter()
-                .map(|field| if field.starts_with("history") { "history".into() } else { field })
-                .collect();
-            fields.sort(); fields.dedup(); fields.truncate(8);
+    fn summary(&mut self) -> Option<&Summary> {
+        let now = self.now();
+        let account = self.account.as_ref()?;
+        Some(self.summary.get_or_insert_with(|| Summary::of(account, now)))
+    }
+
+    pub fn status(&mut self, state: &core::State) -> Status {
+        let (unsent, conflict_fields, bytes) = self.summary()
+            .map_or((false, None, None), |summary| (summary.unsent, summary.conflict.clone(), summary.bytes));
+        let pending = unsent || self.account.as_ref().is_some_and(|account| account.pending.is_some());
+        let conflict = self.account.as_ref().and_then(|account| account.conflict.as_ref().zip(conflict_fields).map(|(remote, fields)|
             ConflictSummary { fields, local_days: account.draft.history.len(), remote_days: remote.document.history.len(),
-                local_active: account.draft.day.is_some(), remote_active: remote.document.day.is_some() }
-        }));
+                local_active: account.draft.day.is_some(), remote_active: remote.document.day.is_some() }));
         let phase = if self.blocked.is_some() { "error" }
             else if self.config.is_none() { "unconfigured" }
             else if self.candidate.is_some() { "awaiting_import" }
             else if self.account.is_none() { "signed_out" }
             else if self.needs_login { "reauth" }
             else if conflict.is_some() { "conflict" }
+            else if self.rejected.is_some() { "error" }
             else if !self.online { "offline" }
             else if pending { "pending" } else { "synced" };
         Status {
@@ -245,12 +312,14 @@ impl Runtime {
             email: self.account.as_ref().map(|account| account.user.email.clone())
                 .or_else(|| self.candidate.as_ref().map(|session| session.user.email.clone())),
             revision: self.account.as_ref().map_or(0, |account| account.revision), pending,
-            last_synced_at: self.last_synced_at, error: self.blocked.clone().or_else(|| self.error.clone()), conflict,
+            last_synced_at: self.last_synced_at, conflict,
+            error: self.blocked.clone().or_else(|| self.rejected.clone()).or_else(|| self.error.clone()),
             migration: self.candidate.as_ref().map(|_| MigrationSummary {
                 local_days: state.history.len(), cloud_days: self.import_remote.as_ref().map_or(0, |remote| remote.document.history.len()),
                 local_active: state.day.is_some(), cloud_active: self.import_remote.as_ref().is_some_and(|remote| remote.document.day.is_some()),
                 cloud_empty: self.import_remote.is_none(),
             }), recovery_path: self.recovery_path.clone(),
+            capacity_percent: bytes.map(|bytes| (bytes.saturating_mul(100) / MAX_DOCUMENT_BYTES).min(999) as u32),
         }
     }
 
@@ -263,26 +332,47 @@ impl Runtime {
             state.history = candidate.history.clone();
             account.draft = candidate;
             account.state = state.clone();
+            self.summary = None;
+            // 内容变了，之前被拒绝的上传可以用新草稿再试一次。
+            self.rejected = None;
         }
         self.wake();
         Ok(())
     }
 
     fn prepare_write(&mut self) -> Result<Option<PendingWrite>, String> {
-        let now = self.now();
-        let Some(account) = &mut self.account else { return Ok(None); };
+        let Some(account) = &self.account else { return Ok(None); };
         if account.conflict.is_some() { return Ok(None); }
-        if account.pending.is_none() && (account.revision == 0 || !account.draft.equivalent(&account.base, now)) {
+        if account.pending.is_none() {
+            let (unsent, bytes) = self.summary().map_or((false, None), |summary| (summary.unsent, summary.bytes));
+            if !unsent || self.rejected.is_some() { return Ok(None); }
+            let Some(account) = &mut self.account else { return Ok(None); };
+            // 草稿超过云端上限时不生成请求，读取照常进行；删除旧记录后会自动恢复上传。
+            if bytes.is_none_or(|bytes| bytes > MAX_DOCUMENT_BYTES) {
+                self.rejected = Some(OVER_CAPACITY.into());
+                return Ok(None);
+            }
             account.pending = Some(PendingWrite { operation_id: new_id()?, expected_revision: account.revision,
                 document: account.draft.clone() });
         }
-        Ok(account.pending.clone())
+        Ok(self.account.as_ref().and_then(|account| account.pending.clone()))
+    }
+
+    /// 云端或上传前检查确定不会接受这份请求：草稿仍包含它的全部内容，只放下这份固定请求，
+    /// 之后用新的操作编号上传。请求发出后又改过内容就立刻用新草稿再试；
+    /// 没改过则等内容改变或用户手动重试，不反复发送同一份被拒文档。
+    fn reject(&mut self, sent: &PendingWrite, reason: String) {
+        let Some(account) = &mut self.account else { return; };
+        if account.pending.as_ref().is_some_and(|pending| pending.operation_id == sent.operation_id) { account.pending = None; }
+        if serde_json::to_value(&account.draft).ok() == serde_json::to_value(&sent.document).ok() { self.rejected = Some(reason); }
+        self.online = true;
     }
 
     fn accept_remote(&mut self, remote: RemoteVersion, state: &mut core::State) -> Result<bool, String> {
         let now = self.now().max(remote.server_time);
         let Some(account) = &mut self.account else { return Ok(false); };
         if remote.revision < account.revision { return Err("云端版本倒退，已保留本机记录。".into()); }
+        self.summary = None;
         match merge(&account.base, &account.draft, &remote.document, now, None) {
             Ok(merged) => {
                 merged.apply(state, now)?;
@@ -292,6 +382,8 @@ impl Runtime {
                 account.pending = None;
                 account.conflict = None;
                 self.error = None;
+                // 合并后的草稿可能已经变小或改掉了被拒的内容，再试一次上传。
+                self.rejected = None;
                 Ok(true)
             }
             Err(_) => {
@@ -313,12 +405,13 @@ impl Runtime {
             // 发送过程中可能又做了操作；共同基线前移到已提交的那一份，而非丢弃新草稿。
             account.base = sent.document.clone();
             account.revision = reply.committed_revision.ok_or("提交确认缺少版本。")?;
+            self.summary = None;
         }
         self.accept_remote(RemoteVersion { revision: reply.revision, document, server_time: reply.server_time }, state)
     }
 
     fn failed(&mut self, error: String) {
-        if error.contains("登录已过期") { self.needs_login = true; }
+        if error == EXPIRED { self.needs_login = true; }
         self.online = false;
         self.error = Some(error);
     }
@@ -331,33 +424,59 @@ fn notify_changed(app: &AppHandle, applied: bool) {
         #[cfg(desktop)]
         {
             let shared = app.state::<Shared>();
-            let wanted = crate::blocking_wanted(&shared);
-            let needs_apply = {
-                let blocking = shared.blocking.lock().unwrap();
-                wanted != blocking.active && !blocking.busy && blocking.error.is_none()
-            };
-            if !shared.isolated && needs_apply { crate::spawn_apply_blocking(app); }
+            if !shared.isolated && crate::blocking_needs_remote_sync(&shared) { crate::spawn_apply_blocking(app); }
         }
+        // 远端改变历史或当前账号时必须带完整历史，不能让界面一直沿用上个账号的记录。
+        crate::broadcast_full(app);
+    } else {
+        // 没有应用新内容时历史不变，只推同步状态；每轮都推完整历史会随记录增长持续耗电。
+        crate::broadcast(app);
     }
-    // 远端改变历史或当前账号时必须带完整历史，不能让界面一直沿用上个账号的记录。
-    crate::broadcast_full(app);
 }
 
 fn session_for_request(app: &AppHandle, http: &Http) -> Result<Session, String> {
+    persist_session(app)?;
+    let session = app.state::<Shared>().sync.lock().unwrap().session.clone().ok_or(EXPIRED)?;
+    if session.expires_at > crate::now_unix().saturating_add(90) { return Ok(session); }
+    refresh_session(app, http, &session)
+}
+
+/// 刷新令牌会轮换，旧的随即作废：新会话先留在内存里再写安全存储；写入失败时下一轮继续补写。
+fn refresh_session(app: &AppHandle, http: &Http, session: &Session) -> Result<Session, String> {
+    let refreshed = http.refresh(session, crate::now_unix())?;
+    {
+        let shared = app.state::<Shared>();
+        let mut runtime = shared.sync.lock().unwrap();
+        runtime.session = Some(refreshed.clone());
+        runtime.session_unsaved = true;
+    }
+    persist_session(app)?;
+    Ok(refreshed)
+}
+
+fn persist_session(app: &AppHandle) -> Result<(), String> {
     let shared = app.state::<Shared>();
     let (session, scope) = {
         let runtime = shared.sync.lock().unwrap();
-        let session = runtime.session.clone().ok_or("登录已过期，请重新登录；本机记录已保留。")?;
-        let scope = runtime.store.as_ref().ok_or("同步存储未就绪。")?.scope.clone();
-        (session, scope)
+        if !runtime.session_unsaved { return Ok(()); }
+        (runtime.session.clone().ok_or(EXPIRED)?, runtime.store.as_ref().ok_or("同步存储未就绪。")?.scope.clone())
     };
-    if session.expires_at > crate::now_unix().saturating_add(90) { return Ok(session); }
-    let refreshed = http.refresh(&session, crate::now_unix())?;
-    let encoded = serde_json::to_string(&refreshed).map_err(|_| "登录会话编码失败。")?;
-    // 刷新令牌会轮换，成功后先存到安全存储，不能等下一次普通存档。
+    let encoded = serde_json::to_string(&session).map_err(|_| "登录会话编码失败。")?;
     crate::sync_credentials::store(app, &shared.data_dir, &scope, &encoded)?;
-    shared.sync.lock().unwrap().session = Some(refreshed.clone());
-    Ok(refreshed)
+    shared.sync.lock().unwrap().session_unsaved = false;
+    Ok(())
+}
+
+/// RPC 返回 401 时先强制刷新一次再重试（服务端提前轮换签名密钥、本机时钟偏快都会这样）；
+/// 刷新令牌也被拒才需要重新登录。401 在执行前就被拒绝，同一请求重试是安全的。
+fn with_session<T>(app: &AppHandle, http: &Http, session: &mut Session, call: impl Fn(&Session) -> Result<T, String>) -> Result<T, String> {
+    match call(session) {
+        Err(error) if error == EXPIRED => {
+            *session = refresh_session(app, http, session)?;
+            call(session)
+        }
+        result => result,
+    }
 }
 
 fn network_step(app: &AppHandle) -> Result<(), String> {
@@ -370,23 +489,34 @@ fn network_step(app: &AppHandle) -> Result<(), String> {
     if !should_work || shared.exiting.load(std::sync::atomic::Ordering::SeqCst) { return Ok(()); }
     if shared.write_protected.lock().unwrap().is_some() { return Err("存档处于保护模式，云同步已暂停。".into()); }
     let http = Http::new(config.ok_or("当前版本未配置云同步。")?)?;
-    let session = session_for_request(app, &http)?;
+    let mut session = session_for_request(app, &http)?;
     let pending = shared.sync.lock().unwrap().prepare_write()?;
     if pending.is_some() {
         crate::save(&shared);
         if shared.save_error.lock().unwrap().is_some() { return Err("请先重试保存；未保存的修改不会上传。".into()); }
     }
     let mut applied = false;
+    let changed;
     if let Some(pending) = pending {
         let device = shared.sync.lock().unwrap().store.as_ref().ok_or("同步存储未就绪。")?.device_id.clone();
-        let reply = http.write(&session, pending.expected_revision, &pending.operation_id, &device, &pending.document)?;
+        let reply = match with_session(app, &http, &mut session,
+            |session| http.write(session, pending.expected_revision, &pending.operation_id, &device, &pending.document)) {
+            Err(error) if error == REJECTED => {
+                shared.sync.lock().unwrap().reject(&pending, error);
+                crate::save(&shared);
+                crate::broadcast(app);
+                return Ok(());
+            }
+            reply => reply?,
+        };
         let mut state = shared.state.lock().unwrap();
         let mut runtime = shared.sync.lock().unwrap();
-        runtime.calibrate(reply.server_time);
+        let shifted = runtime.calibrate(reply.server_time);
         applied = runtime.acknowledge(&pending, reply, &mut state)?;
-        runtime.reproject(&mut state)?;
+        if applied || shifted { runtime.reproject(&mut state)?; }
         runtime.online = true;
         runtime.last_synced_at = Some(crate::now_unix());
+        changed = true;
     } else {
         let revision = {
             let runtime = shared.sync.lock().unwrap();
@@ -394,22 +524,25 @@ fn network_step(app: &AppHandle) -> Result<(), String> {
             // 有冲突时继续拉最新版本，但不能推进共同基线或自动覆盖本机。
             account.conflict.as_ref().map_or(account.revision, |remote| remote.revision)
         };
-        let reply = http.read(&session, revision)?;
+        let reply = with_session(app, &http, &mut session, |session| http.read(session, revision))?;
         let mut state = shared.state.lock().unwrap();
         let mut runtime = shared.sync.lock().unwrap();
-        runtime.calibrate(reply.server_time);
+        let shifted = runtime.calibrate(reply.server_time);
+        changed = reply.document.is_some();
         if let Some(document) = reply.document {
             let remote = RemoteVersion { revision: reply.revision, document, server_time: reply.server_time };
             if runtime.account.as_ref().is_some_and(|account| account.conflict.is_some()) {
                 runtime.account.as_mut().unwrap().conflict = Some(remote);
+                runtime.summary = None;
             } else { applied = runtime.accept_remote(remote, &mut state)?; }
         }
-        runtime.reproject(&mut state)?;
+        if applied || shifted { runtime.reproject(&mut state)?; }
         runtime.online = true;
         runtime.last_synced_at = Some(crate::now_unix());
         if runtime.account.as_ref().is_none_or(|account| account.conflict.is_none()) { runtime.error = None; }
     }
-    crate::save(&shared);
+    // 云端没有新内容时不重写账号文件；时钟偏移随心跳的定期保存落盘。
+    if changed { crate::save(&shared); }
     notify_changed(app, applied);
     Ok(())
 }
@@ -464,7 +597,10 @@ pub fn start(app: &AppHandle) {
 fn ready_config(shared: &Shared) -> Result<Config, String> {
     let runtime = shared.sync.lock().unwrap();
     if let Some(error) = &runtime.blocked { return Err(error.clone()); }
-    runtime.config.clone().ok_or("此版本尚未配置云同步，请先完成云端部署。".into())
+    let config = runtime.config.clone().ok_or("此版本尚未配置云同步，请先完成云端部署。")?;
+    // 同步目录无法安全打开时只能单机使用；先修复目录再登录，不能登录到一半才失败。
+    if runtime.store.is_none() { return Err(runtime.error.clone().unwrap_or_else(|| "同步存储未就绪。".into())); }
+    Ok(config)
 }
 
 #[tauri::command]
@@ -516,14 +652,21 @@ pub async fn sync_verify_code(email: String, code: String, app: AppHandle) -> Re
                 runtime.clock_offset = account.clock_offset;
                 runtime.clock_anchor = None;
                 account.draft.apply(&mut restored, runtime.now())?;
-                inherit_device_settings(&state, &mut restored);
+                // 保护模式下内存里是出厂设置，不能拿它覆盖账号里保存的本机设置。
+                let protected = shared.write_protected.lock().unwrap().is_some();
+                if !protected { inherit_device_settings(&state, &mut restored); }
                 account.state = restored.clone();
                 runtime.store.as_ref().unwrap().select(Some(&session.user))?;
                 runtime.account = Some(account);
                 *state = restored;
+                // 账号数据只写账号文件；损坏的单机存档不再挡住保存，退出账号时会重新检查它。
+                *shared.write_protected.lock().unwrap() = None;
             }
             if let Some(account) = &mut runtime.account { account.user = session.user.clone(); }
             runtime.session = Some(session);
+            runtime.session_unsaved = false;
+            runtime.summary = None;
+            runtime.rejected = None;
             runtime.candidate = None;
             runtime.import_remote = None;
             runtime.needs_login = false;
@@ -575,6 +718,7 @@ pub async fn sync_connect(strategy: String, app: AppHandle) -> Result<Snapshot, 
                 merge(&empty, &local, &remote, now, Some(if strategy == "merge_local" { MergeChoice::Local } else { MergeChoice::Remote }))
                     .map_err(|_| "本机与云端数据无法安全合并，原数据已保留。")?
             };
+            draft.validate().map_err(|_| "本机与云端的记录合起来超出共享容量，原数据已保留。请先在一端删除部分旧学习日后再连接。")?;
             draft.apply(&mut next_state, now)?;
             let store = runtime.store.as_ref().ok_or("同步存储未就绪。")?;
             let backup = store.backup("migration", &json!({"local":&*state,"cloud":remote,"account_id":session.user.id}))?;
@@ -584,6 +728,9 @@ pub async fn sync_connect(strategy: String, app: AppHandle) -> Result<Snapshot, 
             store.select(Some(&session.user))?;
             runtime.account = Some(account);
             runtime.session = Some(session);
+            runtime.session_unsaved = false;
+            runtime.summary = None;
+            runtime.rejected = None;
             runtime.candidate = None;
             runtime.import_remote = None;
             runtime.needs_login = false;
@@ -601,7 +748,12 @@ pub async fn sync_connect(strategy: String, app: AppHandle) -> Result<Snapshot, 
 #[tauri::command]
 pub fn sync_retry(app: AppHandle) -> Snapshot {
     let shared = app.state::<Shared>();
-    shared.sync.lock().unwrap().wake();
+    {
+        let mut runtime = shared.sync.lock().unwrap();
+        // 用户主动重试时，之前被拒的内容也再试一次（例如云端已经更新了校验规则）。
+        runtime.rejected = None;
+        runtime.wake();
+    }
     crate::snapshot(&shared, true)
 }
 
@@ -632,6 +784,8 @@ pub async fn sync_resolve(choice: String, app: AppHandle) -> Result<Snapshot, St
             next.conflict = None;
             runtime.store.as_ref().unwrap().save(&next, &next_state)?;
             runtime.account = Some(next);
+            runtime.summary = None;
+            runtime.rejected = None;
             runtime.error = None;
             runtime.recovery_path = Some(backup.display().to_string());
             *state = next_state;
@@ -647,25 +801,31 @@ pub async fn sync_sign_out(app: AppHandle) -> Result<Snapshot, String> {
     tauri::async_runtime::spawn_blocking(move || {
         let shared = app.state::<Shared>();
         let _network = shared.sync_network.lock().unwrap();
-        crate::save(&shared);
-        if shared.save_error.lock().unwrap().is_some() { return Err("请先保存本机记录，再退出登录。".into()); }
-        let (scope, session, config) = {
+        let (config, blocked) = {
             let runtime = shared.sync.lock().unwrap();
-            (runtime.store.as_ref().ok_or("同步存储未就绪。")?.scope.clone(), runtime.session.clone(), runtime.config.clone())
+            (runtime.config.clone().ok_or("此版本尚未配置云同步。")?, runtime.account.is_none() && runtime.blocked.is_some())
         };
-        // 离线也能在本机退出；即使远端撤销失败，本机也必须清除自己的凭据与自动登录标记。
-        if let (Some(config), Some(session)) = (config, &session) { let _ = Http::new(config)?.logout(session); }
-        let _switch = AccountTransition::begin(&shared)?;
-        save_before_switch(&shared)?;
-        crate::sync_credentials::delete(&app, &shared.data_dir, &scope)?;
-        {
+        let scope = Store::scope(&shared.data_dir, &config.url);
+        let session = {
+            let _switch = AccountTransition::begin(&shared)?;
+            // 账号存档读不出来时，内存里只有启动时读入的单机数据，且一直没有写盘，不能要求先保存。
+            if !blocked { save_before_switch(&shared)?; }
+            crate::sync_credentials::delete(&app, &shared.data_dir, &scope)?;
             let mut state = shared.state.lock().unwrap();
             let mut runtime = shared.sync.lock().unwrap();
-            runtime.store.as_ref().unwrap().select(None)?;
+            match (&runtime.store, blocked) {
+                (Some(store), false) => store.select(None)?,
+                // 只移除选择记录；读不出的账号文件原样留在 accounts 目录供恢复。
+                _ => Store::forget_active(&shared.data_dir, &scope)?,
+            }
             let (mut local, protection) = crate::load_initial(&shared.path);
             inherit_device_settings(&state, &mut local);
             runtime.account = None;
-            runtime.session = None;
+            let session = runtime.session.take();
+            runtime.session_unsaved = false;
+            runtime.summary = None;
+            runtime.rejected = None;
+            runtime.blocked = None;
             runtime.candidate = None;
             runtime.import_remote = None;
             runtime.needs_login = false;
@@ -677,8 +837,12 @@ pub async fn sync_sign_out(app: AppHandle) -> Result<Snapshot, String> {
             runtime.recovery_path = None;
             *state = local;
             *shared.write_protected.lock().unwrap() = protection;
-        }
+            session
+        };
         crate::save(&shared);
+        // 本机退出完成后再撤销这台设备的远端会话：离线或撤销失败只影响服务端何时作废它，
+        // 不会出现本机仍登录、远端会话却已撤销的半退出状态。
+        if let Some(session) = session { let _ = Http::new(config).and_then(|http| http.logout(&session)); }
         notify_changed(&app, true);
         Ok(crate::snapshot(&shared, true))
     }).await.map_err(|_| "退出登录未完成，请重试。".to_owned())?
@@ -712,6 +876,7 @@ mod tests {
         let mut state = core::State::new(base.last_tick);
         base.apply(&mut state, base.last_tick).unwrap();
         let mut runtime = Runtime::disabled();
+        runtime.config = Some(Config::testing("https://synthetic.example.com"));
         runtime.clock_offset = base.last_tick - crate::now_unix();
         runtime.account = Some(AccountFile { schema: 1,
             user: crate::sync_http::AuthUser { id: "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee".into(), email: "a@example.com".into() },
@@ -907,6 +1072,167 @@ mod tests {
         assert!(runtime.check_target(&state, None, &TargetCheck::Live).is_err());
         runtime.account = None;
         assert!(runtime.check_target(&state, Some(&expected), &TargetCheck::Identity).is_err(), "旧账号操作不能落到退出后的单机数据");
+    }
+
+    #[test]
+    fn rejected_upload_releases_the_frozen_request_and_retries_after_an_edit() {
+        let (mut runtime, mut state) = machine(document(1000));
+        state.preferences.categories[0].name = "数学\u{2028}".into();
+        runtime.changed(&mut state, &[]).unwrap();
+        let sent = runtime.prepare_write().unwrap().unwrap();
+        runtime.reject(&sent, REJECTED.into());
+        assert!(runtime.account.as_ref().unwrap().pending.is_none(), "确定被拒的请求不能永久占住上传位置");
+        assert_eq!(runtime.status(&state).phase, "error");
+        assert!(runtime.prepare_write().unwrap().is_none(), "内容没变时不重复上传同一份被拒文档");
+        state.preferences.categories[0].name = "数学".into();
+        runtime.changed(&mut state, &[]).unwrap();
+        let retried = runtime.prepare_write().unwrap().unwrap();
+        assert_ne!(retried.operation_id, sent.operation_id);
+        assert_eq!(retried.document.preferences.categories[0].name, "数学");
+        assert_eq!(runtime.status(&state).phase, "pending");
+    }
+
+    #[test]
+    fn a_fix_made_while_the_rejected_request_was_in_flight_is_sent_right_away() {
+        let (mut runtime, mut state) = machine(document(1000));
+        state.preferences.categories[0].name = "数学\u{2028}".into();
+        runtime.changed(&mut state, &[]).unwrap();
+        let sent = runtime.prepare_write().unwrap().unwrap();
+        state.preferences.categories[0].name = "数学".into();
+        runtime.changed(&mut state, &[]).unwrap();
+        runtime.reject(&sent, REJECTED.into());
+        let retried = runtime.prepare_write().unwrap().expect("发送期间的修正不能等下一次编辑才上传");
+        assert_eq!(retried.document.preferences.categories[0].name, "数学");
+    }
+
+    #[test]
+    fn cached_status_follows_every_document_change() {
+        let (mut runtime, mut state) = machine(document(1000));
+        runtime.online = true;
+        assert_eq!(runtime.status(&state).phase, "synced");
+        state.preferences.break_minutes = 7;
+        runtime.changed(&mut state, &[]).unwrap();
+        assert_eq!(runtime.status(&state).phase, "pending");
+        let sent = runtime.prepare_write().unwrap().unwrap();
+        runtime.acknowledge(&sent, WriteReply { applied: true, revision: 2, committed_revision: Some(2),
+            document: Some(sent.document.clone()), server_time: 1000 }, &mut state).unwrap();
+        assert_eq!(runtime.status(&state).phase, "synced");
+        state.preferences.break_minutes = 9;
+        runtime.changed(&mut state, &[]).unwrap();
+        let mut remote = sent.document.clone();
+        remote.preferences.break_minutes = 11;
+        runtime.accept_remote(RemoteVersion { revision: 3, document: remote, server_time: 1000 }, &mut state).unwrap();
+        let status = runtime.status(&state);
+        assert_eq!(status.phase, "conflict");
+        assert_eq!(status.conflict.unwrap().fields, ["preferences.break_minutes"]);
+        assert!(status.capacity_percent.is_some_and(|percent| percent < 5));
+    }
+
+    #[test]
+    fn a_draft_over_the_upload_limit_pauses_uploads_without_blocking_reads() {
+        let (mut runtime, state) = machine(document(1000));
+        // 合并另一端的记录可能让草稿略超上限；它仍是有效的本机存档，只是暂时不能上传。
+        let mut padded = runtime.account.as_ref().unwrap().draft.clone();
+        let mut finished = core::State::new(1000);
+        finished.start_day("standard", 1000).unwrap();
+        finished.start_block_with_break("main", 1, vec![], 0).unwrap();
+        finished.tick_wall_clock(1060);
+        finished.end_day(1060).unwrap();
+        let mut template = finished.history.pop().unwrap();
+        template.day.ledger[0].completion_note = Some("x".repeat(2000));
+        (template.day.seated_since_relief, template.day.seated_since_water, template.day.paused_without_block) = (0, 0, 0);
+        let day = |index: usize| {
+            let mut archived = template.clone();
+            archived.day.sync_id = format!("{}-d-{index}", "c".repeat(32));
+            archived.day.ledger[0].sync_id = format!("{}-e-{index}", "c".repeat(32));
+            archived
+        };
+        let empty = padded.jsonb_len().unwrap();
+        padded.history.push(day(0));
+        let per_day = padded.jsonb_len().unwrap() - empty;
+        padded.history.extend((1..=(MAX_DOCUMENT_BYTES - empty) / per_day).map(day));
+        assert!(padded.jsonb_len().unwrap() > MAX_DOCUMENT_BYTES);
+        padded.validate_structure().unwrap();
+        runtime.account.as_mut().unwrap().draft = padded;
+        runtime.summary = None;
+        assert!(runtime.prepare_write().unwrap().is_none());
+        let status = runtime.status(&state);
+        assert_eq!(status.phase, "error");
+        assert!(status.error.unwrap().contains("删除"));
+        assert!(status.capacity_percent.unwrap() >= 100);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unusable_sync_storage_blocks_only_when_an_account_may_be_selected() {
+        use std::os::unix::fs::PermissionsExt;
+        let directory = std::env::temp_dir().join(format!("sitz-sync-open-{}", new_id().unwrap()));
+        std::fs::create_dir_all(directory.join("sync")).unwrap();
+        std::fs::set_permissions(directory.join("sync"), std::fs::Permissions::from_mode(0o755)).unwrap();
+        let config = Config::testing("https://synthetic.example.com");
+        let mut state = core::State::new(1000);
+        let mut runtime = Runtime::open_with(Some(config.clone()), &directory, &mut state);
+        assert!(runtime.blocked.is_none() && runtime.store.is_none() && runtime.error.is_some());
+        state.start_day("standard", 1000).unwrap();
+        runtime.changed(&mut state, &[]).expect("从未登录的设备仍按单机方式工作");
+        assert_eq!(runtime.status(&state).phase, "signed_out");
+
+        let scope = directory.join("sync").join(Store::scope(&directory, &config.url));
+        std::fs::create_dir_all(&scope).unwrap();
+        std::fs::write(scope.join("active.json"), b"{}").unwrap();
+        let mut selected = Runtime::open_with(Some(config.clone()), &directory, &mut core::State::new(1000));
+        assert!(selected.blocked.is_some(), "可能有已选账号时不能把单机数据当成账号数据保存");
+        assert!(selected.changed(&mut state, &[]).is_err());
+        Store::forget_active(&directory, &Store::scope(&directory, &config.url)).unwrap();
+        assert!(!Store::may_have_active_account(&directory, &config.url));
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn account_files_keep_history_only_in_the_shared_draft() {
+        let directory = std::env::temp_dir().join(format!("sitz-sync-history-{}", new_id().unwrap()));
+        std::fs::create_dir(&directory).unwrap();
+        let config = Config::testing("https://synthetic.example.com");
+        let store = Store::open(&directory, &config.url).unwrap();
+        let mut finished = core::State::new(1000);
+        finished.start_day("standard", 1000).unwrap();
+        finished.start_block_with_break("main", 1, vec![], 0).unwrap();
+        finished.tick_wall_clock(1060);
+        finished.end_day(1060).unwrap();
+        let base = SyncDocument::capture(&mut finished, None, &"a".repeat(32), &[]).unwrap();
+        let (runtime, state) = machine(base);
+        let account = runtime.account.as_ref().unwrap();
+        assert_eq!(state.history.len(), 1);
+        store.save(account, &state).unwrap();
+        store.select(Some(&account.user)).unwrap();
+        let saved: serde_json::Value = serde_json::from_slice(&std::fs::read(store.account_path(&account.user.id).unwrap()).unwrap()).unwrap();
+        assert_eq!(saved["state"]["history"], serde_json::json!([]));
+        assert_eq!(saved["draft"]["history"].as_array().unwrap().len(), 1);
+        let mut reopened = core::State::new(1000);
+        let restored = Runtime::open_with(Some(config), &directory, &mut reopened);
+        assert!(restored.active() && restored.blocked.is_none());
+        assert_eq!(reopened.history.len(), 1, "历史从草稿恢复");
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn ending_the_day_survives_the_observed_block_finishing_but_not_a_new_block() {
+        let mut initial = core::State::new(1000);
+        initial.start_day("standard", 1000).unwrap();
+        initial.start_block_with_break("main", 1, vec![], 5).unwrap();
+        let base = SyncDocument::capture(&mut initial, None, &"a".repeat(32), &[]).unwrap();
+        let (runtime, mut state) = machine(base);
+        let expected = runtime.action_target(&state);
+        state.tick_wall_clock(1070);
+        assert!(runtime.check_target(&state, Some(&expected), &TargetCheck::Live).is_err());
+        assert!(runtime.check_target(&state, Some(&expected), &TargetCheck::Day).is_ok(), "打开确认框后那一格自然到时，收工仍有效");
+        state.tick_wall_clock(1400);
+        assert!(runtime.check_target(&state, Some(&expected), &TargetCheck::Day).is_ok(), "休息自然结束也不影响");
+        state.start_block_with_break("main", 30, vec![], 5).unwrap();
+        state.day.as_mut().unwrap().timer.as_mut().unwrap().sync_id = format!("{}-b-9", "b".repeat(32));
+        assert!(runtime.check_target(&state, Some(&expected), &TargetCheck::Day).is_err(), "另一端新开的一格需要重新确认");
+        state.day.as_mut().unwrap().sync_id = format!("{}-d-9", "b".repeat(32));
+        assert!(runtime.check_target(&state, Some(&expected), &TargetCheck::Day).is_err());
     }
 
     #[test]

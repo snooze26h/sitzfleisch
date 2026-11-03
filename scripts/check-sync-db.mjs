@@ -1,13 +1,15 @@
 // 在内存 PostgreSQL 中执行原始迁移和真实权限/事务函数；不连接用户数据库或发送邮件。
 import assert from "node:assert/strict";
-import { readFile } from "node:fs/promises";
+import { readdir, readFile } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import { test } from "node:test";
 import { PGlite } from "@electric-sql/pglite";
 
-const migrationPath = new URL("../supabase/migrations/202610270001_shared_sync.sql", import.meta.url);
+// 按文件名顺序执行全部迁移，与新项目的部署顺序一致；已部署项目只补跑新增的文件。
+const migrationsPath = new URL("../supabase/migrations/", import.meta.url);
+const migrationNames = (await readdir(migrationsPath)).filter((name) => name.endsWith(".sql")).sort();
+const migration = (await Promise.all(migrationNames.map((name) => readFile(new URL(name, migrationsPath), "utf8")))).join("\n");
 const fixturePath = new URL("../supabase/tests/fixtures/document.json", import.meta.url);
-const migration = await readFile(migrationPath, "utf8");
 const fixture = JSON.parse(await readFile(fixturePath, "utf8"));
 const accountA = "00000000-0000-4000-8000-00000000000a";
 const accountB = "00000000-0000-4000-8000-00000000000b";
@@ -237,6 +239,39 @@ test("共享数据库 RPC、权限、幂等与输入校验", async (t) => {
       assert.equal(await operationCount(accountA), before);
     });
 
+    await t.test("文本校验不依赖数据库区域设置，并与客户端的字符规则一致", async () => {
+      await asRole("admin");
+      const definition = (await pg.query(
+        "select pg_catalog.pg_get_functiondef('sitz_sync_private.assert_text(jsonb,integer,boolean,boolean)'::regprocedure) as body",
+      )).rows[0].body;
+      assert.doesNotMatch(definition, /\[\[:/, "POSIX 字符类随 lc_ctype 变化，不能用于协议校验");
+      const accepts = async (text, nonempty, multiline) => {
+        try {
+          await pg.query("select sitz_sync_private.assert_text($1::jsonb, 80, $2, $3)", [JSON.stringify(text), nonempty, multiline]);
+          return true;
+        } catch (error) {
+          assert.equal(error.code, "22023");
+          return false;
+        }
+      };
+      // 与 core/tests/sync.rs 的 text_rules_match_the_database_contract 使用同一组样例。
+      const cases = [
+        ["数学\u2028", true, false, true], ["段落\u2029结束", true, true, true], ["👩\u200d💻", true, false, true],
+        ["名\u00a0字", true, false, true], ["\u200b", true, false, true], ["换行\n", true, true, true], ["", false, false, true],
+        ["测试\u0007", true, false, false], ["测试\u0085", true, true, false], ["测试\u009f", true, false, false],
+        ["换行\n", true, false, false], ["\u3000\u00a0", true, false, false], ["\u2028", true, false, false], ["\n\t", true, true, false],
+      ];
+      for (const [text, nonempty, multiline, expected] of cases) {
+        assert.equal(await accepts(text, nonempty, multiline), expected, JSON.stringify({ text, nonempty, multiline }));
+      }
+      await asRole("authenticated", accountC);
+      const named = structuredClone(fixture);
+      named.preferences.categories[0].name = "数学\u2028";
+      assert.equal((await write(0, operation(999), named)).applied, true, "客户端接受的行分隔符不能被云端拒绝");
+      await asRole("admin");
+      await pg.query("delete from sitz_sync_private.documents where user_id=$1", [accountC]);
+    });
+
     await t.test("同一基线的两笔写入只有一笔成功，失败不会丢掉胜出的文档", async () => {
       await asRole("authenticated", accountC);
       // PGlite 是单连接；这里验证两个同基线请求的 CAS 结果，不冒充多连接锁等待测试。
@@ -291,4 +326,4 @@ test("共享数据库 RPC、权限、幂等与输入校验", async (t) => {
 });
 
 // 测试源码来自仓库，路径展示便于追溯；不输出数据库内容或模拟会话。
-console.log(`数据库迁移：${fileURLToPath(migrationPath)}`);
+console.log(`数据库迁移：${migrationNames.map((name) => fileURLToPath(new URL(name, migrationsPath))).join("、")}`);

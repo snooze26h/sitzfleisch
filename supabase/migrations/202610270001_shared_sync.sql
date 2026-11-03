@@ -76,9 +76,12 @@ begin
         raise exception using errcode = '22023', message = '同步文档文本格式无效';
     end if;
     v_text := p_value #>> '{}';
+    -- 用明确码点，不用 [[:cntrl:]]/[[:space:]]：POSIX 字符类随 lc_ctype 和排序规则提供者变化，
+    -- 会把客户端接受的行分隔符、零宽连接符判成非法。范围与客户端 Rust 的
+    -- char::is_control（Unicode Cc）及 char::is_whitespace（White_Space）一致。
     if pg_catalog.char_length(v_text) > p_max
-       or (p_nonempty and v_text ~ '^[[:space:]]*$')
-       or (case when p_multiline then pg_catalog.translate(v_text, E'\n\r\t', '') else v_text end) ~ '[[:cntrl:]]' then
+       or (p_nonempty and v_text ~ E'^[\\u0009-\\u000d\\u0020\\u0085\\u00a0\\u1680\\u2000-\\u200a\\u2028\\u2029\\u202f\\u205f\\u3000]*$')
+       or (case when p_multiline then pg_catalog.translate(v_text, E'\n\r\t', '') else v_text end) ~ E'[\\u0001-\\u001f\\u007f-\\u009f]' then
         raise exception using errcode = '22023', message = '同步文档文本长度或字符无效';
     end if;
     return v_text;

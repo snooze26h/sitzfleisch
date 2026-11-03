@@ -15,13 +15,14 @@
 
 ## 2. 安装数据库迁移
 
-在目标项目的 SQL Editor 中运行完整的 [202610270001_shared_sync.sql](../supabase/migrations/202610270001_shared_sync.sql)。迁移自带事务，失败时不会留下半套权限；再次运行会保留已有文档和操作记录。
+在目标项目的 SQL Editor 中按文件名顺序运行 `supabase/migrations/` 下的全部迁移：先 [202610270001_shared_sync.sql](../supabase/migrations/202610270001_shared_sync.sql)，再 [202611020001_locale_independent_text.sql](../supabase/migrations/202611020001_locale_independent_text.sql)。已经运行过第一份的项目只需补跑第二份：它把文本校验改为与数据库区域设置无关的明确码点，避免行分隔符等客户端接受的字符被云端拒绝。迁移自带事务，失败时不会留下半套权限；再次运行会保留已有文档和操作记录。
 
 如果已用 PostgreSQL 的 service 配置安全保存了目标数据库连接，也可以执行：
 
 ```bash
 psql 'service=sitzfleisch-sync' -v ON_ERROR_STOP=1 \
-  -f supabase/migrations/202610270001_shared_sync.sql
+  -f supabase/migrations/202610270001_shared_sync.sql \
+  -f supabase/migrations/202611020001_locale_independent_text.sql
 ```
 
 迁移会创建：
@@ -159,6 +160,7 @@ node scripts/check-sync-db.mjs
 | 只有项目成员邮箱能收到验证码 | 自定义 SMTP 和发件域名验证 |
 | 邮件模板是只读的，提示 Set up custom SMTP | 先完成 SMTP 发信服务配置，再编辑模板 |
 | 邮件只有链接，没有数字验证码 | Magic Link 与 Confirm sign up 模板是否均包含 `{{ .Token }}` |
+| 点击邮件后 localhost:3000 拒绝连接 | 当前客户端使用数字验证码，不依赖回跳网页；核对两份模板的 Source 并保存，重新请求邮件，将新验证码填回坐功。旧邮件不会自动改变 |
 | RPC 不存在 | 迁移是否运行在客户端配置对应的项目，`public` 是否暴露给 Data API |
 | 登录后提示权限不足 | RPC 的 authenticated 执行权限与用户会话；不要给私有表补写权限 |
 | 同步冲突 | 两端是否离线编辑同一学习日/记录；先核对差异再选择 |

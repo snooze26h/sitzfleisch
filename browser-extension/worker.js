@@ -25,7 +25,8 @@ async function readResponse(response, code, nonce, sessionOnly = false) {
   let text = "";
   try {
     while (true) {
-      const { done, value } = await reader.read();
+      // 响应头已收到也可能在正文传输中断开；它与 fetch 超时走同一条重试/解除路径。
+      const { done, value } = await reader.read().catch(() => { throw new Error("connection-error"); });
       if (done) break;
       bytes += value.byteLength;
       if (bytes > limit) throw new Error("invalid-response");
@@ -169,15 +170,11 @@ export function createBlocker({ chromeApi, fetchImpl = fetch, now = Date.now, ti
     }));
   }
 
-  async function synchronize() {
-    await ready;
+  async function requestRules(code) {
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), timeoutMs);
     let phase = "connection-error";
     try {
-      if (!pairingStorageAvailable) { phase = "pairing-storage-error"; throw new Error(phase); }
-      if (!pairingCode) { phase = "pairing-required"; throw new Error(phase); }
-      const code = pairingCode;
       const common = { "X-Sitzfleisch-Client": "browser-extension-v1", "X-Sitzfleisch-Protocol": "2" };
       const challenge = sessionChallenge();
       const sessionResponse = await fetchImpl(SESSION_URL, {
@@ -196,7 +193,35 @@ export function createBlocker({ chromeApi, fetchImpl = fetch, now = Date.now, ti
         redirect: "error", signal: controller.signal,
       });
       phase = "response-error";
-      const next = await readResponse(response, code, authentication.nonce);
+      return await readResponse(response, code, authentication.nonce);
+    } catch (cause) {
+      if (cause?.message === "authentication-error") throw cause;
+      if (controller.signal.aborted || cause?.message === "connection-error") phase = "connection-error";
+      throw new Error(phase);
+    } finally {
+      clearTimeout(timeout);
+    }
+  }
+
+  async function synchronize() {
+    await ready;
+    let phase = "connection-error";
+    try {
+      if (!pairingStorageAvailable) { phase = "pairing-storage-error"; throw new Error(phase); }
+      if (!pairingCode) { phase = "pairing-required"; throw new Error(phase); }
+      let next;
+      for (let attempt = 0; attempt < 2; attempt += 1) {
+        try {
+          next = await requestRules(pairingCode);
+          break;
+        } catch (cause) {
+          phase = cause.message;
+          // 一次短暂断连不能把已屏蔽的网页放开。仅重试一次，真正退出仍能有界解除。
+          // 每次都重新握手并生成 nonce，身份验证或坏数据错误不通过重试掩盖。
+          if (phase !== "connection-error" || attempt === 1) throw cause;
+        }
+      }
+      phase = "response-error";
       // 连接到旧主程序时不能悄悄丢掉已生效的整站缓存；明确收工仍可解除。
       if (rules?.hosts?.length && next.protocol === 1 && next.active) throw new Error("host-rules-unavailable");
       phase = "apply-error";
@@ -243,7 +268,6 @@ export function createBlocker({ chromeApi, fetchImpl = fetch, now = Date.now, ti
       try { await inspectAllTabs(); } catch { error = "apply-error"; }
     } finally {
       rulesConfirmedInFlight = false;
-      clearTimeout(timeout);
     }
     return status();
   }

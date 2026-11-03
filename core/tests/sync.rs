@@ -1,9 +1,9 @@
 use sitzfleisch_core::{
     sync::{
-        merge, serialized_jsonb_len, MergeChoice, SyncDocument, MAX_DOCUMENT_BYTES,
-        MAX_HISTORY_DAYS,
+        merge, serialized_jsonb_len, MergeChoice, SyncDocument, CAPTURE_LIMIT_BYTES,
+        MAX_DOCUMENT_BYTES, MAX_HISTORY_DAYS,
     },
-    State,
+    State, TaskItem,
 };
 
 const A: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
@@ -633,4 +633,237 @@ fn duplicate_or_missing_sync_ids_are_rejected_without_mutation() {
         .set_completion_note_by_id(&day_id, &entry_id, "不应退回时间戳")
         .is_err());
     assert_eq!(json(&state), before);
+}
+
+/// 带一格 1 分钟专注的进行中文档；用历史完成记录把 JSONB 体积补到 `bytes`。
+fn running_with_size(bytes: usize) -> (State, SyncDocument) {
+    let (_, archived_document) = archived(1_000, C);
+    let template = archived_document.history[0].clone();
+    let mut state = State::new(100_000);
+    state.start_day("standard", 100_000).unwrap();
+    state
+        .start_block_with_break("main", 1, Vec::new(), 5)
+        .unwrap();
+    let mut document = capture(&mut state, None, A);
+    document.history = (0..1_000)
+        .map(|index| {
+            let mut archived = template.clone();
+            archived.day.sync_id = format!("{C}-d-{index}");
+            archived.day.ledger[0].sync_id = format!("{C}-e-{index}");
+            archived.day.ledger[0].completion_note = Some(String::new());
+            archived
+        })
+        .collect();
+    let mut remaining = bytes - serialized_jsonb_len(&document).unwrap();
+    for archived in &mut document.history {
+        let padding = remaining.min(2_000);
+        archived.day.ledger[0].completion_note = Some("x".repeat(padding));
+        remaining -= padding;
+    }
+    assert_eq!(remaining, 0, "夹具应能补到指定体积");
+    assert_eq!(serialized_jsonb_len(&document).unwrap(), bytes);
+    let mut device = State::new(100_000);
+    document.apply(&mut device, 100_000).unwrap();
+    (device, document)
+}
+
+#[test]
+fn natural_completion_past_the_upload_limit_still_projects_applies_and_merges() {
+    let (_, document) = running_with_size(MAX_DOCUMENT_BYTES - 10);
+    document.validate().unwrap();
+    // 1 分钟格在 100_060 自然结束：多出一条专注记录、休息段和暂停段。
+    let projected = document.projected(100_070).unwrap();
+    assert!(projected.day.as_ref().unwrap().timer.is_none());
+    assert!(
+        serialized_jsonb_len(&projected).unwrap() > MAX_DOCUMENT_BYTES,
+        "夹具必须让投影越过上传上限"
+    );
+    let mut device = State::new(100_000);
+    document.apply(&mut device, 100_070).unwrap();
+    assert_eq!(device.day.as_ref().unwrap().ledger.len(), 1);
+    assert!(document.equivalent(&projected, 100_070));
+    merge(&document, &document, &projected, 100_070, None).unwrap();
+    // 本机存档仍可读取；只有上传协议拒绝越限的文档。
+    let raw = serde_json::to_string(&projected).unwrap();
+    serde_json::from_str::<SyncDocument>(&raw).unwrap();
+    assert!(projected.validate().is_err());
+    assert!(SyncDocument::from_json(&raw).is_err());
+}
+
+#[test]
+fn new_operations_stop_below_the_upload_limit_but_freeing_space_still_works() {
+    let (device, document) = running_with_size(CAPTURE_LIMIT_BYTES + 100);
+    let mut paused = device.clone();
+    paused.toggle_pause(100_000).unwrap();
+    let before = json(&paused);
+    let refused = SyncDocument::capture(&mut paused, Some(&document), B, &[]).unwrap_err();
+    assert!(refused.contains("容量上限"), "{refused}");
+    assert_eq!(json(&paused), before, "被拒绝的采集不改动本机状态");
+
+    let mut device = device;
+    let id = device.history[0].day.sync_id.clone();
+    device.delete_history_day_by_id(&id).unwrap();
+    let freed =
+        SyncDocument::capture(&mut device, Some(&document), B, std::slice::from_ref(&id))
+            .unwrap();
+    assert!(serialized_jsonb_len(&freed).unwrap() < serialized_jsonb_len(&document).unwrap());
+    assert_eq!(freed.deleted_day_ids, [id]);
+}
+
+/// 两端都收工了同一天；电脑随后开了新的一天并完成 45 分钟。无论选哪一端，新的一天都不能消失。
+#[test]
+fn a_day_started_after_ending_the_shared_day_survives_either_choice() {
+    let (base_state, base) = {
+        let mut state = State::new(1_000);
+        state.start_day("standard", 1_000).unwrap();
+        state
+            .start_block_with_break("main", 30, Vec::new(), 0)
+            .unwrap();
+        let document = capture(&mut state, None, A);
+        (state, document)
+    };
+    let shared_day = base.day.as_ref().unwrap().sync_id.clone();
+    let mut phone = base_state.clone();
+    phone.tick_wall_clock(1_600);
+    phone.end_day(1_600).unwrap();
+    let local = capture(&mut phone, Some(&base), B);
+    let mut mac = base_state.clone();
+    mac.tick_wall_clock(1_900);
+    mac.end_day(1_900).unwrap();
+    mac.tick_wall_clock(90_000);
+    mac.start_day("standard", 90_000).unwrap();
+    mac.start_block_with_break("reading", 45, Vec::new(), 0)
+        .unwrap();
+    mac.tick_wall_clock(90_000 + 45 * 60);
+    let remote = capture(&mut mac, Some(&base), C);
+    let new_day = remote.day.as_ref().unwrap().sync_id.clone();
+
+    assert_eq!(
+        merge(&base, &local, &remote, 93_000, None)
+            .unwrap_err()
+            .fields,
+        ["day"],
+        "两端收工时刻不同是同一天的冲突"
+    );
+    for (choice, ended_at) in [(MergeChoice::Local, 1_600), (MergeChoice::Remote, 1_900)] {
+        let merged = merge(&base, &local, &remote, 93_000, Some(choice)).unwrap();
+        let day = merged.day.as_ref().unwrap();
+        assert_eq!(day.sync_id, new_day);
+        assert_eq!(day.net_seconds(), 45 * 60);
+        assert_eq!(merged.history.len(), 1);
+        assert_eq!(merged.history[0].day.sync_id, shared_day);
+        assert_eq!(merged.history[0].ended_at, ended_at);
+    }
+}
+
+#[test]
+fn abandoning_the_shared_day_and_starting_another_only_conflicts_on_the_abandoned_day() {
+    let mut base_state = State::new(1_000);
+    base_state.start_day("standard", 1_000).unwrap();
+    base_state
+        .start_block_with_break("main", 30, Vec::new(), 0)
+        .unwrap();
+    let base = capture(&mut base_state, None, A);
+    let mut phone = base_state.clone();
+    phone.tick_wall_clock(1_600);
+    phone.end_day(1_600).unwrap();
+    let local = capture(&mut phone, Some(&base), B);
+    let mut mac = base_state.clone();
+    mac.tick_wall_clock(1_700);
+    mac.abandon_day().unwrap();
+    mac.start_day("standard", 1_700).unwrap();
+    mac.start_block_with_break("reading", 45, Vec::new(), 0)
+        .unwrap();
+    let remote = capture(&mut mac, Some(&base), C);
+    let new_day = remote.day.as_ref().unwrap().sync_id.clone();
+    assert_eq!(merge(&base, &local, &remote, 2_000, None).unwrap_err().fields, ["day"]);
+    let kept = merge(&base, &local, &remote, 2_000, Some(MergeChoice::Local)).unwrap();
+    assert_eq!(kept.day.as_ref().unwrap().sync_id, new_day);
+    assert_eq!(kept.history.len(), 1, "选本机时保留手机收工的那一天");
+    let dropped = merge(&base, &local, &remote, 2_000, Some(MergeChoice::Remote)).unwrap();
+    assert_eq!(dropped.day.as_ref().unwrap().sync_id, new_day);
+    assert!(dropped.history.is_empty(), "选云端时沿用电脑的放弃");
+}
+
+#[test]
+fn two_devices_starting_different_days_keep_one_and_archive_the_other() {
+    let (_, base) = archived(1_000, A);
+    let mut mac = State::new(5_000);
+    base.apply(&mut mac, 5_000).unwrap();
+    let mut phone = mac.clone();
+    mac.start_day("standard", 5_000).unwrap();
+    mac.start_block_with_break("main", 30, Vec::new(), 0)
+        .unwrap();
+    let local = capture(&mut mac, Some(&base), B);
+    phone.start_day("standard", 5_100).unwrap();
+    phone
+        .start_block_with_break("reading", 25, Vec::new(), 0)
+        .unwrap();
+    phone.tick_wall_clock(5_100 + 25 * 60);
+    let remote = capture(&mut phone, Some(&base), C);
+    let (mac_day, phone_day) = (
+        local.day.as_ref().unwrap().sync_id.clone(),
+        remote.day.as_ref().unwrap().sync_id.clone(),
+    );
+    // 合并时刻取三份文档里最晚的锚点：手机记完 25 分钟时，电脑的格已走了 1600 秒。
+    let now = 5_100 + 25 * 60;
+    assert_eq!(merge(&base, &local, &remote, now, None).unwrap_err().fields, ["day"]);
+
+    let mac_wins = merge(&base, &local, &remote, now, Some(MergeChoice::Local)).unwrap();
+    assert_eq!(mac_wins.day.as_ref().unwrap().sync_id, mac_day);
+    let archived_phone = mac_wins
+        .history
+        .iter()
+        .find(|archived| archived.day.sync_id == phone_day)
+        .expect("未选的学习日要归档，不能丢掉");
+    assert_eq!(archived_phone.day.net_seconds(), 25 * 60);
+    assert_eq!(archived_phone.ended_at, now);
+    assert_eq!(mac_wins.history.len(), 2);
+
+    let phone_wins = merge(&base, &local, &remote, now, Some(MergeChoice::Remote)).unwrap();
+    assert_eq!(phone_wins.day.as_ref().unwrap().sync_id, phone_day);
+    let archived_mac = phone_wins
+        .history
+        .iter()
+        .find(|archived| archived.day.sync_id == mac_day)
+        .unwrap();
+    assert_eq!(archived_mac.day.net_seconds(), 1_600, "进行中的格按已走时长计入");
+    assert!(archived_mac.day.timer.is_none());
+    phone_wins.validate().unwrap();
+}
+
+/// 与 scripts/check-sync-db.mjs 的云端文本校验使用同一组样例：两边判断不一致时，
+/// 客户端接受的内容会被云端整份拒绝，待上传的修改就再也传不上去。
+#[test]
+fn text_rules_match_the_database_contract() {
+    let (_, base) = archived(1_000, A);
+    let with = |edit: &dyn Fn(&mut SyncDocument)| {
+        let mut document = base.clone();
+        edit(&mut document);
+        document.validate().is_ok()
+    };
+    for (text, expected) in [
+        ("数学\u{2028}", true),
+        ("👩\u{200d}💻", true),
+        ("名\u{a0}字", true),
+        ("\u{200b}", true),
+        ("测试\u{7}", false),
+        ("测试\u{9f}", false),
+        ("换行\n", false),
+        ("\u{3000}\u{a0}", false),
+        ("\u{2028}", false),
+    ] {
+        let named = with(&|document| document.preferences.categories[0].name = text.into());
+        assert_eq!(named, expected, "单行必填：{text:?}");
+    }
+    for (text, expected) in [("段落\u{2029}结束", true), ("换行\n", true), ("", true), ("测试\u{85}", false)] {
+        let noted = with(&|document| {
+            document.history[0].day.ledger[0].completion_note = Some(text.into());
+        });
+        assert_eq!(noted, expected, "多行选填：{text:?}");
+    }
+    let task = with(&|document| {
+        document.history[0].day.ledger[0].tasks = vec![TaskItem { text: "\n\t".into(), done: false }];
+    });
+    assert!(!task, "多行必填的文本不能只有空白");
 }

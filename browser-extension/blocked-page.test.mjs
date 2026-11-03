@@ -10,7 +10,7 @@ const tick = () => new Promise((resolve) => setImmediate(resolve));
 const active = { ok: true, blocked: true, active: true, connection: "connected", ruleCount: 4 };
 function deferred() { let resolve; const promise = new Promise((r) => { resolve = r; }); return { promise, resolve }; }
 
-function harness({ url, timeoutMs = 5000, send = async () => active } = {}) {
+function harness({ url, timeoutMs = 8000, send = async () => active } = {}) {
   const elements = Object.fromEntries(["original", "detail", "sync", "back", "back-hint", "scope"].map((id) => [id, {
     textContent: "", disabled: false, listeners: {},
     addEventListener(type, listener) { this.listeners[type] = listener; },
