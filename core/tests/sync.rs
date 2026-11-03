@@ -867,3 +867,74 @@ fn text_rules_match_the_database_contract() {
     });
     assert!(!task, "多行必填的文本不能只有空白");
 }
+
+fn reminders_on(state: &mut State) {
+    state.preferences.stretch_reminder_enabled = true;
+    state.preferences.stretch_reminder_minutes = 50;
+    state.preferences.idle_reminder_enabled = true;
+    state.preferences.idle_reminder_minutes = 15;
+}
+
+/// 逐秒走到 `until`，返回第一次起身（.1）或闲置（.2）提醒距 `from` 的秒数。
+fn first_reminder(state: &mut State, from: i64, until: i64, idle: bool) -> Option<i64> {
+    let mut first = None;
+    for t in (state.last_tick + 1)..=until {
+        state.tick_wall_clock(t);
+        state.take_due_break(t);
+        let due = state.take_due_reminders();
+        if (if idle { due.2 } else { due.1 }) && first.is_none() {
+            first = Some(t - from);
+        }
+    }
+    first
+}
+
+#[test]
+fn a_block_started_on_the_other_device_after_a_long_break_resets_the_stretch_count() {
+    let mut mac = State::new(1_000);
+    reminders_on(&mut mac);
+    mac.start_day("standard", 1_000).unwrap();
+    mac.start_block_with_break("main", 45, Vec::new(), 10).unwrap();
+    let d0 = capture(&mut mac, None, A);
+    first_reminder(&mut mac, 1_000, 1_000 + 45 * 60, false);
+    let d1 = capture(&mut mac, Some(&d0), A);
+    // 手机在这一格结束 30 分钟后接着开下一格；Mac 这段时间一直停着。
+    let handoff = 1_000 + 75 * 60;
+    let mut phone = State::new(900);
+    reminders_on(&mut phone);
+    d1.apply(&mut phone, handoff).unwrap();
+    phone.start_block_with_break("main", 45, Vec::new(), 10).unwrap();
+    let d2 = capture(&mut phone, Some(&d1), B);
+    first_reminder(&mut mac, handoff, handoff, false);
+    d2.apply(&mut mac, handoff).unwrap();
+    assert_eq!(mac.day.as_ref().unwrap().seated_since_relief, 0, "那边停了 30 分钟才开格，本机也算起来活动过");
+    let mac_first = first_reminder(&mut mac, handoff, handoff + 45 * 60, false);
+    let phone_first = first_reminder(&mut phone, handoff, handoff + 45 * 60, false);
+    assert_eq!(mac_first, phone_first, "同一格，两台设备的起身提醒要一致");
+}
+
+#[test]
+fn a_block_finished_on_the_other_device_restarts_the_idle_count() {
+    let mut mac = State::new(1_000);
+    reminders_on(&mut mac);
+    mac.start_day("standard", 1_000).unwrap();
+    let d0 = capture(&mut mac, None, A);
+    let start = 1_000 + 14 * 60;
+    first_reminder(&mut mac, 1_000, start, true);
+    let mut phone = State::new(900);
+    reminders_on(&mut phone);
+    d0.apply(&mut phone, start).unwrap();
+    phone.start_block_with_break("main", 25, Vec::new(), 5).unwrap();
+    let d1 = capture(&mut phone, Some(&d0), B);
+    d1.apply(&mut mac, start).unwrap();
+    assert_eq!(mac.day.as_ref().unwrap().paused_without_block, 0, "那边开了格，就不算没开格干坐着");
+    first_reminder(&mut mac, start, start + 600, true);
+    first_reminder(&mut phone, start, start + 600, true);
+    phone.finish_block(phone.last_tick).unwrap();
+    let d2 = capture(&mut phone, Some(&d1), B);
+    d2.apply(&mut mac, start + 600).unwrap();
+    let mac_idle = first_reminder(&mut mac, start + 600, start + 600 + 40 * 60, true);
+    let phone_idle = first_reminder(&mut phone, start + 600, start + 600 + 40 * 60, true);
+    assert!(mac_idle.is_some());
+    assert_eq!(mac_idle, phone_idle, "同一段收工后的空档，两台设备的闲置提醒要一致");
+}

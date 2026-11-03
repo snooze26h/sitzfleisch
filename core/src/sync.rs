@@ -294,9 +294,7 @@ impl SyncDocument {
         updated.history = projected.history;
         if let (Some(old), Some(new)) = (&state.day, &mut updated.day) {
             if !old.sync_id.is_empty() && old.sync_id == new.sync_id {
-                new.seated_since_water = old.seated_since_water;
-                new.seated_since_relief = old.seated_since_relief;
-                new.paused_without_block = old.paused_without_block;
+                new.carry_device_counters(old);
             }
         }
         *state = updated;

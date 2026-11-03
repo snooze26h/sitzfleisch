@@ -611,10 +611,6 @@ impl Day {
         self.categories.iter().map(|c| c.accepted_seconds).sum()
     }
 
-    pub fn quota_seconds(&self) -> i64 {
-        self.categories.iter().map(|c| c.quota_minutes * 60).sum()
-    }
-
     /// 一天的每一秒不是在某个格里，就是在暂停里。没有格在走时一定是暂停。
     pub fn is_paused(&self) -> bool {
         self.pauses.last().is_some_and(|p| p.ended_at.is_none())
@@ -634,6 +630,26 @@ impl Day {
         match self.pauses.last() {
             Some(p) if p.ended_at.is_none() => p.seconds(now),
             _ => 0,
+        }
+    }
+
+    /// 远端改了同一天时，沿用这台设备已经数到的提醒计数；但另一台设备上发生了本机命令也会清零的事，
+    /// 这里照样清零：那边开了新格、收了或放弃了一格，就不算没开格干坐着；那边停够几分钟再继续，就算起来活动过。
+    /// 否则接力之后，两台设备对同一格的起身、闲置提醒各响各的。
+    pub fn carry_device_counters(&mut self, old: &Day) {
+        self.seated_since_water = old.seated_since_water;
+        self.seated_since_relief = old.seated_since_relief;
+        self.paused_without_block = old.paused_without_block;
+        let timer_id = |day: &Day| day.timer.as_ref().map(|timer| timer.sync_id.clone());
+        if timer_id(self) != timer_id(old) || self.ledger.len() != old.ledger.len() {
+            self.paused_without_block = 0;
+        }
+        let relieved = self.pauses.iter().any(|pause| {
+            pause.ended_at.is_some_and(|end| end - pause.started_at >= RELIEF_PAUSE_SECONDS)
+                && !old.pauses.iter().any(|seen| seen.started_at == pause.started_at && seen.ended_at.is_some())
+        });
+        if relieved {
+            self.seated_since_relief = 0;
         }
     }
 
@@ -1051,12 +1067,15 @@ impl State {
 
     /// 永久删除一天归档（按 started_at 定位；调用方负责二次确认）。
     pub fn delete_history_day(&mut self, started_at: i64) -> RuleResult {
-        let before = self.history.len();
-        self.history.retain(|d| d.day.started_at != started_at);
-        if self.history.len() == before {
-            return Err("没有这一天的归档");
+        // 开始 → 收工 → 再开始可能落在同一秒：按时间戳一并删掉会连带删掉另一天。
+        match self.history.iter().filter(|d| d.day.started_at == started_at).count() {
+            0 => Err("没有这一天的归档"),
+            1 => {
+                self.history.retain(|d| d.day.started_at != started_at);
+                Ok(())
+            }
+            _ => Err("有几天在同一秒开始，无法确定要删哪一天"),
         }
-        Ok(())
     }
 
     /// 多端可能在同一秒开始各自的学习日；共享模式只能按稳定标识删除，不能退回时间戳匹配。
@@ -1135,9 +1154,12 @@ impl State {
             return Err("没有在走的格");
         }
         if day.is_paused() {
+            // 和开格同一个规矩：停够几分钟才算起来活动过；按一下暂停马上继续，还算连续在座。
+            if day.current_pause_seconds(now) >= RELIEF_PAUSE_SECONDS {
+                day.seated_since_relief = 0;
+            }
             day.close_pause(now);
             day.cut_rest(now);
-            day.seated_since_relief = 0;
         } else {
             day.begin_pause(now, false);
         }
@@ -1176,12 +1198,13 @@ impl State {
     /// 写入实际完成记录；精确定位学习日和台账项，避免迟到的弹窗写到下一格。
     pub fn set_completion_note(&mut self, day_started_at: i64, entry_index: usize, ended_at: i64, note: &str) -> RuleResult {
         let note = normalized_completion_note(note)?;
-        let day = if self.day.as_ref().is_some_and(|d| d.started_at == day_started_at) {
-            self.day.as_mut()
-        } else {
-            self.history.iter_mut().find(|a| a.day.started_at == day_started_at).map(|a| &mut a.day)
-        }.ok_or("这一天的记录已不存在")?;
-        let entry = day.ledger.get_mut(entry_index).filter(|e| e.ended_at == ended_at && e.accepted)
+        // 同一秒开始的几天里，落到台账位置和结束时刻都对得上的那一天。
+        let mut days = self.day.iter_mut().chain(self.history.iter_mut().map(|a| &mut a.day))
+            .filter(|d| d.started_at == day_started_at).peekable();
+        if days.peek().is_none() {
+            return Err("这一天的记录已不存在");
+        }
+        let entry = days.find_map(|d| d.ledger.get_mut(entry_index).filter(|e| e.ended_at == ended_at && e.accepted))
             .ok_or("这段记录已改变，请重新打开")?;
         entry.completion_note = Some(note);
         Ok(())
@@ -1503,125 +1526,25 @@ pub fn to_json(state: &State) -> String {
     serde_json::to_string_pretty(state).expect("state serializes")
 }
 
-/// v2 → v3：验收取消、离开并进暂停、开格意图变成任务清单。
-/// 只搬运，不臆造：读不懂的字段一律丢掉，绝不改动原文件。
-fn migrate_v2(value: &mut serde_json::Value) {
-    fn tasks_from_intention(entry: &mut serde_json::Value) {
-        let text = entry
-            .get("intention")
-            .and_then(|v| v.as_str())
-            .map(str::trim)
-            .unwrap_or("")
-            .to_string();
-        if let Some(map) = entry.as_object_mut() {
-            map.remove("intention");
-            map.remove("note");
-            map.remove("running");
-            map.remove("paused_by_away");
-            map.remove("phase");
-            if !map.contains_key("tasks") && !text.is_empty() {
-                map.insert(
-                    "tasks".into(),
-                    serde_json::json!([{ "text": text, "done": false }]),
-                );
-            }
-        }
-    }
-
-    fn migrate_day(day: &mut serde_json::Value) {
-        let Some(map) = day.as_object_mut() else { return };
-        // 待验收的那一格：按已走时长直接计入台账，不再拦人。
-        if let Some(review) = map.remove("pending_review").filter(|v| !v.is_null()) {
-            let seconds = review.get("focus_seconds").and_then(|v| v.as_i64()).unwrap_or(0);
-            let category = review.get("category").and_then(|v| v.as_str()).unwrap_or("").to_string();
-            let started_at = review.get("started_at").and_then(|v| v.as_i64()).unwrap_or(0);
-            if seconds > 0 && !category.is_empty() {
-                let mut entry = serde_json::json!({
-                    "category": category.clone(),
-                    "seconds": seconds,
-                    "accepted": true,
-                    "started_at": started_at,
-                    "ended_at": started_at + seconds,
-                    "intention": review.get("intention").cloned().unwrap_or_default(),
-                });
-                tasks_from_intention(&mut entry);
-                if let Some(ledger) = map.get_mut("ledger").and_then(|v| v.as_array_mut()) {
-                    ledger.push(entry);
-                }
-                if let Some(categories) = map.get_mut("categories").and_then(|v| v.as_array_mut()) {
-                    for c in categories.iter_mut() {
-                        if c.get("id").and_then(|v| v.as_str()) == Some(category.as_str()) {
-                            let done = c.get("accepted_seconds").and_then(|v| v.as_i64()).unwrap_or(0);
-                            c["accepted_seconds"] = serde_json::json!(done + seconds);
-                        }
-                    }
-                }
-            }
-        }
-        // 离开 → 暂停。
-        let aways = map.remove("aways").unwrap_or(serde_json::Value::Null);
-        let mut pauses: Vec<serde_json::Value> = Vec::new();
-        if let Some(list) = aways.as_array() {
-            for a in list {
-                pauses.push(serde_json::json!({
-                    "started_at": a.get("started_at").and_then(|v| v.as_i64()).unwrap_or(0),
-                    "ended_at": a.get("ended_at").cloned().unwrap_or(serde_json::Value::Null),
-                    "auto": false,
-                }));
-            }
-        }
-        map.insert("pauses".into(), serde_json::Value::Array(pauses));
-        if let Some(idle) = map.remove("seated_without_block") {
-            map.insert("paused_without_block".into(), idle);
-        }
-        if let Some(away) = map.remove("away_seconds") {
-            map.insert("paused_seconds".into(), away);
-        }
-        map.remove("away_reason");
-        // v2 的休息也是一个计时（phase = "break"）。新版里休息不是格，留着就会被当成一格专注计入。
-        if map.get("timer").and_then(|t| t.get("phase")).and_then(|v| v.as_str()) == Some("break") {
-            map.insert("timer".into(), serde_json::Value::Null);
-        }
-        if let Some(timer) = map.get_mut("timer").filter(|v| !v.is_null()) {
-            tasks_from_intention(timer);
-        }
-        if let Some(ledger) = map.get_mut("ledger").and_then(|v| v.as_array_mut()) {
-            for entry in ledger.iter_mut() {
-                // 旧台账的备注就是那一格做了什么，接到完成记录上，别在迁移里丢掉。
-                let note = entry.get("note").and_then(|v| v.as_str()).map(str::trim).unwrap_or("").to_string();
-                if let Some(map) = entry.as_object_mut() {
-                    if !note.is_empty() && !map.contains_key("completion_note") {
-                        map.insert("completion_note".into(), serde_json::json!(note));
-                    }
-                }
-                tasks_from_intention(entry);
-            }
-        }
-    }
-
-    if let Some(day) = value.get_mut("day").filter(|v| !v.is_null()) {
-        migrate_day(day);
-    }
-    if let Some(history) = value.get_mut("history").and_then(|v| v.as_array_mut()) {
-        for archived in history.iter_mut() {
-            if let Some(day) = archived.get_mut("day") {
-                migrate_day(day);
-            }
-        }
-    }
-    value["schema"] = serde_json::json!(3);
-}
-
 /// 读档。损坏或更高版本一律拒绝解析——调用方必须保留原文件，绝不覆盖。
 pub fn from_json(raw: &str) -> Result<State, String> {
     let mut value: serde_json::Value =
         serde_json::from_str(raw).map_err(|e| format!("unreadable: {e}"))?;
-    let schema = value.get("schema").and_then(|v| v.as_u64()).unwrap_or(0);
+    // 数组、数字这类合法 JSON 下面一赋键就会 panic，应用每次启动都崩，进不了保护模式。
+    if !value.is_object() {
+        return Err("unreadable: not a JSON object".into());
+    }
+    // schema 写成 "5" 或 5.0 时不能当成 0 处理：旧迁移会因此清空所有暂停记录。
+    let schema = match value.get("schema") {
+        Some(schema) => schema.as_u64().ok_or("unreadable: invalid schema")?,
+        None => 0,
+    };
     if schema > u64::from(SCHEMA_VERSION) {
         return Err(format!("newer schema {schema} > {SCHEMA_VERSION}"));
     }
+    // 第一个发布版 0.9.1 写的就是 schema 3，更早的只是开发期存档，不再迁移。
     if schema < 3 {
-        migrate_v2(&mut value);
+        return Err(format!("unsupported schema {schema} < 3"));
     }
     // v3 → v4 只新增默认空的精确网址规则；不能重复迁移 pauses，否则会清空已有暂停记录。
     if schema < u64::from(SCHEMA_VERSION) {
@@ -1831,6 +1754,37 @@ mod tests {
         value["day"].as_object_mut().unwrap().remove("rests");
         let back = from_json(&value.to_string()).unwrap();
         assert!(back.day.unwrap().rests.is_empty());
+    }
+
+    #[test]
+    fn a_brief_pause_inside_a_block_keeps_the_stretch_count() {
+        let mut state = started();
+        state.start_block("main", 90, vec![]).unwrap();
+        walk_to(&mut state, 1_000 + 45 * 60);
+        state.toggle_pause(state.last_tick).unwrap();
+        walk_to(&mut state, 1_000 + 45 * 60 + 3);
+        state.toggle_pause(state.last_tick).unwrap();
+        assert_eq!(state.day.as_ref().unwrap().seated_since_relief, 45 * 60, "停 3 秒接着走，还算连续在座");
+        state.toggle_pause(state.last_tick).unwrap();
+        walk_to(&mut state, 1_000 + 55 * 60);
+        state.toggle_pause(state.last_tick).unwrap();
+        assert_eq!(state.day.as_ref().unwrap().seated_since_relief, 0, "停够 5 分钟再继续，起身提醒从头数");
+    }
+
+    #[test]
+    fn days_started_in_the_same_second_are_not_deleted_or_annotated_together() {
+        let mut state = State::new(1_000);
+        state.start_day("standard", 1_000).unwrap();
+        state.end_day(1_000).unwrap();
+        state.start_day("standard", 1_000).unwrap();
+        state.start_block("main", 25, vec![]).unwrap();
+        walk_to(&mut state, 2_500);
+        state.end_day(2_500).unwrap();
+        assert_eq!(state.history.len(), 2);
+        let ended = state.history[1].day.ledger[0].ended_at;
+        assert_eq!(state.set_completion_note(1_000, 0, ended, "读完第三章"), Ok(()), "备注落到台账对得上的那一天");
+        assert!(state.delete_history_day(1_000).is_err(), "分不清是哪一天时不能一并删掉");
+        assert_eq!(state.history.len(), 2);
     }
 
     #[test]
@@ -2762,54 +2716,25 @@ mod tests {
     }
 
     #[test]
-    fn v2_state_migrates_to_current_schema() {
-        let raw = r#"{
-          "schema": 2,
-          "last_tick": 5000,
-          "preferences": {
-            "categories": [
-              { "id": "deep", "name": "深度工作", "default_block_minutes": 90, "icon": "brain", "role": "deepWork", "block_rationale": "" },
-              { "id": "browse", "name": "浏览", "default_block_minutes": 45, "icon": "newspaper", "role": "exploration", "block_rationale": "" }
-            ],
-            "profiles": [
-              { "id": "standard", "name": "标准", "subtitle": "", "quotas": [{ "category": "deep", "minutes": 240 }, { "category": "browse", "minutes": 60 }] }
-            ],
-            "break_minutes": 10
-          },
-          "day": {
-            "profile_name": "标准",
-            "profile_id": "standard",
-            "started_at": 1000,
-            "categories": [
-              { "id": "deep", "name": "深度工作", "quota_minutes": 240, "accepted_seconds": 600 },
-              { "id": "browse", "name": "浏览", "quota_minutes": 60, "accepted_seconds": 0 }
-            ],
-            "timer": { "category": "deep", "phase": "focus", "running": true, "total_seconds": 1500, "elapsed_seconds": 300, "intention": "任务三", "started_at": 4000, "break_minutes": 10, "paused_by_away": false },
-            "pending_review": { "category": "browse", "focus_seconds": 900, "intention": "任务二", "started_at": 2000, "break_minutes": 0 },
-            "ledger": [
-              { "category": "deep", "seconds": 600, "accepted": true, "intention": "任务一", "note": "做完了", "started_at": 1000, "ended_at": 1600 }
-            ],
-            "seated_seconds": 3000,
-            "away_seconds": 400,
-            "suspend_seconds": 0,
-            "away_reason": "吃饭",
-            "cups": 3,
-            "seated_without_block": 120,
-            "aways": [{ "reason": "吃饭", "started_at": 4500, "ended_at": null }]
-          },
-          "history": []
-        }"#;
-        let state = from_json(raw).unwrap();
-        assert_eq!(state.schema, SCHEMA_VERSION);
-        assert!(state.preferences.blocked_urls.is_empty());
-        assert_eq!(state.preferences.categories[0].name, "深度工作", "迁移不改名字，只改结构");
-        let day = state.day.as_ref().unwrap();
-        assert_eq!(day.paused_seconds, 400);
-        assert!(day.is_paused());
-        assert_eq!(day.paused_without_block, 120);
-        assert_eq!(day.categories[1].accepted_seconds, 900, "待验收的一格补记进来");
-        assert_eq!(day.ledger.len(), 2);
-        assert_eq!(day.ledger[0].tasks[0].text, "任务一");
-        assert_eq!(day.timer.as_ref().unwrap().tasks[0].text, "任务三");
+    fn malformed_state_files_are_rejected_without_panicking_or_rewriting_pauses() {
+        for raw in ["[]", "0", "\"state\"", "true", "null"] {
+            assert!(from_json(raw).is_err(), "{raw} 应当进保护模式，不能 panic");
+        }
+        let mut state = State::new(1_000);
+        state.start_day("standard", 1_000).unwrap();
+        state.start_block("main", 25, vec![]).unwrap();
+        state.toggle_pause(1_600).unwrap();
+        state.toggle_pause(1_660).unwrap();
+        let mut value = serde_json::to_value(&state).unwrap();
+        for schema in [serde_json::json!("5"), serde_json::json!(5.0), serde_json::json!(-1)] {
+            value["schema"] = schema;
+            assert!(from_json(&value.to_string()).is_err(), "schema 不是整数时不能当成 0 去迁移");
+        }
+        value["schema"] = serde_json::json!(2);
+        assert!(from_json(&value.to_string()).unwrap_err().contains("unsupported schema"));
+        value["schema"] = serde_json::json!(SCHEMA_VERSION);
+        let pauses = state.day.as_ref().unwrap().pauses.len();
+        assert!(pauses >= 2);
+        assert_eq!(from_json(&value.to_string()).unwrap().day.unwrap().pauses.len(), pauses, "暂停记录原样读回");
     }
 }
