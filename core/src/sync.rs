@@ -112,8 +112,7 @@ impl<'de> Deserialize<'de> for SyncDocument {
     fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         // 本机旧存档允许兼容字段；网络协议必须另走严格入口，不能用 serde 的忽略未知字段吞掉新协议。
         let value = Value::deserialize(deserializer)?;
-        strict_keys(&value).map_err(serde::de::Error::custom)?;
-        let raw: RawDocument = serde_json::from_value(value)
+        let raw: RawDocument = serde_json::from_value(value.clone())
             .map_err(|_| serde::de::Error::custom("同步数据字段类型无效"))?;
         let document = Self {
             schema: raw.schema,
@@ -123,6 +122,11 @@ impl<'de> Deserialize<'de> for SyncDocument {
             history: raw.history,
             deleted_day_ids: raw.deleted_day_ids,
         };
+        // serde 会补默认值、丢掉未知的嵌套字段。解析后再序列化一遍，必须与原文逐键相等：
+        // 多一个键、少一个键都拒绝。字段的唯一来源就是这些类型本身，不再另抄一份键名清单。
+        if serde_json::to_value(&document).ok().as_ref() != Some(&value) {
+            return Err(serde::de::Error::custom("同步文档含未知或缺失字段"));
+        }
         // 本机账号存档也走这里；体积上限属于上传协议，由网络入口另行检查。
         document
             .validate_structure()
@@ -964,149 +968,6 @@ fn validate_day<'a>(
     }
     if !archived && day.timer.is_none() && !open {
         return Err("未计时的学习日必须处于暂停状态".into());
-    }
-    Ok(())
-}
-
-fn object_keys(value: &Value, expected: &[&str]) -> Result<(), String> {
-    let Some(object) = value.as_object() else {
-        return Err("同步对象类型无效".into());
-    };
-    if object.len() != expected.len() || expected.iter().any(|key| !object.contains_key(*key)) {
-        return Err("同步文档含未知或缺失字段".into());
-    }
-    Ok(())
-}
-
-fn array(value: &Value) -> Result<&Vec<Value>, String> {
-    value.as_array().ok_or_else(|| "同步列表类型无效".into())
-}
-
-fn strict_keys(value: &Value) -> Result<(), String> {
-    object_keys(
-        value,
-        &[
-            "schema",
-            "preferences",
-            "last_tick",
-            "day",
-            "history",
-            "deleted_day_ids",
-        ],
-    )?;
-    let preferences = &value["preferences"];
-    object_keys(
-        preferences,
-        &[
-            "categories",
-            "profiles",
-            "break_minutes",
-            "uniform_block_minutes",
-            "default_profile_id",
-        ],
-    )?;
-    for category in array(&preferences["categories"])? {
-        object_keys(
-            category,
-            &[
-                "id",
-                "name",
-                "short_name",
-                "default_block_minutes",
-                "icon",
-                "role",
-                "block_rationale",
-            ],
-        )?;
-    }
-    for profile in array(&preferences["profiles"])? {
-        object_keys(profile, &["id", "name", "subtitle", "quotas"])?;
-        for quota in array(&profile["quotas"])? {
-            object_keys(quota, &["category", "minutes"])?;
-        }
-    }
-    if !value["day"].is_null() {
-        strict_day_keys(&value["day"])?;
-    }
-    for archived in array(&value["history"])? {
-        object_keys(archived, &["day", "ended_at"])?;
-        strict_day_keys(&archived["day"])?;
-    }
-    Ok(())
-}
-
-fn strict_day_keys(day: &Value) -> Result<(), String> {
-    object_keys(
-        day,
-        &[
-            "sync_id",
-            "profile_name",
-            "profile_id",
-            "started_at",
-            "categories",
-            "timer",
-            "ledger",
-            "seated_seconds",
-            "paused_seconds",
-            "suspend_seconds",
-            "cups",
-            "seated_since_water",
-            "seated_since_relief",
-            "paused_without_block",
-            "break_until",
-            "pauses",
-            "rests",
-        ],
-    )?;
-    for category in array(&day["categories"])? {
-        object_keys(
-            category,
-            &["id", "name", "quota_minutes", "accepted_seconds"],
-        )?;
-    }
-    if !day["timer"].is_null() {
-        object_keys(
-            &day["timer"],
-            &[
-                "sync_id",
-                "category",
-                "total_seconds",
-                "elapsed_seconds",
-                "tasks",
-                "started_at",
-                "break_minutes",
-            ],
-        )?;
-        strict_task_keys(&day["timer"]["tasks"])?;
-    }
-    for entry in array(&day["ledger"])? {
-        object_keys(
-            entry,
-            &[
-                "sync_id",
-                "category",
-                "seconds",
-                "accepted",
-                "tasks",
-                "started_at",
-                "ended_at",
-                "completion_note",
-            ],
-        )?;
-        strict_task_keys(&entry["tasks"])?;
-    }
-    for pause in array(&day["pauses"])? {
-        object_keys(pause, &["started_at", "ended_at", "auto"])?;
-    }
-    for rest in array(&day["rests"])? {
-        object_keys(rest, &["started_at", "ended_at"])?;
-    }
-    Ok(())
-}
-
-fn strict_task_keys(value: &Value) -> Result<(), String> {
-    for task in array(value)? {
-        object_keys(task, &["text", "done"])?;
     }
     Ok(())
 }

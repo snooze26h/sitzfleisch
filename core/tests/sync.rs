@@ -401,6 +401,37 @@ fn strict_network_parser_rejects_nested_unknown_fields_and_missing_keys() {
     assert!(SyncDocument::from_json(&missing.to_string()).is_err());
 }
 
+/// 解析后再序列化必须与原文逐键相等：每一层多出的键、serde 会悄悄补默认值的缺键都要拒绝。
+#[test]
+fn strict_network_parser_rejects_drift_at_every_nesting_level() {
+    let (_, base) = archived(1_000, A);
+    let base = json(&base);
+    let ledger = "/history/0/day/ledger/0";
+    for pointer in [
+        "/history/0",
+        "/history/0/day",
+        ledger,
+        "/history/0/day/pauses/0",
+        "/preferences/profiles/0",
+        "/preferences/profiles/0/quotas/0",
+    ] {
+        let mut extra = base.clone();
+        extra.pointer_mut(pointer).unwrap().as_object_mut().unwrap().insert("access_token".into(), "must-not-travel".into());
+        assert!(SyncDocument::from_json(&extra.to_string()).is_err(), "多出的键：{pointer}");
+    }
+    for (pointer, key) in [
+        ("/preferences/categories/0", "icon"),
+        (ledger, "completion_note"),
+        (ledger, "tasks"),
+        ("/history/0/day", "rests"),
+        ("/history/0/day", "seated_since_relief"),
+    ] {
+        let mut missing = base.clone();
+        missing.pointer_mut(pointer).unwrap().as_object_mut().unwrap().remove(key);
+        assert!(SyncDocument::from_json(&missing.to_string()).is_err(), "缺少的键：{pointer}/{key}");
+    }
+}
+
 #[test]
 fn strict_network_parser_rejects_invalid_ids_references_totals_and_bounds() {
     let (_, base) = running();
