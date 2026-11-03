@@ -10,12 +10,13 @@ fn encoded(script: &str) -> String {
     base64::engine::general_purpose::STANDARD.encode(bytes)
 }
 
-fn write_script(staged: &Path, digest: &str) -> Result<String, String> {
+fn write_script(staged: &Path, digest: &str, expected: &str) -> Result<String, String> {
     let path = staged.to_str().ok_or("暂存路径不是有效的 UTF-8。")?;
-    if path.len() > 4096 || path.chars().any(char::is_control)
-        || digest.len() != 64 || !digest.bytes().all(|c| c.is_ascii_hexdigit()) {
+    let hex = |value: &str| value.len() == 64 && value.bytes().all(|c| c.is_ascii_hexdigit());
+    if path.len() > 4096 || path.chars().any(char::is_control) || !hex(digest) || !hex(expected) {
         return Err("暂存路径或内容摘要无效，未调用 UAC。".into());
     }
+    let changed = crate::HOSTS_CHANGED_EXIT;
     // 先读入内存并核验，再写固定的系统目标；不存在校验后重新读源文件的窗口。
     // PowerShell 字符串不会展开 %NAME%，整个命令再用 UTF-16 Base64 传递，完全不经过 cmd。
     Ok(format!(r#"$ErrorActionPreference = 'Stop'
@@ -32,6 +33,10 @@ try {{
   try {{ $actual = [System.BitConverter]::ToString($hash.ComputeHash($bytes)).Replace('-', '').ToLowerInvariant() }} finally {{ $hash.Dispose() }}
   if ($actual -cne '{digest}') {{ throw 'content rejected' }}
   $target = [System.IO.Path]::Combine([System.Environment]::SystemDirectory, 'drivers', 'etc', 'hosts')
+  # UAC 框开着的这几秒里别的程序可能改了 hosts：不再是算新内容时读到的那份就放弃，免得覆盖它的条目。
+  $hash = [System.Security.Cryptography.SHA256]::Create()
+  try {{ $current = [System.BitConverter]::ToString($hash.ComputeHash([System.IO.File]::ReadAllBytes($target))).Replace('-', '').ToLowerInvariant() }} finally {{ $hash.Dispose() }}
+  if ($current -cne '{expected}') {{ exit {changed} }}
   [System.IO.File]::WriteAllBytes($target, $bytes)
   try {{ & ([System.IO.Path]::Combine([System.Environment]::SystemDirectory, 'ipconfig.exe')) /flushdns | Out-Null }} catch {{}}
   exit 0
@@ -74,7 +79,7 @@ pub(crate) fn powershell_process() -> Result<std::process::Command, String> {
 }
 
 #[cfg(target_os = "windows")]
-pub(crate) fn install(content: &str, data_dir: &Path) -> Result<(), String> {
+pub(crate) fn install(content: &str, expected: &str, data_dir: &Path) -> Result<(), String> {
     use sha2::{Digest, Sha256};
     use std::fs::{self, OpenOptions};
     use std::io::Write;
@@ -93,10 +98,12 @@ pub(crate) fn install(content: &str, data_dir: &Path) -> Result<(), String> {
         let guard = OpenOptions::new().read(true).share_mode(1).open(&path).map_err(|_| "无法锁定 hosts 暂存文件。")?;
         let digest = format!("{:x}", Sha256::digest(content.as_bytes()));
         let powershell = system_directory()?.join("WindowsPowerShell/v1.0/powershell.exe");
-        let script = elevation_script(&powershell, &write_script(&path, &digest)?)?;
+        let script = elevation_script(&powershell, &write_script(&path, &digest, expected)?)?;
         let status = powershell_process()?.args(["-NoProfile", "-NonInteractive", "-EncodedCommand", &script]).status().map_err(|_| "无法调用系统 UAC 提权。")?;
         drop(guard);
-        if status.success() { Ok(()) } else { Err("提权被取消或内容核验失败，屏蔽规则未写入。".into()) }
+        if status.success() { Ok(()) }
+        else if status.code() == Some(crate::HOSTS_CHANGED_EXIT) { Err(crate::HOSTS_CHANGED.into()) }
+        else { Err("提权被取消或内容核验失败，屏蔽规则未写入。".into()) }
     })();
     let _ = fs::remove_file(path);
     result
@@ -109,8 +116,9 @@ mod tests {
     #[test]
     fn elevation_binds_content_and_never_uses_cmd_or_environment_paths() {
         let path = Path::new("C:/test/%PAYLOAD%/$('bad');quote'/hosts.staged");
-        let script = write_script(path, &"a".repeat(64)).unwrap();
+        let script = write_script(path, &"a".repeat(64), &"b".repeat(64)).unwrap();
         assert!(script.find("$actual -cne").unwrap() < script.find("WriteAllBytes").unwrap());
+        assert!(script.find(&format!("$current -cne '{}'", "b".repeat(64))).unwrap() < script.find("WriteAllBytes").unwrap(), "授权期间 hosts 变了就不写");
         assert!(script.contains("quote''/hosts.staged"));
         assert!(script.contains("[System.Environment]::SystemDirectory"));
         assert!(!script.contains("cmd.exe"));
@@ -122,8 +130,9 @@ mod tests {
         assert!(outer.contains("-Verb RunAs -WindowStyle Hidden -Wait -PassThru"));
         assert!(outer.contains("exit $p.ExitCode"));
         assert!(!outer.contains("%PAYLOAD%"));
-        assert!(write_script(Path::new("bad\npath"), &"a".repeat(64)).is_err());
-        assert!(write_script(path, "not-a-digest").is_err());
+        assert!(write_script(Path::new("bad\npath"), &"a".repeat(64), &"b".repeat(64)).is_err());
+        assert!(write_script(path, "not-a-digest", &"b".repeat(64)).is_err());
+        assert!(write_script(path, &"a".repeat(64), "not-a-digest").is_err());
     }
 
     #[cfg(target_os = "windows")]

@@ -882,7 +882,7 @@ fn sync_hosts_file(
     path: &Path,
     hosts: &[String],
     enable: bool,
-    install: impl FnOnce(&str) -> Result<(), String>,
+    install: impl FnOnce(&str, &str) -> Result<(), String>,
 ) -> Result<bool, String> {
     let current = fs::read_to_string(path).map_err(|e| format!("读不到系统 hosts：{e}"))?;
     // 丢失结束标记时直接剥离会吞掉后面的用户条目；先确认每段边界完整。
@@ -910,7 +910,13 @@ fn sync_hosts_file(
         return Err("hosts 内容为空或超过 65536 字节，原文件已保留。".into());
     }
     // 授权只接收这次计算出的内存内容，不能重新读取一个可被替换的用户文件。
-    install(&desired)?;
+    // 同时带上算新内容时读到的那份 hosts 的摘要：授权框开着的这几秒里别的程序改了 hosts，
+    // 提权侧就不写，免得把它刚加的条目整份覆盖掉。
+    let before = {
+        use sha2::{Digest, Sha256};
+        format!("{:x}", Sha256::digest(current.as_bytes()))
+    };
+    install(&desired, &before)?;
     let after = fs::read_to_string(path).map_err(|e| format!("回读系统 hosts 失败：{e}"))?;
     if after != desired {
         return Err("回读核验不一致，规则可能没有生效。".into());
@@ -938,7 +944,7 @@ fn release_system_blocking(shared: &Shared) -> Result<(), String> {
     // 必须等已在写 hosts 的线程完成；后续排队写入也会看到 exiting，只能清理。
     let _serial = shared.blocking_lock.lock().unwrap_or_else(|e| e.into_inner());
     shared.blocking.lock().unwrap().busy = true;
-    let result = hosts_path().and_then(|path| sync_hosts_file(&path, &[], false, |content| privileged_install(content, &shared.data_dir)));
+    let result = hosts_path().and_then(|path| sync_hosts_file(&path, &[], false, |content, before| privileged_install(content, before, &shared.data_dir)));
     record_blocking_result(shared, &result);
     result.map(|_| ())
 }
@@ -972,6 +978,29 @@ fn applescript_string(raw: &str) -> String {
     raw.replace('\\', r"\\").replace('"', "\\\"")
 }
 
+/// 授权期间 hosts 被别的程序改过时，提权侧以这个退出码放弃写入。
+#[cfg(desktop)]
+pub(crate) const HOSTS_CHANGED_EXIT: i32 = 3;
+#[cfg(desktop)]
+pub(crate) const HOSTS_CHANGED: &str = "授权期间系统 hosts 被其他程序改动，为免覆盖它的改动，这次没有写入。请重新应用整站规则。";
+
+/// 写入那几步：先核对目标还是算新内容时读到的那份（摘要 `expected`），对不上就以 3 退出、一个字节都不写；
+/// 再经同目录的临时文件整份写入。目标路径单独传入，测试可以对临时文件实跑，不用提权。
+#[cfg(target_os = "macos")]
+fn install_shell(content: &str, expected: &str, target: &Path) -> String {
+    let dir = target.parent().unwrap_or(Path::new("/")).display();
+    let target = target.display();
+    [
+        "umask 022".to_string(),
+        format!("h=$(/usr/bin/shasum -a 256 < '{target}') || exit 1"),
+        format!("[ \"${{h%% *}}\" = '{expected}' ] || exit {HOSTS_CHANGED_EXIT}"),
+        format!("t=$(/usr/bin/mktemp '{dir}'/.sitzfleisch-hosts.XXXXXX) || exit 1"),
+        format!("/usr/bin/printf '%s' '{}' | /usr/bin/base64 -D > \"$t\" || {{ /bin/rm -f \"$t\"; exit 1; }}", base64_encode(content.as_bytes())),
+        format!("/bin/cp -f \"$t\" '{target}'; s=$?; /bin/rm -f \"$t\"; [ $s -eq 0 ] || exit 1"),
+    ]
+    .join("; ")
+}
+
 /// hosts 内容 → 完整的 AppleScript。抽出来是为了能测转义而不真的去提权。
 ///
 /// 内容以 Base64 嵌进脚本，由 root 解码到 /etc 里自己新建的临时文件，再原地覆盖 /etc/hosts。
@@ -979,7 +1008,7 @@ fn applescript_string(raw: &str) -> String {
 /// 把暂存文件换成指向 root 专属文件的符号链接，cp 照着读出来，就写进了所有人可读的 /etc/hosts。
 /// Base64 只有字母、数字和 + / =，放进单引号不需要任何转义，也就没有注入的余地。
 #[cfg(target_os = "macos")]
-fn install_script(content: &str) -> String {
+fn install_script(content: &str, expected: &str) -> String {
     // `killall mDNSResponder` 而不是 `-HUP`：SIGHUP 是苹果文档里的路子，但它**不保证**丢掉
     // 已经缓存下来的 hosts 派生记录。实测（macOS 26.6）解除屏蔽后 hosts 明明清干净了，
     // 被解除的域名仍然解析到 127.0.0.1 至少两分钟，手动再跑一次 flushcache 也没用，
@@ -993,10 +1022,7 @@ fn install_script(content: &str) -> String {
     // 后面两条各自吞掉错误，最后显式 exit 0。
     // cp 打开已有的 /etc/hosts 截断重写，属主和权限保持原样。
     let shell = [
-        "umask 022".to_string(),
-        "t=$(/usr/bin/mktemp /etc/.sitzfleisch-hosts.XXXXXX) || exit 1".into(),
-        format!("/usr/bin/printf '%s' '{}' | /usr/bin/base64 -D > \"$t\" || {{ /bin/rm -f \"$t\"; exit 1; }}", base64_encode(content.as_bytes())),
-        "/bin/cp -f \"$t\" /etc/hosts; s=$?; /bin/rm -f \"$t\"; [ $s -eq 0 ] || exit 1".into(),
+        install_shell(content, expected, Path::new("/etc/hosts")),
         "/usr/bin/dscacheutil -flushcache >/dev/null 2>&1".into(),
         "/usr/bin/killall mDNSResponder >/dev/null 2>&1".into(),
         "exit 0".into(),
@@ -1044,11 +1070,17 @@ fn helper_install(content: &str) -> Option<()> {
 }
 
 #[cfg(target_os = "macos")]
-fn privileged_install(content: &str, _data_dir: &Path) -> Result<(), String> {
+fn privileged_install(content: &str, expected: &str, _data_dir: &Path) -> Result<(), String> {
+    // 免密助手是瞬时调用：调用前再核对一次，留给别的程序插进来的窗口只剩几毫秒。
+    // 走授权框时这一步也先挡掉明显已经变了的情况，免得白白要一次密码。
+    let now = fs::read(hosts_path()?).map_err(|e| format!("读不到系统 hosts：{e}"))?;
+    if format!("{:x}", <sha2::Sha256 as sha2::Digest>::digest(&now)) != expected {
+        return Err(HOSTS_CHANGED.into());
+    }
     if helper_install(content).is_some() {
         return Ok(());
     }
-    let script = install_script(content);
+    let script = install_script(content, expected);
     let output = Command::new("/usr/bin/osascript")
         .env_clear().env("PATH", "/usr/bin:/bin:/usr/sbin:/sbin").current_dir("/")
         .arg("-e")
@@ -1061,18 +1093,20 @@ fn privileged_install(content: &str, _data_dir: &Path) -> Result<(), String> {
     let err = String::from_utf8_lossy(&output.stderr);
     if err.contains("-128") || err.to_lowercase().contains("cancel") {
         Err("授权被取消，屏蔽规则未写入。".into())
+    } else if err.trim_end().ends_with(&format!("({HOSTS_CHANGED_EXIT})")) {
+        Err(HOSTS_CHANGED.into())
     } else {
         Err("系统授权或 hosts 写入失败，请重试。".into())
     }
 }
 
 #[cfg(target_os = "windows")]
-fn privileged_install(content: &str, data_dir: &Path) -> Result<(), String> {
-    windows_hosts::install(content, data_dir)
+fn privileged_install(content: &str, expected: &str, data_dir: &Path) -> Result<(), String> {
+    windows_hosts::install(content, expected, data_dir)
 }
 
 #[cfg(all(desktop, not(any(target_os = "macos", target_os = "windows"))))]
-fn privileged_install(_content: &str, _data_dir: &Path) -> Result<(), String> {
+fn privileged_install(_content: &str, _expected: &str, _data_dir: &Path) -> Result<(), String> {
     Err("此平台暂不支持网站屏蔽。".into())
 }
 
@@ -1086,7 +1120,7 @@ fn spawn_apply_blocking(app: &AppHandle) {
         // 暂存文件跟着状态文件走同一个目录：隔离测试时不能落回真实目录。
         let data_dir = shared.data_dir.clone();
         apply_latest_blocking(&shared, |hosts, enable| {
-            let result = hosts_path().and_then(|path| sync_hosts_file(&path, hosts, enable, |content| privileged_install(content, &data_dir)));
+            let result = hosts_path().and_then(|path| sync_hosts_file(&path, hosts, enable, |content, before| privileged_install(content, before, &data_dir)));
             record_blocking_result(&shared, &result);
         });
         // 退出钩子可能在主线程等 blocking_lock；原生界面调用放到解锁之后。
@@ -2335,13 +2369,13 @@ mod tests {
         let original = "127.0.0.1 localhost\n::1 localhost\n192.0.2.10 custom.example # keep\n";
         let blocked = core::render_hosts(original, &["live.bilibili.com".into()], true);
         fs::write(&path, &blocked).unwrap();
-        let result = sync_hosts_file(&path, &[], false, |content| {
+        let result = sync_hosts_file(&path, &[], false, |content, _| {
             fs::write(&path, content).map_err(|e| e.to_string())
         });
         assert_eq!(result, Ok(false));
         assert_eq!(fs::read_to_string(&path).unwrap().trim(), original.trim());
         assert!(!dir.join(format!("hosts.staged.{}", std::process::id())).exists());
-        assert_eq!(sync_hosts_file(&path, &[], false, |_| panic!("没有托管段时不能提权")), Ok(false));
+        assert_eq!(sync_hosts_file(&path, &[], false, |_, _| panic!("没有托管段时不能提权")), Ok(false));
     }
 
     #[test]
@@ -2349,12 +2383,12 @@ mod tests {
         let fixture = TestShared::new(core::State::new(1_000));
         let path = fixture.0.data_dir.join("empty.hosts");
         fs::write(&path, core::render_hosts("", &["live.bilibili.com".into()], true)).unwrap();
-        let result = sync_hosts_file(&path, &[], false, |content| fs::write(&path, content).map_err(|e| e.to_string()));
+        let result = sync_hosts_file(&path, &[], false, |content, _| fs::write(&path, content).map_err(|e| e.to_string()));
         assert_eq!(result, Ok(false), "原文件为空时也要能解除，不能卡在「内容为空」");
         assert_eq!(fs::read_to_string(&path).unwrap(), "\n");
-        assert_eq!(sync_hosts_file(&path, &[], false, |_| panic!("已经解除，不能再要授权")), Ok(false));
+        assert_eq!(sync_hosts_file(&path, &[], false, |_, _| panic!("已经解除，不能再要授权")), Ok(false));
         fs::write(&path, "").unwrap();
-        assert_eq!(sync_hosts_file(&path, &[], false, |_| panic!("空文件无事可做，不能要授权")), Ok(false));
+        assert_eq!(sync_hosts_file(&path, &[], false, |_, _| panic!("空文件无事可做，不能要授权")), Ok(false));
     }
 
     #[test]
@@ -2364,10 +2398,10 @@ mod tests {
         let path = dir.join("test.hosts");
         let blocked = core::render_hosts("127.0.0.1 localhost\n", &["live.bilibili.com".into()], true);
         fs::write(&path, &blocked).unwrap();
-        assert!(sync_hosts_file(&path, &[], false, |_| Err("授权被取消".into())).is_err());
+        assert!(sync_hosts_file(&path, &[], false, |_, _| Err("授权被取消".into())).is_err());
         assert_eq!(fs::read_to_string(&path).unwrap(), blocked);
         assert!(!dir.join(format!("hosts.staged.{}", std::process::id())).exists());
-        assert!(sync_hosts_file(&path, &[], false, |_| Ok(())).is_err(), "必须核对真正解除，不能只信提权进程退出码");
+        assert!(sync_hosts_file(&path, &[], false, |_, _| Ok(())).is_err(), "必须核对真正解除，不能只信提权进程退出码");
     }
 
     #[test]
@@ -2379,7 +2413,7 @@ mod tests {
             format!("{}\n{}\n{}", core::HOSTS_BEGIN, core::HOSTS_BEGIN, core::HOSTS_END)] {
             let content = format!("127.0.0.1 localhost\n{markers}\n192.0.2.10 custom.example\n");
             fs::write(&path, &content).unwrap();
-            assert!(sync_hosts_file(&path, &[], false, |_| panic!("标记异常时不能调用提权写入")).is_err());
+            assert!(sync_hosts_file(&path, &[], false, |_, _| panic!("标记异常时不能调用提权写入")).is_err());
             assert_eq!(fs::read_to_string(&path).unwrap(), content);
         }
     }
@@ -2430,7 +2464,7 @@ mod tests {
                 let mut state = shared.state.lock().unwrap();
                 state.end_day(1_001).unwrap();
             }
-            let result = sync_hosts_file(&path, hosts, enable, |content| fs::write(&path, content).map_err(|e| e.to_string()));
+            let result = sync_hosts_file(&path, hosts, enable, |content, _| fs::write(&path, content).map_err(|e| e.to_string()));
             assert!(result.is_ok());
             record_blocking_result(shared, &result);
             applied.push(enable);
@@ -2454,7 +2488,7 @@ mod tests {
             if applied.is_empty() {
                 shared.state.lock().unwrap().start_day("standard", 1_001).unwrap();
             }
-            let result = sync_hosts_file(&path, hosts, enable, |content| fs::write(&path, content).map_err(|e| e.to_string()));
+            let result = sync_hosts_file(&path, hosts, enable, |content, _| fs::write(&path, content).map_err(|e| e.to_string()));
             assert!(result.is_ok());
             record_blocking_result(shared, &result);
             applied.push(enable);
@@ -3192,7 +3226,7 @@ mod tests {
     #[test]
     fn install_script_embeds_the_content_instead_of_reading_a_user_writable_file() {
         for raw in NASTY_CONTENTS {
-            let script = install_script(raw);
+            let script = install_script(raw, &"a".repeat(64));
             assert!(script.starts_with("do shell script \""));
             assert!(script.contains("with administrator privileges"));
             // 解除屏蔽之后要能立刻恢复解析：SIGHUP 丢不掉已缓存的 hosts 派生记录，
@@ -3208,10 +3242,38 @@ mod tests {
             if raw.contains(['$', '`', '\'', '"']) {
                 assert!(!script.contains(raw.trim_end()), "原文不能直接出现在脚本里");
             }
-            // 写入目标固定是 /etc/hosts，脚本里不再出现任何暂存文件路径。
-            assert_eq!(script.matches("/etc/hosts").count(), 1);
+            // 目标固定是 /etc/hosts：一次核对摘要、一次写入；脚本里不再出现任何暂存文件路径。
+            assert_eq!(script.matches("/etc/hosts").count(), 2);
             assert!(!script.contains("hosts.staged"));
         }
+        // 整段 AppleScript 交给系统编译一遍（只编译、不执行、不提权），转义出错会在这里暴露。
+        let out = std::env::temp_dir().join(format!("sitzfleisch-install-{}.scpt", std::process::id()));
+        let compiled = Command::new("/usr/bin/osacompile").arg("-e").arg(install_script(NASTY_CONTENTS[1], &"a".repeat(64))).arg("-o").arg(&out).output().unwrap();
+        let _ = fs::remove_file(&out);
+        assert!(compiled.status.success(), "{}", String::from_utf8_lossy(&compiled.stderr));
+    }
+
+    /// 授权框开着时别的程序改了 hosts：提权侧必须以 3 退出、一个字节都不写。对临时文件实跑，不提权。
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn install_shell_refuses_to_overwrite_hosts_changed_during_authorization() {
+        use sha2::{Digest, Sha256};
+        let dir = std::env::temp_dir().join(format!("sitzfleisch-hosts-test-{}-{}", std::process::id(), now_unix()));
+        fs::create_dir_all(&dir).unwrap();
+        let target = dir.join("hosts");
+        let read_at_compute = "127.0.0.1 localhost\n";
+        let digest = format!("{:x}", Sha256::digest(read_at_compute.as_bytes()));
+        let desired = core::render_hosts(read_at_compute, &["live.bilibili.com".into()], true);
+        let run = || Command::new("/bin/sh").arg("-c").arg(install_shell(&desired, &digest, &target)).status().unwrap();
+        fs::write(&target, read_at_compute).unwrap();
+        assert!(run().success());
+        assert_eq!(fs::read_to_string(&target).unwrap(), desired, "没被改过就整份写入");
+        let changed = "127.0.0.1 localhost\n192.0.2.7 docker.internal\n";
+        fs::write(&target, changed).unwrap();
+        assert_eq!(run().code(), Some(HOSTS_CHANGED_EXIT));
+        assert_eq!(fs::read_to_string(&target).unwrap(), changed, "别的程序刚加的条目不能被覆盖");
+        assert!(fs::read_dir(&dir).unwrap().all(|entry| entry.unwrap().file_name() == "hosts"), "不留临时文件");
+        fs::remove_dir_all(&dir).unwrap();
     }
 
     /// AppleScript 自己解析一遍：`return` 一个字符串字面量，取回来必须与原文一致。
