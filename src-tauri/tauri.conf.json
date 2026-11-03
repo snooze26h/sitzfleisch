@@ -29,7 +29,12 @@
   "bundle": {
     "active": true,
     "resources": {
-      "../browser-extension/": "browser-extension/",
+      "../browser-extension/*.js": "browser-extension/",
+      "../browser-extension/*.html": "browser-extension/",
+      "../browser-extension/*.css": "browser-extension/",
+      "../browser-extension/manifest.json": "browser-extension/manifest.json",
+      "../browser-extension/README.md": "browser-extension/README.md",
+      "../browser-extension/assets/*": "browser-extension/assets/",
       "../scripts/hosts-helper.sh": "scripts/hosts-helper.sh",
       "../scripts/install-hosts-helper.sh": "scripts/install-hosts-helper.sh"
     },
