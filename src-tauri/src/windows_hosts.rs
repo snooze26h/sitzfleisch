@@ -41,7 +41,7 @@ try {{
 fn elevation_script(powershell: &Path, script: &str) -> Result<String, String> {
     let path = powershell.to_str().ok_or("系统 PowerShell 路径无效。")?;
     let script = format!(
-        "$ErrorActionPreference = 'Stop'; try {{ $p = Start-Process -FilePath {} -ArgumentList '-NoProfile -NonInteractive -EncodedCommand {}' -Verb RunAs -Wait -PassThru; exit $p.ExitCode }} catch {{ exit 1 }}",
+        "$ErrorActionPreference = 'Stop'; try {{ $p = Start-Process -FilePath {} -ArgumentList '-NoProfile -NonInteractive -EncodedCommand {}' -Verb RunAs -WindowStyle Hidden -Wait -PassThru; exit $p.ExitCode }} catch {{ exit 1 }}",
         quoted(path), encoded(script),
     );
     let command = encoded(&script);
@@ -65,6 +65,9 @@ pub(crate) fn powershell_process() -> Result<std::process::Command, String> {
     let powershell = system.join("WindowsPowerShell/v1.0/powershell.exe");
     let root = system.parent().ok_or("Windows 系统目录无效。")?;
     let mut command = std::process::Command::new(powershell);
+    // CREATE_NO_WINDOW：GUI 程序起 PowerShell 会弹出黑色控制台窗口，每次提醒声音、写 hosts 都闪一下。
+    // 提权的那一层由 Start-Process 的 -WindowStyle Hidden 管。
+    std::os::windows::process::CommandExt::creation_flags(&mut command, 0x0800_0000);
     command.env_clear().env("SystemRoot", root).env("WINDIR", root).env("PATH", &system)
         .env("PSModulePath", system.join("WindowsPowerShell/v1.0/Modules")).current_dir(&system);
     Ok(command)
@@ -116,7 +119,7 @@ mod tests {
         let bytes = base64::engine::general_purpose::STANDARD.decode(command).unwrap();
         let words: Vec<u16> = bytes.as_chunks::<2>().0.iter().map(|c| u16::from_le_bytes(*c)).collect();
         let outer = String::from_utf16(&words).unwrap();
-        assert!(outer.contains("-Verb RunAs -Wait -PassThru"));
+        assert!(outer.contains("-Verb RunAs -WindowStyle Hidden -Wait -PassThru"));
         assert!(outer.contains("exit $p.ExitCode"));
         assert!(!outer.contains("%PAYLOAD%"));
         assert!(write_script(Path::new("bad\npath"), &"a".repeat(64)).is_err());

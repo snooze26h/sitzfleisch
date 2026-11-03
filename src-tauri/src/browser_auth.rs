@@ -40,23 +40,15 @@ impl Auth {
         let result = (|| -> std::io::Result<_> {
             let directory = data_dir.join("browser-auth");
             private_directory(&directory)?;
-            let path = directory.join("key");
-            let key = match open_private(&path, false) {
-                Ok(file) => {
-                    check_private(&file)?;
-                    let mut stored = Vec::new();
-                    file.take(4097).read_to_end(&mut stored)?;
-                    if stored.len() > 4096 { return Err(std::io::ErrorKind::InvalidData.into()); }
-                    let bytes = unprotect(&stored)?;
-                    bytes.try_into().map_err(|_| std::io::Error::from(std::io::ErrorKind::InvalidData))?
-                }
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                    let key = random_key()?;
-                    let mut file = open_private(&path, true)?;
-                    file.write_all(&protect(&key)?)?;
-                    file.sync_all()?;
-                    key
-                }
+            let key = match open_private(&directory.join("key"), false) {
+                Ok(file) => match read_key(file) {
+                    Ok(key) => key,
+                    // 读得到却解不开（首次写入时崩溃留下的半截文件、换机后 DPAPI 解不开）：旧配对本来就用不了，
+                    // 换一把新钥匙、扩展重新配对即可。否则浏览器连接永远起不来，连「重新生成配对码」也点不动。
+                    Err(error) if error.kind() == std::io::ErrorKind::InvalidData => write_new_key(&directory)?,
+                    Err(error) => return Err(error),
+                },
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => write_new_key(&directory)?,
                 Err(error) => return Err(error),
             };
             Ok(Self { key, session: hex(&random_key()?), nonces: VecDeque::new() })
@@ -71,16 +63,7 @@ impl Auth {
         let result = (|| -> std::io::Result<_> {
             let directory = data_dir.join("browser-auth");
             private_directory(&directory)?;
-            let key = random_key()?;
-            let session = hex(&random_key()?);
-            let path = directory.join(format!("key.{}", hex(&random_key()?)));
-            let mut file = open_private(&path, true)?;
-            let saved = file.write_all(&protect(&key)?).and_then(|_| file.sync_all());
-            drop(file);
-            let saved = saved.and_then(|_| fs::rename(&path, directory.join("key")));
-            if saved.is_err() { let _ = fs::remove_file(&path); }
-            saved?;
-            Ok((key, session))
+            Ok((write_new_key(&directory)?, hex(&random_key()?)))
         })();
         let (key, session) = result.map_err(|_| "配对凭据更新失败，原配对仍有效。")?;
         self.key = key;
@@ -121,6 +104,28 @@ impl Auth {
 
     #[cfg(test)]
     pub fn testing() -> Self { Self { key: [7; 32], session: hex(&[9; 32]), nonces: VecDeque::new() } }
+}
+
+/// 权限或链接不对仍按错误处理（不能信别人改得动的文件）；只有内容坏了、解不开才算 InvalidData。
+fn read_key(file: File) -> std::io::Result<[u8; 32]> {
+    check_private(&file)?;
+    let mut stored = Vec::new();
+    file.take(4097).read_to_end(&mut stored)?;
+    if stored.len() > 4096 { return Err(std::io::ErrorKind::InvalidData.into()); }
+    let bytes = unprotect(&stored).map_err(|_| std::io::Error::from(std::io::ErrorKind::InvalidData))?;
+    bytes.try_into().map_err(|_| std::io::ErrorKind::InvalidData.into())
+}
+
+/// 先写随机名的临时文件再改名替换：中途崩溃不会留下一把读不出来的空钥匙。
+fn write_new_key(directory: &Path) -> std::io::Result<[u8; 32]> {
+    let key = random_key()?;
+    let path = directory.join(format!("key.{}", hex(&random_key()?)));
+    let mut file = open_private(&path, true)?;
+    let saved = file.write_all(&protect(&key)?).and_then(|_| file.sync_all());
+    drop(file);
+    let saved = saved.and_then(|_| fs::rename(&path, directory.join("key")));
+    if saved.is_err() { let _ = fs::remove_file(&path); }
+    saved.map(|_| key)
 }
 
 fn random_key() -> std::io::Result<[u8; 32]> {
@@ -263,6 +268,22 @@ mod tests {
             symlink(directory.join("other"), &path).unwrap();
             assert!(Auth::load(&directory).is_err());
         }
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn unreadable_key_is_replaced_instead_of_disabling_the_bridge() {
+        let directory = std::env::temp_dir().join(format!("sitzfleisch-auth-test-{}", hex(&random_key().unwrap())));
+        fs::create_dir(&directory).unwrap();
+        let first = Auth::load(&directory).unwrap().pairing_code();
+        // 首次写入时崩溃留下的空文件：以前每次启动都失败，连重新生成配对码也不行。
+        let path = directory.join("browser-auth/key");
+        fs::remove_file(&path).unwrap();
+        drop(open_private(&path, true).unwrap());
+        let replaced = Auth::load(&directory).unwrap().pairing_code();
+        assert_ne!(replaced, first);
+        assert_eq!(Auth::load(&directory).unwrap().pairing_code(), replaced, "换上的新钥匙要能原样读回");
+        assert!(fs::read_dir(directory.join("browser-auth")).unwrap().all(|entry| entry.unwrap().file_name() == "key"), "不留临时文件");
         fs::remove_dir_all(directory).unwrap();
     }
 }

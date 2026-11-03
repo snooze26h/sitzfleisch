@@ -752,18 +752,16 @@ fn notify(app: &AppHandle, title: &str, body: &str, sound: AlertSound) {
 /// 响一声。走系统自带的声音，不需要任何权限，窗口关着也听得见。
 #[cfg(desktop)]
 fn play_alert_sound(sound: AlertSound) {
+    // 子进程得有人等：直接丢掉 Child，afplay 放完就成了僵尸进程，常驻菜单栏几周能攒上千个。
     #[cfg(target_os = "macos")]
-    let _ = Command::new("/usr/bin/afplay")
-        .arg(sound.file())
-        .spawn();
+    if let Ok(mut child) = Command::new("/usr/bin/afplay").arg(sound.file()).spawn() {
+        thread::spawn(move || { let _ = child.wait(); });
+    }
     #[cfg(target_os = "windows")]
     if let Ok(mut command) = windows_hosts::powershell_process() {
         let _ = command.args(["-NoProfile", "-NonInteractive", "-Command", sound.command()]).spawn();
     }
 }
-
-#[cfg(all(mobile, not(target_os = "android")))]
-fn play_alert_sound(_sound: AlertSound) {}
 
 /// 推进一次时间，并报告这一下是不是把格自然走完了（台账多了一条，格也不在了）。
 /// 心跳和命令都会推进时间：格恰好在某个命令那一下走完时，通知也得发，不能只看心跳。
@@ -899,7 +897,12 @@ fn sync_hosts_file(
         }
     }
     if inside { return Err("系统 hosts 的坐功托管标记不完整，原文件已保留。".into()); }
-    let desired = core::render_hosts(&current, hosts, enable);
+    let mut desired = core::render_hosts(&current, hosts, enable);
+    // 原文件本来是空的：剥掉托管段后只剩空串，而授权助手与 UAC 脚本都拒收空内容，
+    // 规则就再也解不掉。写回一个换行；原本就空、无事可做时不动它，免得白白要授权。
+    if desired.is_empty() && !current.is_empty() {
+        desired.push('\n');
+    }
     if desired == current {
         return Ok(core::hosts_section_present(&current));
     }
@@ -958,19 +961,8 @@ fn read_system_hosts() -> Result<String, String> {
 /// macOS 授权脚本使用的标准 Base64（带 = 补位）。
 #[cfg(target_os = "macos")]
 fn base64_encode(bytes: &[u8]) -> String {
-    const TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
-    for chunk in bytes.chunks(3) {
-        let n = chunk.iter().enumerate().fold(0u32, |n, (i, b)| n | u32::from(*b) << (16 - 8 * i));
-        for i in 0..4 {
-            if i <= chunk.len() {
-                out.push(char::from(TABLE[((n >> (18 - 6 * i)) & 63) as usize]));
-            } else {
-                out.push('=');
-            }
-        }
-    }
-    out
+    use base64::Engine;
+    base64::engine::general_purpose::STANDARD.encode(bytes)
 }
 
 /// AppleScript 字符串字面量的转义。**反斜杠必须先换**：反过来的话 `"` → `\"` 里
@@ -1358,15 +1350,13 @@ fn reveal_browser_extension(app: AppHandle) -> Result<(), String> {
         return Err("此安装包没有浏览器扩展，请更新坐功后重试。".into());
     }
     #[cfg(target_os = "macos")]
-    let result = Command::new("open").arg(&path).status();
+    let opened = Command::new("open").arg(&path).status().is_ok_and(|status| status.success());
+    // 资源管理器打开成功也常返回退出码 1，只能以能否启动为准。
     #[cfg(target_os = "windows")]
-    let result = Command::new("explorer").arg(&path).status();
+    let opened = Command::new("explorer").arg(&path).spawn().is_ok();
     #[cfg(not(any(target_os = "macos", target_os = "windows")))]
-    let result = Command::new("xdg-open").arg(&path).status();
-    match result {
-        Ok(status) if status.success() => Ok(()),
-        _ => Err("无法打开扩展目录，请从安装目录中打开 browser-extension。".into()),
-    }
+    let opened = Command::new("xdg-open").arg(&path).status().is_ok_and(|status| status.success());
+    if opened { Ok(()) } else { Err("无法打开扩展目录，请从安装目录中打开 browser-extension。".into()) }
 }
 
 /// 立即再存一次。成不成都随快照带出去：成功清空横条，失败换上最新的原因。
@@ -1446,7 +1436,11 @@ async fn open_notification_settings() -> Result<(), String> {
         .arg("x-apple.systempreferences:com.apple.Notifications-Settings.extension")
         .status();
     #[cfg(target_os = "windows")]
-    let ok = Command::new("cmd").args(["/c", "start", "ms-settings:notifications"]).status();
+    let ok = {
+        use std::os::windows::process::CommandExt;
+        // CREATE_NO_WINDOW：GUI 程序起 cmd 会弹出一个黑色控制台窗口。
+        Command::new("cmd").args(["/c", "start", "ms-settings:notifications"]).creation_flags(0x0800_0000).status()
+    };
     #[cfg(not(any(target_os = "macos", target_os = "windows")))]
     let ok: std::io::Result<std::process::ExitStatus> = Err(std::io::Error::other("unsupported"));
     ok.map(|_| ()).map_err(|e| e.to_string())
@@ -1521,22 +1515,6 @@ fn check_blocking(app: AppHandle) -> Snapshot { unsupported_blocking_snapshot(&a
 #[cfg(mobile)]
 #[tauri::command]
 fn reapply_blocking(app: AppHandle) -> Snapshot { unsupported_blocking_snapshot(&app) }
-
-#[cfg(all(mobile, not(target_os = "android")))]
-#[tauri::command]
-async fn notification_status(_app: AppHandle) -> String { "unknown".into() }
-
-#[cfg(all(mobile, not(target_os = "android")))]
-#[tauri::command]
-async fn request_notification_permission(_app: AppHandle) -> Result<String, String> {
-    Err("移动端暂不支持请求通知权限。".into())
-}
-
-#[cfg(all(mobile, not(target_os = "android")))]
-#[tauri::command]
-async fn open_notification_settings() -> Result<(), String> {
-    Err("移动端暂不支持打开通知设置。".into())
-}
 
 #[cfg(target_os = "android")]
 #[tauri::command]
@@ -1957,11 +1935,8 @@ pub fn run() {
     #[cfg(desktop)]
     let builder = builder
         .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
-            // 第二个实例只负责把已有窗口叫出来。
-            if let Some(window) = app.get_webview_window("main") {
-                let _ = window.show();
-                let _ = window.set_focus();
-            }
+            // 第二个实例只负责把已有窗口叫出来（最小化的也还原）。
+            show_main_window(app);
         }))
         .plugin(
             tauri_plugin_window_state::Builder::default()
@@ -2267,6 +2242,9 @@ pub fn run() {
             match &event {
                 tauri::RunEvent::Ready => space_preview::install(app),
                 tauri::RunEvent::Exit => space_preview::uninstall(),
+                // 关窗只是隐藏。点 Dock 图标、从访达或 Spotlight 再打开时，系统只给运行中的进程发 reopen，
+                // 不会起第二个实例（single-instance 收不到），窗口得在这里叫回来。
+                tauri::RunEvent::Reopen { has_visible_windows: false, .. } => show_main_window(app),
                 _ => {}
             }
             // Dock 右键「退出」、AppleScript `quit`、注销都不走 `app-quit` 菜单项，
@@ -2364,6 +2342,19 @@ mod tests {
         assert_eq!(fs::read_to_string(&path).unwrap().trim(), original.trim());
         assert!(!dir.join(format!("hosts.staged.{}", std::process::id())).exists());
         assert_eq!(sync_hosts_file(&path, &[], false, |_| panic!("没有托管段时不能提权")), Ok(false));
+    }
+
+    #[test]
+    fn cleanup_of_an_originally_empty_hosts_file_writes_a_newline() {
+        let fixture = TestShared::new(core::State::new(1_000));
+        let path = fixture.0.data_dir.join("empty.hosts");
+        fs::write(&path, core::render_hosts("", &["live.bilibili.com".into()], true)).unwrap();
+        let result = sync_hosts_file(&path, &[], false, |content| fs::write(&path, content).map_err(|e| e.to_string()));
+        assert_eq!(result, Ok(false), "原文件为空时也要能解除，不能卡在「内容为空」");
+        assert_eq!(fs::read_to_string(&path).unwrap(), "\n");
+        assert_eq!(sync_hosts_file(&path, &[], false, |_| panic!("已经解除，不能再要授权")), Ok(false));
+        fs::write(&path, "").unwrap();
+        assert_eq!(sync_hosts_file(&path, &[], false, |_| panic!("空文件无事可做，不能要授权")), Ok(false));
     }
 
     #[test]
