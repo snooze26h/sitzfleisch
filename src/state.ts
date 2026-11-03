@@ -129,6 +129,11 @@ export const ui = {
   toast: null as { message: string } | null,
 };
 
+/** 保存与开始的快捷键提示：Mac 写 ⌘↩，Windows 上是 Ctrl+Enter。 */
+export function enterShortcut(): string {
+  return ui.platform?.os === "macos" ? "⌘↩" : "Ctrl+Enter";
+}
+
 export function hasFeature(feature: keyof PlatformInfo["features"]): boolean {
   return ui.platform?.features[feature] ?? false;
 }
@@ -195,10 +200,6 @@ export function shortName(id: string, d: Day | null = day()): string {
   const definition = def(id);
   if (definition?.short_name.trim()) return definition.short_name.trim();
   return shortNameFrom(nameOf(id, d));
-}
-
-export function roleOf(id: string): string {
-  return def(id)?.role ?? "general";
 }
 
 export function remainingOf(c: CategoryState): number {

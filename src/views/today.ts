@@ -25,6 +25,7 @@ import { blockMinutes, estimatedRemainingWallSeconds, remainingSeconds, suggest 
 import { appBlocking } from "../app-blocking";
 import { syncIndicator } from "./sync";
 import {
+  enterShortcut,
   BREAK_OPTIONS,
   breakRemaining,
   day,
@@ -240,7 +241,7 @@ function nextBlockPanel(d: Day): string {
   const controls = `<div class="controls-row">
       ${labelled("时长", minuteInput({ change: "minutes", value: minutes, min: MIN_BLOCK_MINUTES, max: MAX_BLOCK_MINUTES, label: "专注时长" }))}
       ${labelled("之后休息", select({ change: "break", value: brk, options: withValue(BREAK_OPTIONS, brk).map((n) => ({ value: n, label: n === 0 ? "不休息" : `${n} 分` })), width: 104, label: "休息时长" }))}
-      <span class="start">${btn("开始", { kind: "primary", cls: "lg", action: "start-block", title: "⌘↩" })}</span>
+      <span class="start">${btn("开始", { kind: "primary", cls: "lg", action: "start-block", title: enterShortcut() })}</span>
     </div>`;
   return `<div class="block-body">${pausedStrip}${suggestionLine}${categoryPicker(d, selected)}${controls}</div>`;
 }

@@ -18,6 +18,13 @@ const EMBER_INK = "#fff5e7";
 const CAUTION = "#c6a367";
 const BED = "#141411";
 
+/** 圆角 2 的块。Safari 16 之前的 WKWebView 没有 roundRect，退回直角，免得整页重绘抛错。 */
+function barPath(ctx: CanvasRenderingContext2D, x: number, y: number, w: number, h: number) {
+  ctx.beginPath();
+  if (ctx.roundRect) ctx.roundRect(x, y, w, h, 2);
+  else ctx.rect(x, y, w, h);
+}
+
 /** 刻度字跟着读数字体走（styles.css 的 --font-num，计算值里 var() 已展开）；启动时可能已退回等宽，所以每次现读。 */
 function numFont(px: number): string {
   const family = getComputedStyle(document.documentElement).getPropertyValue("--font-num").trim();
@@ -28,7 +35,7 @@ function numFont(px: number): string {
 const TRACK_H = 46;
 const AXIS_H = 22;
 const TOP_PAD = 12;
-export const DIAGRAM_H = TOP_PAD + TRACK_H + AXIS_H;
+const DIAGRAM_H = TOP_PAD + TRACK_H + AXIS_H;
 
 type Kind = "counted" | "dropped" | "live" | "held" | "rest";
 
@@ -190,14 +197,12 @@ export function drawDiagram(
       : b.kind === "dropped" ? BED
       : "rgba(231,223,208,0.8)";
     ctx.fillStyle = fill;
-    ctx.beginPath();
-    ctx.roundRect(x1, barTop, w, barH, 2);
+    barPath(ctx, x1, barTop, w, barH);
     ctx.fill();
     if (b.kind === "dropped") {
       ctx.strokeStyle = "rgba(231,223,208,0.42)";
       ctx.lineWidth = 1;
-      ctx.beginPath();
-      ctx.roundRect(crisp(x1), crisp(barTop), Math.round(w) - 1, Math.round(barH) - 1, 2);
+      barPath(ctx, crisp(x1), crisp(barTop), Math.round(w) - 1, Math.round(barH) - 1);
       ctx.stroke();
     }
     // 块窄到写不下就不写，绝不画半个字。

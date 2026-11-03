@@ -217,7 +217,7 @@ function ruleEditor(kind: "host" | "url"): string {
     : preview && "host" in preview ? `将屏蔽 ${preview.host} 和 www.${preview.host} 下的所有页面，包括收藏和视频。` : "");
   return `<div class="blocking-editor">
     <label class="blocking-input-label" for="blocked-${kind}-input">${exact ? "完整网址" : "网站域名"}</label>
-    <div class="host-add"><input id="blocked-${kind}-input" class="field md" data-input="${kind}" value="${esc(draft)}" aria-describedby="blocking-${kind}-help blocking-${kind}-preview" aria-invalid="${!!error}" placeholder="${exact ? "https://www.douyin.com/?recommend=1" : "douyin.com"}" autocomplete="off" spellcheck="false" />${btn(exact ? "添加精确网址" : "添加整站规则", { kind: "plate", action: `add-${kind}`, disabled: !preview || !!error || full || ui.pendingPrefs > 0 })}</div>
+    <div class="host-add"><input id="blocked-${kind}-input" class="field md" data-input="${kind}" value="${esc(draft)}" aria-describedby="${full ? `blocking-${kind}-help ` : ""}blocking-${kind}-preview" aria-invalid="${!!error}" placeholder="${exact ? "https://www.douyin.com/?recommend=1" : "douyin.com"}" autocomplete="off" spellcheck="false" />${btn(exact ? "添加精确网址" : "添加整站规则", { kind: "plate", action: `add-${kind}`, disabled: !preview || !!error || full || ui.pendingPrefs > 0 })}</div>
     <p class="blocking-note" id="blocking-${kind}-help" ${full ? "" : "hidden"}>已达到 ${MAX_BLOCK_RULES} 条上限，请先解除不需要的规则。</p>
     <p class="blocking-note${error ? " caution" : ""}" id="blocking-${kind}-preview" role="status" ${detail ? "" : "hidden"}>${esc(detail)}</p>
   </div>`;

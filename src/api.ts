@@ -1,3 +1,4 @@
+/// <reference types="vite/client" />
 // 与外壳的唯一通道。在 Tauri 里走 invoke / event；在普通浏览器里（开发与截图验收）
 // 换成 dev/mock 的内存实现，界面代码对此毫无感知。
 
@@ -11,6 +12,8 @@ export const inTauri = typeof window !== "undefined" && "__TAURI_INTERNALS__" in
 
 let mockModule: Promise<typeof import("./dev/mock")> | null = null;
 function mock() {
+  // 浏览器预览只在开发服务器里有：生产构建把这一支常量折叠掉，模拟数据不进安装包。
+  if (!import.meta.env.DEV) return Promise.reject(new Error("浏览器预览只在开发服务器（npm run dev）里可用。"));
   return (mockModule ??= import("./dev/mock"));
 }
 

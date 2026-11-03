@@ -8,6 +8,7 @@ import type { ActionTarget, Day, Preferences, Snapshot, View } from "./types";
 import { MAX_BLOCK_MINUTES, MIN_BLOCK_MINUTES, MAX_COMPLETION_NOTE_CHARS, SYSTEM_SETTINGS_TARGETS, type SystemSettingsTarget } from "./types";
 import { SHORT_NAME_WIDTH, dayLabel, displayWidth, duration, esc, nowUnix } from "./format";
 import {
+  enterShortcut,
   MAX_PROJECTS,
   QUIT_DIALOG_ID,
   day,
@@ -135,6 +136,7 @@ function render() {
       }
       // 用户输入只改 DOM 属性，HTML 仍可能相等；保存被拒时也要恢复权威值。
       if (from instanceof HTMLInputElement && to instanceof HTMLInputElement && (from.value !== to.value || from.checked !== to.checked)) return true;
+      if (from instanceof HTMLSelectElement && to instanceof HTMLSelectElement && from.value !== to.value) return true;
       // 说明折叠由浏览器原生交互控制，心跳重绘不能删掉用户刚打开的 open。
       // 只保留展开属性，内容变化仍交给 morphdom 更新。
       if (from instanceof HTMLDetailsElement && to instanceof HTMLDetailsElement && from.hasAttribute("data-preserve-open") && to.hasAttribute("data-preserve-open")) {
@@ -148,6 +150,11 @@ function render() {
           if (to.dataset.earth === undefined) delete from.dataset.earth;
           else from.dataset.earth = to.dataset.earth;
         }
+        if (from.className !== to.className) from.className = to.className;
+        return false;
+      }
+      // 时间轴画布由 drawDiagrams 按显示尺寸定像素宽高，属性交给 morphdom 会被抹掉、清空后再排一次版。
+      if (from instanceof HTMLCanvasElement && to instanceof HTMLCanvasElement && from.dataset.diagram !== undefined && from.dataset.diagram === to.dataset.diagram) {
         if (from.className !== to.className) from.className = to.className;
         return false;
       }
@@ -386,7 +393,7 @@ function ask(dialog: Omit<Dialog, "token">) {
 function focusDialog(dialog: Dialog) {
   if (!dialog.focus || !canAutoFocus()) return;
   if (dialog.focus === "input") {
-    app.querySelector<HTMLInputElement>("#extension-minutes")?.focus();
+    app.querySelector<HTMLInputElement>("#extension-minutes")?.select();
     return;
   }
   const action = dialog.focus === "confirm" ? "dialog-confirm" : "dialog-cancel";
@@ -491,7 +498,8 @@ function savePrefs(mutate: (p: Preferences) => void | string, message?: string):
   render();
   // 排队后再读取快照，连续编辑不同控件也不会用旧偏好覆盖刚保存的改动。
   const commit = preferencesQueue.then(async () => {
-    const next = structuredClone(prefs());
+    // 偏好是 IPC 来的纯 JSON；不用 structuredClone，较旧的 macOS WebView（Safari 15.4 之前）没有它，设置会存不进去。
+    const next: Preferences = JSON.parse(JSON.stringify(prefs()));
     const problem = mutate(next);
     if (typeof problem === "string") {
       toast(problem);
@@ -985,7 +993,7 @@ async function handleAction(action: string, el: HTMLElement) {
       await saveCompletion(false);
       break;
     case "completion-cancel":
-      await cancelCompletion();
+      await cancelCompletion(true);
       break;
     case "edit-completion": {
       const recordDay = [day(), ...history().map((a) => a.day)].find((x) => x && studyDayKey(x) === el.dataset.dayKey);
@@ -1074,6 +1082,8 @@ async function handleAction(action: string, el: HTMLElement) {
       break;
     case "jump-settings": {
       if (!settingsSections().some(([section]) => section === id)) break;
+      // 从今天页的同步入口直接跳进来时，也要读一次系统设置（开机自启、通知权限、版本号）。
+      if (ui.view !== "settings") void loadSettingsExtras();
       // 换分区＝换页：滚动条回顶，焦点落到新分区上，读屏也跟着走。
       ui.view = "settings";
       ui.settingsSection = id;
@@ -1245,8 +1255,10 @@ async function handleAction(action: string, el: HTMLElement) {
       render();
       break;
     case "notif-test":
-      await invoke("test_notification").catch((error) => toast(String(error)));
-      toast("已经发出去了。没看到系统横幅的话，去系统设置的「通知」里把坐功打开。", 9000);
+      try {
+        await invoke("test_notification");
+        toast("已经发出去了。没看到系统横幅的话，去系统设置的「通知」里把坐功打开。", 9000);
+      } catch (error) { toast(String(error)); }
       break;
     case "notif-open":
       await invoke("open_notification_settings").catch((error) => toast(String(error)));
@@ -1404,7 +1416,8 @@ async function saveCompletion(skip: boolean) {
   }
 }
 
-async function cancelCompletion() {
+/** explicit：点了「先跳过 / 取消」按钮。Esc 与安卓返回键可能只是误触（多按一下收键盘），写了的字不能就这么丢。 */
+async function cancelCompletion(explicit = false) {
   if (!ui.completion || ui.completion.busy) return;
   if (ui.completion.canDefer) {
     const editor = ui.completion;
@@ -1424,19 +1437,26 @@ async function cancelCompletion() {
     toast(editor.missing ? editor.draft ? "草稿已复制，可在新的记录中粘贴。" : "已关闭这条记录的编辑框。" : "草稿保留在本次打开的应用中，可从这条记录继续填写。");
     return;
   }
-  if (ui.completion.automatic) {
-    // 自动弹出的框按 Esc 等于「先跳过」；已经写了字的话不能就这么丢掉。
-    if (ui.completion.draft.trim()) {
-      toast(ui.platform?.mobile ? "点「保存记录」保存，或点「先跳过」。" : "按 ⌘↩ 保存这段记录，或点「先跳过」。");
-      return;
-    }
+  const editor = ui.completion;
+  const edited = editor.draft.trim() !== "" && editor.draft !== (editor.previousNote ?? "");
+  // 自动弹出的框没写字时，关掉就等于「先跳过」。
+  if (editor.automatic && !edited) {
     await saveCompletion(true);
+    return;
   }
-  else {
-    ui.completion = null;
-    render();
-    if (canAutoFocus() && !topOverlay()) app.querySelector<HTMLElement>("#content")?.focus({ preventScroll: true });
+  if (editor.automatic && !explicit) {
+    toast(ui.platform?.mobile ? "点「保存记录」保存，或点「先跳过」。" : `按 ${enterShortcut()} 保存这段记录，或点「先跳过」。`);
+    return;
   }
+  // 写了字却点了「先跳过」，或误触 Esc/返回键关掉手动打开的编辑框：草稿留在这条记录上，之后打开接着填。
+  // 手动编辑框点「取消」才是放弃改动。
+  if (edited && (editor.automatic || !explicit)) {
+    ui.completionDrafts.set(editor.draftKey, editor.draft);
+    toast("草稿保留在本次打开的应用中，可从这条记录继续填写。");
+  }
+  ui.completion = null;
+  render();
+  if (canAutoFocus() && !topOverlay()) app.querySelector<HTMLElement>("#content")?.focus({ preventScroll: true });
 }
 
 /** 改计划里的配额。学习日进行中的话今天也跟着改（进度与记录保留），不然设置里改了、今天页纹丝不动。 */
@@ -1643,9 +1663,6 @@ async function handleChange(key: string, el: HTMLInputElement | HTMLSelectElemen
       if (short !== before) await savePrefs((x) => { const c = x.categories.find((c) => c.id === id); if (c) c.short_name = short; });
       break;
     }
-    case "project-icon":
-      await savePrefs((x) => { const c = x.categories.find((c) => c.id === id); if (c) c.icon = value; });
-      break;
     default:
       break;
   }

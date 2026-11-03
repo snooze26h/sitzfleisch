@@ -14,22 +14,11 @@ export function attrs(data: Record<string, string | number | boolean | undefined
     .join("");
 }
 
-export function hair(cls = ""): string {
-  return `<div class="hair${cls ? ` ${cls}` : ""}"></div>`;
-}
-
 /** 分区只靠一行字名和一条细线分开，不再套板子。 */
 export function sectionLabel(title: string, opts: { note?: string; trailing?: string; cls?: string } = {}): string {
   return `<header class="section-head${opts.cls ? ` ${opts.cls}` : ""}">
     <h2 class="section-title">${esc(title)}</h2>${opts.note ? `<span class="section-note">${esc(opts.note)}</span>` : ""}${opts.trailing ? `<span class="trail">${opts.trailing}</span>` : ""}
   </header>`;
-}
-
-export function reading(label: string, value: string, opts: { trailing?: boolean } = {}): string {
-  return `<div class="reading${opts.trailing ? " trailing" : ""}">
-    <span class="engraved">${esc(label)}</span>
-    <span class="val">${esc(value)}</span>
-  </div>`;
 }
 
 export function bigReading(value: string, unit: string, opts: { tint?: "caution" | "muted" } = {}): string {
