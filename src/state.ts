@@ -76,6 +76,21 @@ export interface CompletionEditor {
   error: string;
 }
 
+const QUIET_NOTIFICATIONS_KEY = "sitzfleisch.quiet-notifications";
+
+/** 手机上选了「不用通知」：只存在这台设备的界面里，不进存档、不同步。存储不可用时按没选处理。 */
+function readQuietNotifications(): boolean {
+  try { return localStorage.getItem(QUIET_NOTIFICATIONS_KEY) === "1"; } catch { return false; }
+}
+
+export function setQuietNotifications(on: boolean) {
+  ui.quietNotifications = on;
+  try {
+    if (on) localStorage.setItem(QUIET_NOTIFICATIONS_KEY, "1");
+    else localStorage.removeItem(QUIET_NOTIFICATIONS_KEY);
+  } catch { /* 存不下时只在这次运行里生效 */ }
+}
+
 export const ui = {
   platform: null as PlatformInfo | null,
   compact: false,
@@ -107,6 +122,8 @@ export const ui = {
   urlDraft: "",
   notificationStatus: "checking",
   systemStatus: null as SystemStatus | null,
+  /** 手机保持安静：今天页不提示通知没开、提醒会迟到这类问题。 */
+  quietNotifications: readQuietNotifications(),
   systemStatusLoading: false,
   systemStatusError: "",
   startingDay: false,

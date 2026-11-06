@@ -366,6 +366,7 @@ function mobileNotificationPanel(): string {
   const open = (target: string, channel?: string) => btn("去设置", { kind: "plate", action: "system-settings", data: { target, ...(channel ? { channel } : {}) }, disabled: !hasFeature("system_settings") });
   const names = { timer: "计时", body: "身体提醒", water: "喝水", status: "进行中" };
   const rows: string[] = [];
+  rows.push(settingRow("不用通知", "开着时手机保持安静：今天页不再提示通知没开或提醒会迟到。系统里关掉通知后，到点不会弹出提醒。", toggle({ change: "quiet-notifications", checked: ui.quietNotifications, label: "不用通知" })));
   // 只有需要处理的项才给「去设置」，正常的项只写一句状态，免得一页全是按钮。
   rows.push(settingRow("通知权限", !s ? "尚未读取" : s.notificationsEnabled ? "已允许。" : "未开启；锁屏后到点不会提醒。", s && !s.notificationsEnabled ? open("app_notifications") : ""));
   // 渠道以系统里的开关和重要性为准。荣耀等系统会把新应用的提醒渠道降一级，那样到点仍会响，

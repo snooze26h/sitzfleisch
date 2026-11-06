@@ -121,18 +121,20 @@ function activeBoard(d: Day): string {
     ${d.ledger.length ? logBlock(d) : ""}`;
 }
 
-function warning(text: string, label: string, target: string, channel?: string): string {
-  return `<div class="notification-warning"><b>${esc(text)}</b>${btn(label, { kind: "plate", action: "system-settings", data: { target, ...(channel ? { channel } : {}) } })}</div>`;
+function warning(text: string, label: string, target: string, channel?: string, extra = ""): string {
+  return `<div class="notification-warning"><b>${esc(text)}</b>${btn(label, { kind: "plate", action: "system-settings", data: { target, ...(channel ? { channel } : {}) } })}${extra}</div>`;
 }
 
 /** 手机上提醒不能如期送达时，在今天页就说清楚，不让人锁屏后才发现没响。 */
 function reminderWarning(): string {
   const s = ui.platform?.mobile ? ui.systemStatus : null;
-  if (!s) return "";
-  if (!s.notificationsEnabled) return warning("通知未开启，锁屏后到点不会提醒", "去开启", "app_notifications");
+  // 选了「不用通知」就不再提：手机保持安静是用户自己的选择，可在 设置 → 提醒 里改回。
+  if (!s || ui.quietNotifications) return "";
+  const quiet = btn("不用通知", { kind: "quiet", action: "quiet-notifications" });
+  if (!s.notificationsEnabled) return warning("通知未开启，锁屏后到点不会提醒", "去开启", "app_notifications", undefined, quiet);
   // 「计时」渠道管一格走完和休息结束；它被关掉时，最要紧的提醒一条都不会响。
-  if (s.channels.some((c) => c.id === "timer" && !c.enabled)) return warning("计时提醒已关闭，到点不会提醒", "去设置", "channel", "timer");
-  if (!s.canScheduleExactAlarms) return warning("精确闹钟未允许，锁屏后的提醒可能晚到", "去设置", "exact_alarm");
+  if (s.channels.some((c) => c.id === "timer" && !c.enabled)) return warning("计时提醒已关闭，到点不会提醒", "去设置", "channel", "timer", quiet);
+  if (!s.canScheduleExactAlarms) return warning("精确闹钟未允许，锁屏后的提醒可能晚到", "去设置", "exact_alarm", undefined, quiet);
   return "";
 }
 
@@ -143,7 +145,7 @@ function reminderWarning(): string {
 function backgroundWarning(): string {
   const s = ui.platform?.mobile ? ui.systemStatus : null;
   const b = appBlocking(prefs());
-  const affected = [day() ? "提醒" : "", b.enabled && b.apps.length ? "屏蔽" : ""].filter(Boolean);
+  const affected = [day() && !ui.quietNotifications ? "提醒" : "", b.enabled && b.apps.length ? "屏蔽" : ""].filter(Boolean);
   if (!s?.backgroundRestricted || !affected.length) return "";
   return warning(`后台活动未允许，划掉坐功后${affected.join("和")}会失效`, "去设置", honorPhone() ? "startup" : "app_details");
 }

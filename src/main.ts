@@ -8,6 +8,7 @@ import type { ActionTarget, Day, Preferences, Snapshot, View } from "./types";
 import { MAX_BLOCK_MINUTES, MIN_BLOCK_MINUTES, MAX_COMPLETION_NOTE_CHARS, SYSTEM_SETTINGS_TARGETS, type SystemSettingsTarget } from "./types";
 import { SHORT_NAME_WIDTH, dayLabel, displayWidth, duration, esc, nowUnix } from "./format";
 import {
+  setQuietNotifications,
   blockMinutesOf,
   suggestion,
   enterShortcut,
@@ -996,6 +997,11 @@ async function handleAction(action: string, el: HTMLElement) {
     case "completion-cancel":
       await cancelCompletion(true);
       break;
+    case "quiet-notifications":
+      setQuietNotifications(true);
+      render();
+      toast("好的，不再提示通知。需要时可以在 设置 → 提醒 里改回。", 6000);
+      break;
     case "edit-completion": {
       const recordDay = [day(), ...history().map((a) => a.day)].find((x) => x && studyDayKey(x) === el.dataset.dayKey);
       const index = recordDay ? completionEntryIndex(recordDay, el.dataset.entryId || undefined, Number(el.dataset.index), Number(el.dataset.ended)) : -1;
@@ -1626,6 +1632,9 @@ async function handleChange(key: string, el: HTMLInputElement | HTMLSelectElemen
       break;
     case "sound":
       await savePrefs((x) => { x.sound_enabled = checked; });
+      break;
+    case "quiet-notifications":
+      setQuietNotifications(checked);
       break;
     case "autostart":
       try {
